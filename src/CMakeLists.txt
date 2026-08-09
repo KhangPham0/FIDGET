@@ -1,5 +1,6 @@
 add_executable(fidget
     main.cpp
+    ui/Fonts.cpp
     ui/Theme.cpp
 )
 

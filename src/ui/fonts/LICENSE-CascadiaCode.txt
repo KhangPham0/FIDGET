@@ -1,0 +1,4 @@
+Cascadia Code (Nerd Font variant) — (c) Microsoft Corporation, licensed
+under the SIL Open Font License 1.1 (OFL). Nerd Fonts glyph patches are
+MIT/OFL. Redistribution and embedding permitted.
+Source: https://github.com/microsoft/cascadia-code
