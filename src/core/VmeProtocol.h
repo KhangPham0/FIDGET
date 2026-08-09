@@ -50,7 +50,7 @@ inline constexpr std::uint8_t MvlcSyntaxErrorFlag = 1U << 2U;
 //
 // These limits and sequencing rules belong in the future transport wrapper.
 // They are documented here so the pure encoders cannot lose their operational
-// contract while socket code remains outside fidget_core.
+// contract while transport code remains outside fidget_core.
 
 struct MvlcVmeReadResult
 {
