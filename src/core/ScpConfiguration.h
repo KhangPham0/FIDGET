@@ -1,0 +1,58 @@
+#ifndef FIDGET_CORE_SCP_CONFIGURATION_H
+#define FIDGET_CORE_SCP_CONFIGURATION_H
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace fidget {
+
+inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
+inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
+inline constexpr std::size_t Fw2051ScpQuadCount = 8U;
+inline constexpr std::size_t Fw2051ScpBankedSettingCount = 17U;
+inline constexpr std::size_t Fw2051ScpConfigurationValueCount =
+    5U + Fw2051ScpQuadCount * Fw2051ScpBankedSettingCount;
+
+enum class ScpConfigurationState
+{
+    NotRun,
+    Reading,
+    Complete,
+    Failed,
+};
+
+struct Fw2051ScpQuadConfiguration
+{
+    std::uint16_t quad = 0;
+    std::uint16_t timingFilter = 0;
+    std::array<std::uint16_t, 4> poleZero{};
+    std::uint16_t gain = 0;
+    std::array<std::uint16_t, 4> thresholds{};
+    std::uint16_t shapingTime = 0;
+    std::uint16_t baselineRestorer = 0;
+    std::uint16_t resetTime = 0;
+    std::uint16_t signalRiseTime = 0;
+    std::uint16_t preSamples = 0;
+    std::uint16_t totalSamples = 0;
+    std::uint16_t sampleConfiguration = 0;
+};
+
+struct Fw2051ScpConfigurationSnapshot
+{
+    ScpConfigurationState state = ScpConfigurationState::NotRun;
+    std::string message = "No SCP configuration snapshot has been read";
+    std::uint32_t baseAddress = 0;
+    std::uint16_t hardwareId = 0;
+    std::uint16_t firmwareRevision = 0;
+    std::uint16_t irqLevel = 0;
+    std::uint16_t outputFormat = 0;
+    bool selectorParkedAtQuadZero = false;
+    std::vector<Fw2051ScpQuadConfiguration> quads;
+};
+
+} // namespace fidget
+
+#endif
