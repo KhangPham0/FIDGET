@@ -1,4 +1,7 @@
-add_executable(fidget main.cpp)
+add_executable(fidget
+    main.cpp
+    ui/Theme.cpp
+)
 
 # So sources can include project headers relative to src/, e.g. "ui/App.h".
 target_include_directories(fidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
