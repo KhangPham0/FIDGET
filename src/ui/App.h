@@ -1,0 +1,59 @@
+#ifndef FIDGET_UI_APP_H
+#define FIDGET_UI_APP_H
+
+#include <string>
+
+#include "ui/Fonts.h"
+#include "ui/Theme.h"
+
+struct GLFWwindow;
+
+namespace fidget {
+
+// The application shell: owns the window, the GUI contexts, the theme and
+// fonts, and runs the main loop.
+class App
+{
+public:
+    // Smoke test mode: render this many frames, then close. A negative
+    // count (the default) runs until the user closes the window.
+    void SetFrameLimit(long frames);
+
+    // Runs the application. Returns the process exit code.
+    int Run();
+
+private:
+    bool Init();
+    void DrawFrame();
+    void DrawStatusStrip(float height);
+    void DrawWorkflowPanel();
+    void DrawStagePanel();
+    void DrawActivityLogPanel();
+    void HandleShortcuts();
+    void ChangeFontScale(int direction);
+    void BuildDefaultLayout(unsigned int dockspaceId);
+    // Window geometry persistence: first run opens at a default size, later
+    // runs restore the size and place the window was left at.
+    void LoadWindowState(int& width, int& height, int& posX, int& posY);
+    void SaveWindowState();
+    void Shutdown();
+
+    GLFWwindow* m_window = nullptr;
+    Theme m_theme;
+    Fonts m_fonts;
+
+    long m_frameLimit = -1;
+
+    // True until the default panel layout has been applied. Only used when
+    // no saved layout (imgui.ini) exists.
+    bool m_needDefaultLayout = false;
+
+    // The layout file lives next to the executable: FIDGET keeps its files
+    // with itself instead of scattering them over the user's machine.
+    std::string m_layoutFilePath;
+    std::string m_windowStateFilePath;
+};
+
+} // namespace fidget
+
+#endif
