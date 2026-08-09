@@ -1,0 +1,8 @@
+MWW_CRATE_PROJECT 1
+MVLC "mvlc-test" 32768
+STREAM "stream-test" 42333
+MODULES 2
+MODULE "MDPP 1" 285212672 1 "mdpp1_scp_profile.mwwscp"
+MODULE "MDPP 2" 858980352 1 "mdpp2_scp_profile.mwwscp"
+CHECKSUM 18040925011589771195
+END
