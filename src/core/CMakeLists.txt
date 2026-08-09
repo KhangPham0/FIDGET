@@ -1,5 +1,6 @@
 add_library(fidget_core STATIC
     StreamDecoder.cpp
+    VmeProtocol.cpp
 )
 
 target_include_directories(fidget_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
