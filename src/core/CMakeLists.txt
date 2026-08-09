@@ -1,5 +1,6 @@
 add_library(fidget_core STATIC
     ReadoutProtocol.cpp
+    ScpProfile.cpp
     ScpRegistry.cpp
     StreamDecoder.cpp
     VmeProtocol.cpp

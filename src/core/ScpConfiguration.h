@@ -10,6 +10,7 @@
 namespace fidget {
 
 inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
+inline constexpr std::uint16_t Mdpp32AlternateHardwareId = 0x500CU;
 inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
 inline constexpr std::size_t Fw2051ScpQuadCount = 8U;
 inline constexpr std::size_t Fw2051ScpBankedSettingCount = 17U;

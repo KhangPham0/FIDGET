@@ -12,3 +12,11 @@ add_executable(scp_registry_tests scp_registry_tests.cpp)
 target_link_libraries(scp_registry_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME scp_registry_tests COMMAND scp_registry_tests)
+
+add_executable(scp_profile_tests scp_profile_tests.cpp)
+target_link_libraries(scp_profile_tests PRIVATE fidget_core doctest::doctest)
+target_compile_definitions(scp_profile_tests PRIVATE
+    FIDGET_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+
+add_test(NAME scp_profile_tests COMMAND scp_profile_tests)
