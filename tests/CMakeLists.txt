@@ -7,3 +7,8 @@ add_executable(readout_protocol_tests readout_protocol_tests.cpp)
 target_link_libraries(readout_protocol_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME readout_protocol_tests COMMAND readout_protocol_tests)
+
+add_executable(scp_registry_tests scp_registry_tests.cpp)
+target_link_libraries(scp_registry_tests PRIVATE fidget_core doctest::doctest)
+
+add_test(NAME scp_registry_tests COMMAND scp_registry_tests)
