@@ -6,6 +6,7 @@ add_library(fidget_core STATIC
     ScpProfile.cpp
     ScpRegistry.cpp
     ScpTransactionPlan.cpp
+    StartupAudit.cpp
     StreamDecoder.cpp
     TunerControl.cpp
     TunerSnapshot.cpp
