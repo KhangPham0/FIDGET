@@ -667,3 +667,34 @@ TEST_CASE("the startup audit requires an open ownership session")
           "settings.");
     CHECK(transport->SentRequests().empty());
 }
+
+TEST_CASE("the startup audit gate stops before its first VME transaction")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    QueueRead(*transport, DaqModeRegister, 4U, 0x000FU);
+    service.Submit(RunStartupAuditCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.startupAudit.state == StartupAuditState::Failed;
+    }));
+
+    const auto snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->ownership == GuidedTunerOwnershipState::OwnershipLost);
+    CHECK(snapshot->activeOperation == GuidedTunerOperation::None);
+    CHECK_FALSE(snapshot->startupAuditCompleteForTarget);
+    CHECK_FALSE(snapshot->startupAuditReady);
+    CHECK(snapshot->startupAudit.message ==
+          "A DAQ became active before running the startup audit. The tuner "
+          "released its command socket without touching the MDPP, DAQ mode, "
+          "or readout stacks.");
+    CHECK(transport->SentRequests().size() == 7U);
+    CheckOnlyReadRequests(*transport);
+}
