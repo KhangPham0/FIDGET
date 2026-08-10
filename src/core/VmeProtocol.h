@@ -36,22 +36,6 @@ inline constexpr std::uint8_t MvlcTimeoutFlag = 1U << 0U;
 inline constexpr std::uint8_t MvlcBusErrorFlag = 1U << 1U;
 inline constexpr std::uint8_t MvlcSyntaxErrorFlag = 1U << 2U;
 
-// Phase 6 transport policy carried forward from the hardware-proven
-// prototype:
-//
-// - Try a VME transaction at most three times.
-// - Search at most eight response datagrams for each upload or execution.
-// - Receive each command response into a 9000-byte datagram buffer.
-// - Each attempt consumes one stack reference and one upload super-reference.
-//   A successful upload then consumes one execution super-reference.
-// - Stop retrying after success, "VME bus error", or
-//   "VME device did not respond".
-// - Each local-register write transaction consumes one super-reference.
-//
-// These limits and sequencing rules belong in the future transport wrapper.
-// They are documented here so the pure encoders cannot lose their operational
-// contract while transport code remains outside fidget_core.
-
 struct MvlcVmeReadResult
 {
     bool success = false;

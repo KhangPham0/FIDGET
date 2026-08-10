@@ -2,6 +2,7 @@ find_package(Threads REQUIRED)
 
 add_library(fidget_hardware STATIC
     Transport.cpp
+    VmeTransaction.cpp
 )
 
 target_include_directories(fidget_hardware PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
