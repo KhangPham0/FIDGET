@@ -5,6 +5,7 @@ add_executable(fidget
     main.cpp
     ui/App.cpp
     ui/Fonts.cpp
+    ui/ProjectStage.cpp
     ui/Theme.cpp
     ui/WorkflowRail.cpp
 )

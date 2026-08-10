@@ -3,6 +3,7 @@
 
 #include "core/TunerControl.h"
 #include "ui/Fonts.h"
+#include "ui/ProjectStage.h"
 #include "ui/Theme.h"
 
 #include <string>
@@ -45,6 +46,7 @@ private:
     ITunerControl& m_tunerControl;
     Theme m_theme;
     Fonts m_fonts;
+    ProjectStage m_projectStage;
 
     long m_frameLimit = -1;
 

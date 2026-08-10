@@ -277,6 +277,18 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
         m_theme.highlight, "%s", GuidedTunerStageName(decision.stage));
     ImGui::Separator();
     ImGui::TextWrapped("%s", GuidedTunerStageMessage(decision.stage));
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (decision.step == 1U)
+    {
+        m_projectStage.Draw(m_tunerControl, snapshot, m_theme);
+    }
+    else
+    {
+        ImGui::TextDisabled(
+            "This stage screen is not implemented in the current phase.");
+    }
     ImGui::End();
 }
 
