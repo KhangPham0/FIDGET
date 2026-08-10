@@ -21,6 +21,10 @@ endif()
 # So editors and clang tooling can find the vendored headers.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# OFF builds only the core, hardware, CLI, and test targets. This lets the
+# DAQ hosts build fidget_cli without X11 or OpenGL development packages.
+option(FIDGET_BUILD_GUI "Build the desktop application" ON)
+
 add_subdirectory(vendor)
 add_subdirectory(src)
 

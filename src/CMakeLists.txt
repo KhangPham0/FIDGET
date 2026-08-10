@@ -2,6 +2,10 @@ add_subdirectory(core)
 add_subdirectory(hardware)
 add_subdirectory(cli)
 
+if(NOT FIDGET_BUILD_GUI)
+    return()
+endif()
+
 add_executable(fidget
     main.cpp
     ui/App.cpp
