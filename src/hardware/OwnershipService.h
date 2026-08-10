@@ -60,6 +60,7 @@ private:
     void CheckStatus();
     void SetHandoffConfirmed(bool confirmed);
     void OpenSession();
+    void RunStartupAudit();
     void ReleaseSession();
     void ProbeController(TunerSnapshot snapshot, bool retainSession);
 
@@ -91,6 +92,8 @@ private:
     std::size_t activeModuleIndex_ = 0U;
     std::uint16_t nextReadReference_ = 1U;
     std::uint16_t nextWatchdogReference_ = 0x7000U;
+    std::uint16_t nextAuditSuperReference_ = 0x1600U;
+    std::uint32_t nextAuditStackReference_ = 0x9C080001U;
     bool watchdogCommunicationUncertain_ = false;
     const std::chrono::milliseconds watchdogInterval_;
     std::atomic<bool> serviceStopRequested_{false};

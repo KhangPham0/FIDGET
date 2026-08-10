@@ -39,12 +39,17 @@ struct ReleaseSessionCommand
 {
 };
 
+struct RunStartupAuditCommand
+{
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
     CheckStatusCommand,
     SetMvmeHandoffConfirmedCommand,
     OpenSessionCommand,
+    RunStartupAuditCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl

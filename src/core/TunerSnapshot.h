@@ -3,6 +3,7 @@
 
 #include "core/CrateProject.h"
 #include "core/GuidedWorkflow.h"
+#include "core/StartupAudit.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +54,7 @@ struct TunerSnapshot
     bool profileLoadedForTarget = false;
     bool startupAuditCompleteForTarget = false;
     bool startupAuditReady = false;
+    StartupAuditResult startupAudit;
     bool configurationCompleteForTarget = false;
     bool configurationFresh = false;
     bool profileMatchesExactly = false;

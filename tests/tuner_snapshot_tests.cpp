@@ -58,6 +58,9 @@ TEST_CASE("ownership commands remain explicit semantic types")
     REQUIRE(std::holds_alternative<SetMvmeHandoffConfirmedCommand>(command));
     CHECK(std::get<SetMvmeHandoffConfirmedCommand>(command).confirmed);
 
+    command = RunStartupAuditCommand{};
+    CHECK(std::holds_alternative<RunStartupAuditCommand>(command));
+
     UseCrateProjectCommand useProject;
     useProject.project.mvlcHost = "mvlc-test";
     command = useProject;

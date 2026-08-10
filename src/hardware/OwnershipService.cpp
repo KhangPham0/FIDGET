@@ -1,10 +1,13 @@
 #include "hardware/OwnershipService.h"
 
 #include "core/CrateProject.h"
+#include "core/StartupAudit.h"
 #include "core/VmeProtocol.h"
+#include "hardware/VmeTransaction.h"
 
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <exception>
 #include <system_error>
 #include <utility>
@@ -120,6 +123,11 @@ void OwnershipService::Submit(TunerCommand command)
             StopWatchdog();
         }
         (void)worker_.Post([this] { OpenSession(); });
+        return;
+    }
+    if (std::holds_alternative<RunStartupAuditCommand>(command))
+    {
+        (void)worker_.Post([this] { RunStartupAudit(); });
         return;
     }
 
@@ -289,6 +297,9 @@ void OwnershipService::OpenSession()
     }
 
     snapshot.ownership = GuidedTunerOwnershipState::Checking;
+    snapshot.startupAuditCompleteForTarget = false;
+    snapshot.startupAuditReady = false;
+    snapshot.startupAudit = {};
     PublishStatus(
         snapshot,
         TunerStatusLevel::Information,
@@ -424,10 +435,165 @@ void OwnershipService::ReleaseSession()
     snapshot.mvlcFirmwareRevision = 0U;
     snapshot.mvlcDaqMode = 0U;
     snapshot.mvmeHandoffConfirmed = false;
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.startupAuditCompleteForTarget = false;
+    snapshot.startupAuditReady = false;
+    snapshot.startupAudit = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
         DisconnectedMessage);
+}
+
+void OwnershipService::RunStartupAudit()
+{
+    auto snapshot = *CurrentSnapshot();
+    const std::uint32_t baseAddress = snapshot.activeModuleBaseAddress;
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        StartupAuditResult audit;
+        audit.state = StartupAuditState::Failed;
+        audit.baseAddress = baseAddress;
+        audit.message =
+            "Open a tuner session before auditing module-wide startup "
+            "settings.";
+        snapshot.startupAudit = std::move(audit);
+        snapshot.startupAuditCompleteForTarget = false;
+        snapshot.startupAuditReady = false;
+        snapshot.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before auditing module-wide startup "
+            "settings.");
+        return;
+    }
+    if (!snapshot.targetSupported)
+    {
+        StartupAuditResult audit;
+        audit.state = StartupAuditState::Failed;
+        audit.baseAddress = baseAddress;
+        audit.message =
+            "The selected module backend is not implemented for startup "
+            "auditing.";
+        snapshot.startupAudit = std::move(audit);
+        snapshot.startupAuditCompleteForTarget = false;
+        snapshot.startupAuditReady = false;
+        snapshot.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The selected module backend is not implemented for startup "
+            "auditing.");
+        return;
+    }
+
+    StartupAuditResult audit;
+    audit.state = StartupAuditState::Reading;
+    audit.baseAddress = baseAddress;
+    audit.message =
+        "Reading module-wide startup settings without issuing a VME "
+        "write...";
+    audit.vmeWritesIssued = false;
+    audit.rows.reserve(Fw2051StartupAuditRegisterCount);
+    snapshot.startupAudit = audit;
+    snapshot.startupAuditCompleteForTarget = false;
+    snapshot.startupAuditReady = false;
+    snapshot.activeOperation = GuidedTunerOperation::Audit;
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        audit.message);
+
+    const auto gate = CheckPreWriteGate("running the startup audit");
+    if (!gate.allowed)
+    {
+        snapshot = *CurrentSnapshot();
+        audit.state = StartupAuditState::Failed;
+        audit.message = gate.message;
+        snapshot.startupAudit = std::move(audit);
+        snapshot.startupAuditCompleteForTarget = false;
+        snapshot.startupAuditReady = false;
+        snapshot.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            gate.message);
+        return;
+    }
+
+    nextAuditSuperReference_ = 0x1600U;
+    nextAuditStackReference_ = 0x9C080001U;
+    std::array<std::uint16_t, Fw2051StartupAuditRegisterCount> values{};
+    std::string failure;
+
+    for (std::size_t index = 0U;
+         index < Fw2051StartupAuditRegisterTable.size(); ++index)
+    {
+        const auto& definition = Fw2051StartupAuditRegisterTable[index];
+        const auto read = ReadVmeD16(
+            *transport_,
+            baseAddress + definition.registerOffset,
+            nextAuditSuperReference_,
+            nextAuditStackReference_,
+            serviceStopRequested_);
+        if (!read.success)
+        {
+            char registerText[16]{};
+            std::snprintf(
+                registerText,
+                sizeof(registerText),
+                "%04X",
+                static_cast<unsigned>(definition.registerOffset));
+            failure =
+                std::string("Could not read ") + definition.name +
+                " at register 0x" + registerText + ": " + read.error;
+            break;
+        }
+
+        values[index] = read.value;
+        audit.rows.push_back(StartupAuditRow{
+            definition.registerOffset,
+            definition.name,
+            definition.group,
+            read.value,
+            definition.role,
+            StartupAuditAssessment::Inherited,
+            {}});
+    }
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    if (!failure.empty())
+    {
+        audit.state = StartupAuditState::Failed;
+        audit.message = std::move(failure);
+        audit.registersRead = audit.rows.size();
+        snapshot.startupAudit = std::move(audit);
+        snapshot.startupAuditCompleteForTarget = false;
+        snapshot.startupAuditReady = false;
+        const std::string message = snapshot.startupAudit.message;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            message);
+        return;
+    }
+
+    audit = ClassifyFw2051StartupAudit(baseAddress, values);
+    snapshot.startupAudit = audit;
+    snapshot.startupAuditCompleteForTarget =
+        audit.state == StartupAuditState::Complete &&
+        audit.baseAddress == snapshot.activeModuleBaseAddress;
+    snapshot.startupAuditReady =
+        snapshot.startupAuditCompleteForTarget &&
+        audit.readyForDiagnosticStart;
+    PublishStatus(
+        std::move(snapshot),
+        audit.readyForDiagnosticStart
+            ? TunerStatusLevel::Success
+            : TunerStatusLevel::Warning,
+        audit.message);
 }
 
 OwnershipService::LocalReadResult OwnershipService::ReadLocalRegister(
@@ -644,6 +810,10 @@ void OwnershipService::DetachForForeignDaq(
     auto snapshot = *CurrentSnapshot();
     snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
     snapshot.mvlcDaqMode = daqMode;
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.startupAuditCompleteForTarget = false;
+    snapshot.startupAuditReady = false;
+    snapshot.startupAudit = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,
