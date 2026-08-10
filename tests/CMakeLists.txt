@@ -49,3 +49,11 @@ target_link_libraries(recovery_journal_tests PRIVATE
 )
 
 add_test(NAME recovery_journal_tests COMMAND recovery_journal_tests)
+
+add_executable(transport_interface_tests transport_interface_tests.cpp)
+target_link_libraries(transport_interface_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME transport_interface_tests COMMAND transport_interface_tests)
