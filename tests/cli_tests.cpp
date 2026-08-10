@@ -63,12 +63,33 @@ public:
                 {},
             }};
         }
+        else if (const auto* handoff =
+                     std::get_if<fidget::SetMvmeHandoffConfirmedCommand>(
+                         &command))
+        {
+            ++handoffCommands;
+            next.mvmeHandoffConfirmed = handoff->confirmed;
+        }
+        else if (std::holds_alternative<fidget::OpenSessionCommand>(command))
+        {
+            ++openCommands;
+            next.ownership = fidget::GuidedTunerOwnershipState::SessionOpen;
+        }
+        else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
+        {
+            ++releaseCommands;
+            next.ownership = fidget::GuidedTunerOwnershipState::Disconnected;
+            next.mvmeHandoffConfirmed = false;
+        }
         snapshot_ = std::make_shared<const fidget::TunerSnapshot>(
             std::move(next));
     }
 
     int projectCommands = 0;
     int statusCommands = 0;
+    int handoffCommands = 0;
+    int openCommands = 0;
+    int releaseCommands = 0;
 
 private:
     std::shared_ptr<const fidget::TunerSnapshot> snapshot_;
@@ -90,6 +111,14 @@ TEST_CASE("CLI options accept project and host status forms")
         REQUIRE(parsed.options.port);
         CHECK(*parsed.options.port == 32769U);
         CHECK(parsed.options.moduleIndex == 1U);
+    }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "session", "--host", "mvlc-test",
+        };
+        const auto parsed = fidget::ParseCliOptions(4, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Session);
     }
     {
         const char* arguments[] = {
@@ -174,4 +203,141 @@ TEST_CASE("status honors SIGINT only after the command completes")
     CHECK(exitCode == 130);
     CHECK(control.statusCommands == 1);
     CHECK(output.str().find("ownership: idle\n") != std::string::npos);
+}
+
+TEST_CASE("session defaults to no when confirmation input is closed")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Session;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliSession(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.statusCommands == 1);
+    CHECK(control.handoffCommands == 0);
+    CHECK(control.openCommands == 0);
+    CHECK(control.releaseCommands == 0);
+    CHECK(output.str().find("session: not opened\n")
+          != std::string::npos);
+}
+
+TEST_CASE("session prints watchdog state and releases on Enter")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Session;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+    int waits = 0;
+
+    const int exitCode = fidget::RunCliSession(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [&waits] {
+            ++waits;
+            return waits == 1
+                ? fidget::CliSessionWaitResult::OneSecondElapsed
+                : fidget::CliSessionWaitResult::InputReady;
+        });
+
+    CHECK(exitCode == 0);
+    CHECK(control.handoffCommands == 1);
+    CHECK(control.openCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find(
+              "watchdog: ownership=session-open daq_mode=0x00000000\n")
+          != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("session releases after EOF while monitoring")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Session;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliSession(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.openCommands == 1);
+    CHECK(control.releaseCommands == 1);
+}
+
+TEST_CASE("SIGINT after open is honored only after release")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Session;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliSession(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.openCommands > 0; },
+        [] { return fidget::CliSessionWaitResult::OneSecondElapsed; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.openCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("SIGINT during release is reported after release completes")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Session;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliSession(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.releaseCommands > 0; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.openCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
 }

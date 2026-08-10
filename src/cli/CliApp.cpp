@@ -5,6 +5,7 @@
 #include <charconv>
 #include <chrono>
 #include <iomanip>
+#include <istream>
 #include <limits>
 #include <ostream>
 #include <string_view>
@@ -159,6 +160,45 @@ bool ResolveProject(
     return true;
 }
 
+bool HandoffConfirmedByUser(std::string response)
+{
+    const auto first = response.find_first_not_of(" \t\r");
+    if (first == std::string::npos)
+    {
+        return false;
+    }
+    const auto last = response.find_last_not_of(" \t\r");
+    response = response.substr(first, last - first + 1U);
+    for (char& character : response)
+    {
+        if (character >= 'A' && character <= 'Z')
+        {
+            character = static_cast<char>(character - 'A' + 'a');
+        }
+    }
+    return response == "y" || response == "yes";
+}
+
+bool ReleaseSession(
+    ITunerControl& tunerControl,
+    std::ostream& errorOutput)
+{
+    const auto beforeRelease = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(ReleaseSessionCommand{});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeRelease,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.ownership
+                    == GuidedTunerOwnershipState::Disconnected;
+            }))
+    {
+        errorOutput << "error: session release timed out\n";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 const char* FidgetCliUsage() noexcept
@@ -166,6 +206,7 @@ const char* FidgetCliUsage() noexcept
     return
         "Usage:\n"
         "  fidget_cli status (--project FILE | --host HOST) [options]\n"
+        "  fidget_cli session (--project FILE | --host HOST) [options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -193,7 +234,15 @@ CliOptionsParseResult ParseCliOptions(
         result.options.showHelp = true;
         return result;
     }
-    if (command != "status")
+    if (command == "status")
+    {
+        result.options.command = CliCommand::Status;
+    }
+    else if (command == "session")
+    {
+        result.options.command = CliCommand::Session;
+    }
+    else
     {
         result.error = "unknown command '" + std::string(command) + "'";
         return result;
@@ -263,7 +312,8 @@ CliOptionsParseResult ParseCliOptions(
     if (result.options.projectPath.empty() && result.options.host.empty()
         && !result.options.showHelp)
     {
-        result.error = "status requires --project FILE or --host HOST";
+        result.error = std::string(command)
+            + " requires --project FILE or --host HOST";
         return result;
     }
 
@@ -333,6 +383,135 @@ int RunCliStatus(
         return 130;
     }
     return snapshot->ownership == GuidedTunerOwnershipState::Idle ? 0 : 1;
+}
+
+int RunCliSession(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested,
+    const CliWaitForSessionInput& waitForInput)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    output << "I stopped the MVME run and completely quit MVME [y/N]: "
+           << std::flush;
+    std::string confirmation;
+    if (!std::getline(input, confirmation)
+        || !HandoffConfirmedByUser(std::move(confirmation)))
+    {
+        output << "session: not opened\n";
+        return interruptRequested && interruptRequested() ? 130 : 1;
+    }
+
+    const auto beforeConfirmation =
+        tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(SetMvmeHandoffConfirmedCommand{true});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeConfirmation,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.mvmeHandoffConfirmed;
+            }))
+    {
+        errorOutput << "error: handoff confirmation timed out\n";
+        return 1;
+    }
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const auto beforeOpen = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(OpenSessionCommand{});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeOpen,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.ownership
+                    != GuidedTunerOwnershipState::Checking;
+            }))
+    {
+        errorOutput << "error: session open timed out\n";
+        return 1;
+    }
+
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        errorOutput << "error: session open failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+
+    output << "session: open\n" << std::flush;
+    bool sessionFailed = false;
+    while (!(interruptRequested && interruptRequested()))
+    {
+        const auto waitResult = waitForInput();
+        if (waitResult == CliSessionWaitResult::Interrupted)
+        {
+            if (interruptRequested && interruptRequested())
+            {
+                break;
+            }
+            continue;
+        }
+        if (waitResult == CliSessionWaitResult::Error)
+        {
+            errorOutput << "error: waiting for terminal input failed\n";
+            sessionFailed = true;
+            break;
+        }
+        if (waitResult == CliSessionWaitResult::InputReady)
+        {
+            std::string ignored;
+            (void)std::getline(input, ignored);
+            break;
+        }
+
+        snapshot = tunerControl.CurrentSnapshot();
+        output << "watchdog: ownership="
+               << OwnershipClassification(snapshot->ownership)
+               << " daq_mode=0x"
+               << std::uppercase << std::hex << std::setw(8)
+               << std::setfill('0') << snapshot->mvlcDaqMode
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << '\n' << std::flush;
+        if (snapshot->ownership
+            != GuidedTunerOwnershipState::SessionOpen)
+        {
+            sessionFailed = true;
+            break;
+        }
+    }
+
+    const bool interrupted = interruptRequested && interruptRequested();
+    if (!ReleaseSession(tunerControl, errorOutput))
+    {
+        return 1;
+    }
+    output << "session: released\n";
+    if (interrupted || (interruptRequested && interruptRequested()))
+    {
+        return 130;
+    }
+    return sessionFailed ? 1 : 0;
 }
 
 } // namespace fidget

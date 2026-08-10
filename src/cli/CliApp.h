@@ -15,6 +15,15 @@ namespace fidget {
 enum class CliCommand
 {
     Status,
+    Session,
+};
+
+enum class CliSessionWaitResult
+{
+    OneSecondElapsed,
+    InputReady,
+    Interrupted,
+    Error,
 };
 
 struct CliOptions
@@ -35,6 +44,7 @@ struct CliOptionsParseResult
 };
 
 using CliInterruptRequested = std::function<bool()>;
+using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
 
 [[nodiscard]] const char* FidgetCliUsage() noexcept;
 [[nodiscard]] CliOptionsParseResult ParseCliOptions(
@@ -47,6 +57,15 @@ using CliInterruptRequested = std::function<bool()>;
     std::ostream& output,
     std::ostream& errorOutput,
     const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliSession(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested,
+    const CliWaitForSessionInput& waitForInput);
 
 } // namespace fidget
 

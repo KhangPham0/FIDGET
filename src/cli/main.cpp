@@ -4,8 +4,11 @@
 #include "hardware/OwnershipService.h"
 
 #include <csignal>
+#include <cerrno>
 #include <iostream>
 #include <memory>
+#include <poll.h>
+#include <unistd.h>
 
 namespace {
 
@@ -14,6 +17,29 @@ volatile std::sig_atomic_t InterruptRequested = 0;
 void HandleInterrupt(int)
 {
     InterruptRequested = 1;
+}
+
+fidget::CliSessionWaitResult WaitForSessionInput()
+{
+    pollfd input{};
+    input.fd = STDIN_FILENO;
+    input.events = POLLIN | POLLHUP;
+    const int result = ::poll(&input, 1U, 1000);
+    if (result == 0)
+    {
+        return fidget::CliSessionWaitResult::OneSecondElapsed;
+    }
+    if (result < 0)
+    {
+        return errno == EINTR
+            ? fidget::CliSessionWaitResult::Interrupted
+            : fidget::CliSessionWaitResult::Error;
+    }
+    if ((input.revents & (POLLIN | POLLHUP)) != 0)
+    {
+        return fidget::CliSessionWaitResult::InputReady;
+    }
+    return fidget::CliSessionWaitResult::Error;
 }
 
 } // namespace
@@ -36,10 +62,22 @@ int main(int argc, char** argv)
     std::signal(SIGINT, HandleInterrupt);
     auto transport = std::make_unique<fidget::MvlcCommandTransport>();
     fidget::OwnershipService tunerControl(std::move(transport));
-    return fidget::RunCliStatus(
+    const auto interrupted = [] { return InterruptRequested != 0; };
+    if (parsed.options.command == fidget::CliCommand::Status)
+    {
+        return fidget::RunCliStatus(
+            parsed.options,
+            tunerControl,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
+    return fidget::RunCliSession(
         parsed.options,
         tunerControl,
+        std::cin,
         std::cout,
         std::cerr,
-        [] { return InterruptRequested != 0; });
+        interrupted,
+        WaitForSessionInput);
 }
