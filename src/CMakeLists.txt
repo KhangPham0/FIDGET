@@ -21,7 +21,12 @@ target_include_directories(fidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(OpenGL REQUIRED)
 
 # implot links imgui publicly, so imgui and glfw come with it.
-target_link_libraries(fidget PRIVATE fidget_hardware implot OpenGL::GL)
+target_link_libraries(fidget PRIVATE
+    fidget_hardware
+    implot
+    OpenGL::GL
+    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
+)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(fidget PRIVATE -Wall -Wextra -Wpedantic)

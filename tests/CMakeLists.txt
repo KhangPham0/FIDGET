@@ -46,6 +46,7 @@ add_executable(recovery_journal_tests recovery_journal_tests.cpp)
 target_link_libraries(recovery_journal_tests PRIVATE
     fidget_core
     doctest::doctest
+    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 add_test(NAME recovery_journal_tests COMMAND recovery_journal_tests)
