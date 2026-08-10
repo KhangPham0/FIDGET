@@ -76,3 +76,11 @@ add_test(
     NAME mvlc_command_transport_tests
     COMMAND mvlc_command_transport_tests
 )
+
+add_executable(mvlc_data_receiver_tests mvlc_data_receiver_tests.cpp)
+target_link_libraries(mvlc_data_receiver_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME mvlc_data_receiver_tests COMMAND mvlc_data_receiver_tests)
