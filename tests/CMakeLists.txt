@@ -92,3 +92,11 @@ target_link_libraries(command_worker_tests PRIVATE
 )
 
 add_test(NAME command_worker_tests COMMAND command_worker_tests)
+
+add_executable(tuner_snapshot_tests tuner_snapshot_tests.cpp)
+target_link_libraries(tuner_snapshot_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME tuner_snapshot_tests COMMAND tuner_snapshot_tests)
