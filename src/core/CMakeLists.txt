@@ -1,5 +1,6 @@
 add_library(fidget_core STATIC
     CrateProject.cpp
+    GuidedWorkflow.cpp
     ReadoutProtocol.cpp
     ScpProfile.cpp
     ScpRegistry.cpp

@@ -28,3 +28,8 @@ target_compile_definitions(crate_project_tests PRIVATE
 )
 
 add_test(NAME crate_project_tests COMMAND crate_project_tests)
+
+add_executable(guided_workflow_tests guided_workflow_tests.cpp)
+target_link_libraries(guided_workflow_tests PRIVATE fidget_core doctest::doctest)
+
+add_test(NAME guided_workflow_tests COMMAND guided_workflow_tests)
