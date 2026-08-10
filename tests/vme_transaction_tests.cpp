@@ -67,6 +67,13 @@ std::vector<std::uint32_t> MakeWriteStackFrame(
     };
 }
 
+std::vector<std::uint32_t> MakeStackErrorFrame()
+{
+    return {
+        static_cast<std::uint32_t>(fidget::MvlcStackErrorFrameType) << 24U,
+    };
+}
+
 std::vector<std::byte> MakeUploadRequest(
     std::uint16_t superReference,
     std::uint32_t stackReference,
@@ -308,6 +315,192 @@ TEST_CASE("VME bus errors and missing devices do not retry")
 
     runTerminalFailure(MvlcBusErrorFlag, "VME bus error");
     runTerminalFailure(MvlcTimeoutFlag, "VME device did not respond");
+}
+
+TEST_CASE("a rejected stack upload retries all three attempts")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Address = 0x11006004U;
+    FakeCommandTransport transport;
+    Open(transport);
+    for (std::uint16_t attempt = 0U;
+         attempt < MvlcTransactionAttemptCount;
+         ++attempt)
+    {
+        const std::uint16_t reference = 100U + attempt;
+        transport.QueueExchange({
+            MakeUploadRequest(reference, 1000U + attempt, Address),
+            {FakeReceiveAction::Datagram(MakeCommandPacket({
+                MakeSuperFrame(reference, MvlcSyntaxErrorFlag),
+            }))},
+        });
+    }
+
+    std::uint16_t nextSuperReference = 100U;
+    std::uint32_t nextStackReference = 1000U;
+    const std::atomic<bool> cancelled{false};
+    const auto result = ReadVmeD16(
+        transport,
+        Address,
+        nextSuperReference,
+        nextStackReference,
+        cancelled);
+
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "MVLC rejected the transient VME stack");
+    CHECK(transport.SentRequests().size() == 3U);
+    CHECK(nextSuperReference == 103U);
+    CHECK(nextStackReference == 1003U);
+}
+
+TEST_CASE("a rejected execute command retries all three attempts")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Address = 0x11006004U;
+    FakeCommandTransport transport;
+    Open(transport);
+    for (std::uint16_t attempt = 0U;
+         attempt < MvlcTransactionAttemptCount;
+         ++attempt)
+    {
+        const std::uint16_t uploadReference =
+            static_cast<std::uint16_t>(200U + attempt * 2U);
+        const std::uint16_t executeReference = uploadReference + 1U;
+        const std::uint32_t stackReference = 2000U + attempt;
+        transport.QueueExchange({
+            MakeUploadRequest(uploadReference, stackReference, Address),
+            {FakeReceiveAction::Datagram(
+                MakeCommandPacket({MakeSuperFrame(uploadReference)}))},
+        });
+        transport.QueueExchange({
+            MakeExecuteRequest(executeReference),
+            {FakeReceiveAction::Datagram(MakeCommandPacket({
+                MakeSuperFrame(
+                    executeReference, MvlcSyntaxErrorFlag),
+            }))},
+        });
+    }
+
+    std::uint16_t nextSuperReference = 200U;
+    std::uint32_t nextStackReference = 2000U;
+    const std::atomic<bool> cancelled{false};
+    const auto result = ReadVmeD16(
+        transport,
+        Address,
+        nextSuperReference,
+        nextStackReference,
+        cancelled);
+
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "MVLC rejected the immediate-stack trigger");
+    CHECK(transport.SentRequests().size() == 6U);
+    CHECK(nextSuperReference == 206U);
+    CHECK(nextStackReference == 2003U);
+}
+
+TEST_CASE("an F7 stack error retries all three attempts")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Address = 0x11006004U;
+    FakeCommandTransport transport;
+    Open(transport);
+    for (std::uint16_t attempt = 0U;
+         attempt < MvlcTransactionAttemptCount;
+         ++attempt)
+    {
+        const std::uint16_t uploadReference =
+            static_cast<std::uint16_t>(300U + attempt * 2U);
+        const std::uint16_t executeReference = uploadReference + 1U;
+        const std::uint32_t stackReference = 3000U + attempt;
+        transport.QueueExchange({
+            MakeUploadRequest(uploadReference, stackReference, Address),
+            {FakeReceiveAction::Datagram(
+                MakeCommandPacket({MakeSuperFrame(uploadReference)}))},
+        });
+        transport.QueueExchange({
+            MakeExecuteRequest(executeReference),
+            {FakeReceiveAction::Datagram(MakeCommandPacket({
+                MakeSuperFrame(executeReference),
+                MakeStackErrorFrame(),
+            }))},
+        });
+    }
+
+    std::uint16_t nextSuperReference = 300U;
+    std::uint32_t nextStackReference = 3000U;
+    const std::atomic<bool> cancelled{false};
+    const auto result = ReadVmeD16(
+        transport,
+        Address,
+        nextSuperReference,
+        nextStackReference,
+        cancelled);
+
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "MVLC reported a command-stack error");
+    CHECK(transport.SentRequests().size() == 6U);
+    CHECK(nextSuperReference == 306U);
+    CHECK(nextStackReference == 3003U);
+}
+
+TEST_CASE("an incomplete execute scan retries and retains its error")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Address = 0x11006004U;
+    FakeCommandTransport transport;
+    Open(transport);
+    for (std::uint16_t attempt = 0U;
+         attempt < MvlcTransactionAttemptCount;
+         ++attempt)
+    {
+        const std::uint16_t uploadReference =
+            static_cast<std::uint16_t>(400U + attempt * 2U);
+        const std::uint16_t executeReference = uploadReference + 1U;
+        const std::uint32_t stackReference = 4000U + attempt;
+        transport.QueueExchange({
+            MakeUploadRequest(uploadReference, stackReference, Address),
+            {FakeReceiveAction::Datagram(
+                MakeCommandPacket({MakeSuperFrame(uploadReference)}))},
+        });
+
+        std::vector<FakeReceiveAction> incompleteReplies;
+        for (int packet = 0;
+             packet < MvlcMaximumResponseDatagrams;
+             ++packet)
+        {
+            incompleteReplies.push_back(FakeReceiveAction::Datagram(
+                MakeCommandPacket({MakeSuperFrame(executeReference)})));
+        }
+        transport.QueueExchange({
+            MakeExecuteRequest(executeReference),
+            std::move(incompleteReplies),
+        });
+    }
+
+    std::uint16_t nextSuperReference = 400U;
+    std::uint32_t nextStackReference = 4000U;
+    const std::atomic<bool> cancelled{false};
+    const auto result = ReadVmeD16(
+        transport,
+        Address,
+        nextSuperReference,
+        nextStackReference,
+        cancelled);
+
+    CHECK_FALSE(result.success);
+    CHECK(result.error == "Incomplete MVLC VME-read response");
+    CHECK(transport.SentRequests().size() == 6U);
+    CHECK(transport.ReceiveCapacities().size() == 27U);
+    CHECK(nextSuperReference == 406U);
+    CHECK(nextStackReference == 4003U);
 }
 
 TEST_CASE("a VME write uses the guarded stack path")
