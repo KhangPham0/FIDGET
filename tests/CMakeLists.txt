@@ -41,3 +41,11 @@ target_link_libraries(scp_transaction_plan_tests PRIVATE
 )
 
 add_test(NAME scp_transaction_plan_tests COMMAND scp_transaction_plan_tests)
+
+add_executable(recovery_journal_tests recovery_journal_tests.cpp)
+target_link_libraries(recovery_journal_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME recovery_journal_tests COMMAND recovery_journal_tests)
