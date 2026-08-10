@@ -137,6 +137,18 @@ std::vector<std::uint32_t> BuildMvlcStackExecuteRequest(
     return request;
 }
 
+std::array<std::uint32_t, 4> BuildMvlcLocalRegisterReadRequest(
+    std::uint16_t reference,
+    std::uint16_t address)
+{
+    return {
+        MvlcCommandBufferStart,
+        MvlcReferenceWordCommand | reference,
+        MvlcReadLocalCommand | address,
+        MvlcCommandBufferEnd,
+    };
+}
+
 MvlcRequestBuildResult BuildMvlcLocalRegisterWriteRequest(
     std::uint16_t superReference,
     const MvlcLocalRegisterWrite* writes,
@@ -227,6 +239,73 @@ MvlcCommandPacketParseResult ParseMvlcCommandPacket(
     }
 
     result.success = true;
+    return result;
+}
+
+MvlcLocalReadReply ParseMvlcLocalRegisterReadReply(
+    const std::byte* packet,
+    std::size_t packetSize,
+    std::uint16_t reference,
+    std::uint16_t address)
+{
+    MvlcLocalReadReply result;
+    if (packetSize < (EthernetHeaderWords + 4U) * sizeof(std::uint32_t)
+        || packetSize % sizeof(std::uint32_t) != 0U)
+    {
+        return result;
+    }
+
+    const std::uint32_t header0 = LoadLittleEndian32(packet);
+    const std::uint32_t magic = (header0 >> 30U) & 0x3U;
+    const std::uint32_t packetChannel = (header0 >> 28U) & 0x3U;
+    const std::size_t payloadWords = header0 & 0x1FFFU;
+    const std::size_t availableWords =
+        packetSize / sizeof(std::uint32_t) - EthernetHeaderWords;
+    if (magic != 0U || packetChannel != 0U
+        || payloadWords > availableWords)
+    {
+        return result;
+    }
+
+    const std::byte* payload =
+        packet + EthernetHeaderWords * sizeof(std::uint32_t);
+    const std::uint32_t expectedReference =
+        MvlcReferenceWordCommand | reference;
+    const std::uint32_t expectedRead = MvlcReadLocalCommand | address;
+
+    for (std::size_t offset = 0U; offset + 3U < payloadWords; ++offset)
+    {
+        const std::uint32_t frameHeader = LoadLittleEndian32(
+            payload + offset * sizeof(std::uint32_t));
+        if ((frameHeader >> 24U) != MvlcSuperFrameType)
+        {
+            continue;
+        }
+
+        const std::size_t frameContents = frameHeader & 0x1FFFU;
+        if (frameContents < 3U
+            || offset + 1U + frameContents > payloadWords)
+        {
+            return result;
+        }
+
+        const std::uint32_t mirroredReference = LoadLittleEndian32(
+            payload + (offset + 1U) * sizeof(std::uint32_t));
+        const std::uint32_t mirroredRead = LoadLittleEndian32(
+            payload + (offset + 2U) * sizeof(std::uint32_t));
+        if (mirroredReference != expectedReference
+            || mirroredRead != expectedRead)
+        {
+            continue;
+        }
+
+        result.status = MvlcLocalReadReplyStatus::Match;
+        result.value = LoadLittleEndian32(
+            payload + (offset + 3U) * sizeof(std::uint32_t));
+        return result;
+    }
+
+    result.status = MvlcLocalReadReplyStatus::NoMatch;
     return result;
 }
 

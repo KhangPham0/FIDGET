@@ -12,6 +12,7 @@ namespace fidget {
 inline constexpr std::uint32_t MvlcCommandBufferStart = 0xF1000000U;
 inline constexpr std::uint32_t MvlcCommandBufferEnd = 0xF2000000U;
 inline constexpr std::uint32_t MvlcReferenceWordCommand = 0x01010000U;
+inline constexpr std::uint32_t MvlcReadLocalCommand = 0x01020000U;
 inline constexpr std::uint32_t MvlcWriteLocalCommand = 0x02040000U;
 
 inline constexpr std::uint32_t MvlcStackStartCommand = 0xF3000000U;
@@ -88,6 +89,20 @@ struct MvlcRequestBuildResult
     std::string error;
 };
 
+enum class MvlcLocalReadReplyStatus
+{
+    Match,
+    NoMatch,
+    Malformed,
+};
+
+struct MvlcLocalReadReply
+{
+    MvlcLocalReadReplyStatus status =
+        MvlcLocalReadReplyStatus::Malformed;
+    std::uint32_t value = 0U;
+};
+
 // A frame can be unrelated to the active transaction, accepted, or rejected.
 // matches distinguishes an unrelated frame from a rejected matching frame.
 struct MvlcFrameValidationResult
@@ -117,6 +132,10 @@ void StoreLittleEndian32(std::byte* destination, std::uint32_t value);
     std::size_t operationWordCount);
 [[nodiscard]] std::vector<std::uint32_t> BuildMvlcStackExecuteRequest(
     std::uint16_t superReference);
+[[nodiscard]] std::array<std::uint32_t, 4>
+    BuildMvlcLocalRegisterReadRequest(
+        std::uint16_t reference,
+        std::uint16_t address);
 [[nodiscard]] MvlcRequestBuildResult BuildMvlcLocalRegisterWriteRequest(
     std::uint16_t superReference,
     const MvlcLocalRegisterWrite* writes,
@@ -125,6 +144,11 @@ void StoreLittleEndian32(std::byte* destination, std::uint32_t value);
 [[nodiscard]] MvlcCommandPacketParseResult ParseMvlcCommandPacket(
     const std::byte* packet,
     std::size_t packetSize);
+[[nodiscard]] MvlcLocalReadReply ParseMvlcLocalRegisterReadReply(
+    const std::byte* packet,
+    std::size_t packetSize,
+    std::uint16_t reference,
+    std::uint16_t address);
 [[nodiscard]] bool IsMatchingMvlcSuperFrame(
     const MvlcFrame& frame,
     std::uint16_t reference);

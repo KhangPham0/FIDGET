@@ -100,3 +100,11 @@ target_link_libraries(tuner_snapshot_tests PRIVATE
 )
 
 add_test(NAME tuner_snapshot_tests COMMAND tuner_snapshot_tests)
+
+add_executable(ownership_service_tests ownership_service_tests.cpp)
+target_link_libraries(ownership_service_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME ownership_service_tests COMMAND ownership_service_tests)

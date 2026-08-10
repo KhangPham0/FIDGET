@@ -9,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,43 +57,49 @@ class FakeCommandTransport final : public ICommandTransport
 public:
     void QueueExchange(FakeCommandExchange exchange)
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         exchanges_.push_back(std::move(exchange));
     }
 
     void SetOpenError(std::string error)
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         openError_ = std::move(error);
     }
 
     void SetReceiveHook(std::function<void(std::size_t)> hook)
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         receiveHook_ = std::move(hook);
     }
 
-    [[nodiscard]] const std::vector<std::vector<std::byte>>& SentRequests()
-        const noexcept
+    [[nodiscard]] std::vector<std::vector<std::byte>> SentRequests() const
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         return sentRequests_;
     }
 
-    [[nodiscard]] const std::vector<std::size_t>& ReceiveCapacities()
-        const noexcept
+    [[nodiscard]] std::vector<std::size_t> ReceiveCapacities() const
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         return receiveCapacities_;
     }
 
-    [[nodiscard]] const std::string& OpenedHost() const noexcept
+    [[nodiscard]] std::string OpenedHost() const
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         return openedHost_;
     }
 
-    [[nodiscard]] std::uint16_t OpenedPort() const noexcept
+    [[nodiscard]] std::uint16_t OpenedPort() const
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         return openedPort_;
     }
 
-    [[nodiscard]] bool IsOpen() const noexcept
+    [[nodiscard]] bool IsOpen() const
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         return open_;
     }
 
@@ -100,6 +107,7 @@ public:
         const std::string& host,
         std::uint16_t port) override
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         openedHost_ = host;
         openedPort_ = port;
         if (!openError_.empty())
@@ -115,6 +123,7 @@ public:
         const std::byte* data,
         std::size_t size) override
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         if (!open_)
         {
             return {false, "fake send: transport is closed"};
@@ -146,12 +155,21 @@ public:
         std::size_t capacity,
         int timeoutMilliseconds) override
     {
-        receiveCapacities_.push_back(capacity);
-        receiveTimeouts_.push_back(timeoutMilliseconds);
-        if (receiveHook_)
+        std::function<void(std::size_t)> hook;
+        std::size_t receiveCount = 0U;
         {
-            receiveHook_(receiveCapacities_.size());
+            const std::lock_guard<std::mutex> lock(mutex_);
+            receiveCapacities_.push_back(capacity);
+            receiveTimeouts_.push_back(timeoutMilliseconds);
+            hook = receiveHook_;
+            receiveCount = receiveCapacities_.size();
         }
+        if (hook)
+        {
+            hook(receiveCount);
+        }
+
+        const std::lock_guard<std::mutex> lock(mutex_);
 
         if (!open_)
         {
@@ -196,10 +214,12 @@ public:
 
     void Close() noexcept override
     {
+        const std::lock_guard<std::mutex> lock(mutex_);
         open_ = false;
     }
 
 private:
+    mutable std::mutex mutex_;
     bool open_ = false;
     std::string openError_;
     std::string openedHost_;
