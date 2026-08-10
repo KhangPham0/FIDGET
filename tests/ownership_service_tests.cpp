@@ -288,6 +288,65 @@ TEST_CASE("the idle watchdog passively releases a foreign takeover")
     CheckOnlyReadRequests(*transport);
 }
 
+TEST_CASE("the watchdog reports uncertainty and later recovery")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), 100ms);
+    UseProject(service);
+    CheckIdle(service, *transport);
+
+    service.Submit(SetMvmeHandoffConfirmedCommand{true});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.mvmeHandoffConfirmed;
+    }));
+
+    QueueIdleProbe(*transport);
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        transport->QueueExchange({
+            MakeReadRequest(DaqModeRegister, 0x7000U),
+            {FakeReceiveAction::Timeout()},
+        });
+    }
+    service.Submit(OpenSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return !snapshot.statusMessages.empty()
+            && snapshot.statusMessages.back().summary
+                == "MVLC command communication is temporarily uncertain. "
+                   "No hardware operation is allowed until a later "
+                   "watchdog read succeeds: No MVLC response after three "
+                   "read-only attempts";
+    }));
+
+    CHECK(service.CurrentSnapshot()->ownership
+          == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(transport->IsOpen());
+
+    QueueRead(*transport, DaqModeRegister, 0x7001U, 0U);
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return !snapshot.statusMessages.empty()
+            && snapshot.statusMessages.back().summary
+                == "MVLC command communication recovered; DAQ mode is "
+                   "still idle and controlled operations are available "
+                   "again.";
+    }));
+
+    CHECK(service.CurrentSnapshot()->ownership
+          == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(transport->SentRequests().size() == 10U);
+    CheckOnlyReadRequests(*transport);
+
+    service.Submit(ReleaseSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership
+            == GuidedTunerOwnershipState::Disconnected;
+    }));
+}
+
 TEST_CASE("the pre-write gate blocks when DAQ mode changed")
 {
     using namespace fidget;
