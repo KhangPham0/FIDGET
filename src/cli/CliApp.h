@@ -16,6 +16,7 @@ enum class CliCommand
 {
     Status,
     Session,
+    Audit,
 };
 
 enum class CliSessionWaitResult
@@ -66,6 +67,14 @@ using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
     std::ostream& errorOutput,
     const CliInterruptRequested& interruptRequested,
     const CliWaitForSessionInput& waitForInput);
+
+[[nodiscard]] int RunCliAudit(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested);
 
 } // namespace fidget
 

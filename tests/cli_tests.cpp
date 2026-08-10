@@ -2,21 +2,80 @@
 #include "doctest/doctest.h"
 
 #include "cli/CliApp.h"
+#include "core/StartupAudit.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <sstream>
 #include <utility>
 
 namespace {
 
+fidget::StartupAuditResult MakeAuditResult(bool blocked)
+{
+    std::array<
+        std::uint16_t,
+        fidget::Fw2051StartupAuditRegisterCount> values{};
+    for (std::size_t index = 0U;
+         index < fidget::Fw2051StartupAuditRegisterTable.size(); ++index)
+    {
+        switch (
+            fidget::Fw2051StartupAuditRegisterTable[index].registerOffset)
+        {
+        case 0x6008U:
+            values[index] = 0x5007U;
+            break;
+        case 0x600EU:
+            values[index] = 0x2051U;
+            break;
+        case 0x6010U:
+            values[index] = 1U;
+            break;
+        case 0x6018U:
+            values[index] = 1U;
+            break;
+        case 0x601CU:
+            values[index] = 1U;
+            break;
+        case 0x6036U:
+            values[index] = 3U;
+            break;
+        case 0x6044U:
+            values[index] = blocked ? 8U : 24U;
+            break;
+        default:
+            break;
+        }
+    }
+    return fidget::ClassifyFw2051StartupAudit(0x11000000U, values);
+}
+
+std::size_t CountOccurrences(
+    const std::string& text,
+    const std::string& pattern)
+{
+    std::size_t count = 0U;
+    std::size_t position = 0U;
+    while ((position = text.find(pattern, position)) != std::string::npos)
+    {
+        ++count;
+        position += pattern.size();
+    }
+    return count;
+}
+
 class FakeTunerControl final : public fidget::ITunerControl
 {
 public:
     explicit FakeTunerControl(
         fidget::GuidedTunerOwnershipState checkResult =
-            fidget::GuidedTunerOwnershipState::Idle)
+            fidget::GuidedTunerOwnershipState::Idle,
+        bool auditBlocked = false)
         : snapshot_(std::make_shared<const fidget::TunerSnapshot>())
         , checkResult_(checkResult)
+        , auditBlocked_(auditBlocked)
     {
     }
 
@@ -40,13 +99,18 @@ public:
             next.activeModuleIndex = project->activeModuleIndex;
             next.activeModuleName =
                 project->project.modules[project->activeModuleIndex].name;
+            next.activeModuleBaseAddress =
+                project->project.modules[project->activeModuleIndex]
+                    .baseAddress;
             next.targetSupported = true;
         }
         else if (std::holds_alternative<fidget::CheckStatusCommand>(command))
         {
             ++statusCommands;
             next.ownership = checkResult_;
-            next.controllerReadingsValid = true;
+            next.controllerReadingsValid =
+                checkResult_ ==
+                fidget::GuidedTunerOwnershipState::Idle;
             next.mvlcHardwareId = 0x5008U;
             next.mvlcFirmwareRevision = 0x0046U;
             next.mvlcDaqMode = checkResult_
@@ -75,6 +139,14 @@ public:
             ++openCommands;
             next.ownership = fidget::GuidedTunerOwnershipState::SessionOpen;
         }
+        else if (std::holds_alternative<fidget::RunStartupAuditCommand>(command))
+        {
+            ++auditCommands;
+            next.startupAudit = MakeAuditResult(auditBlocked_);
+            next.startupAuditCompleteForTarget = true;
+            next.startupAuditReady =
+                next.startupAudit.readyForDiagnosticStart;
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -89,11 +161,13 @@ public:
     int statusCommands = 0;
     int handoffCommands = 0;
     int openCommands = 0;
+    int auditCommands = 0;
     int releaseCommands = 0;
 
 private:
     std::shared_ptr<const fidget::TunerSnapshot> snapshot_;
     fidget::GuidedTunerOwnershipState checkResult_;
+    bool auditBlocked_ = false;
 };
 
 } // namespace
@@ -119,6 +193,14 @@ TEST_CASE("CLI options accept project and host status forms")
         const auto parsed = fidget::ParseCliOptions(4, arguments);
         REQUIRE(parsed.success);
         CHECK(parsed.options.command == fidget::CliCommand::Session);
+    }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "audit", "--host", "mvlc-test",
+        };
+        const auto parsed = fidget::ParseCliOptions(4, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Audit);
     }
     {
         const char* arguments[] = {
@@ -185,6 +267,8 @@ TEST_CASE("status classifies an active DAQ as a failure exit")
     CHECK(exitCode == 1);
     CHECK(control.statusCommands == 1);
     CHECK(output.str().find("ownership: in-use\n") != std::string::npos);
+    CHECK(output.str().find("mvlc_hardware_id: not read\n")
+          != std::string::npos);
     CHECK(output.str().find("mvlc_daq_mode: 0x0000000F\n")
           != std::string::npos);
 }
@@ -340,4 +424,112 @@ TEST_CASE("SIGINT during release is reported after release completes")
     CHECK(control.openCommands == 1);
     CHECK(control.releaseCommands == 1);
     CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("audit prints all rows and releases a ready session")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Audit;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAudit(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.statusCommands == 1);
+    CHECK(control.handoffCommands == 1);
+    CHECK(control.openCommands == 1);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(CountOccurrences(output.str(), "\n0x") == 37U);
+    CHECK(output.str().find(
+              "audit_summary: required=7/7 blocking=0 warnings=0 "
+              "ready=yes\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("audit releases and fails when a required check is blocked")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Audit;
+    options.host = "mvlc-test";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, true);
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAudit(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find(
+              "audit_summary: required=6/7 blocking=1 warnings=0 "
+              "ready=no\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("audit defers SIGINT until its session is released")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Audit;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAudit(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.auditCommands > 0; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("audit defaults to no when confirmation input is closed")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Audit;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAudit(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.openCommands == 0);
+    CHECK(control.auditCommands == 0);
+    CHECK(control.releaseCommands == 0);
 }

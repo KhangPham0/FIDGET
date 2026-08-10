@@ -1,6 +1,7 @@
 #include "cli/CliApp.h"
 
 #include "core/CrateProject.h"
+#include "core/StartupAudit.h"
 
 #include <charconv>
 #include <chrono>
@@ -115,6 +116,31 @@ void PrintHexReading(
            << std::dec << std::nouppercase << std::setfill(' ') << '\n';
 }
 
+void PrintStartupAudit(
+    std::ostream& output,
+    const StartupAuditResult& audit)
+{
+    output << "audit_rows:\n";
+    for (const auto& row : audit.rows)
+    {
+        output << "0x"
+               << std::uppercase << std::hex << std::setw(4)
+               << std::setfill('0') << row.registerOffset
+               << " 0x" << std::setw(4) << row.value
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << ' ' << StartupAuditRoleName(row.role)
+               << ' ' << StartupAuditAssessmentName(row.assessment)
+               << ' ' << row.name << ": " << row.note << '\n';
+    }
+    output << "audit_summary: required="
+           << audit.requiredReady << '/' << audit.requiredChecks
+           << " blocking=" << audit.blockingIssues
+           << " warnings=" << audit.warnings
+           << " ready="
+           << (audit.readyForDiagnosticStart ? "yes" : "no")
+           << '\n';
+}
+
 bool ResolveProject(
     const CliOptions& options,
     CrateProject& project,
@@ -207,6 +233,7 @@ const char* FidgetCliUsage() noexcept
         "Usage:\n"
         "  fidget_cli status (--project FILE | --host HOST) [options]\n"
         "  fidget_cli session (--project FILE | --host HOST) [options]\n"
+        "  fidget_cli audit (--project FILE | --host HOST) [options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -241,6 +268,10 @@ CliOptionsParseResult ParseCliOptions(
     else if (command == "session")
     {
         result.options.command = CliCommand::Session;
+    }
+    else if (command == "audit")
+    {
+        result.options.command = CliCommand::Audit;
     }
     else
     {
@@ -368,7 +399,15 @@ int RunCliStatus(
     const auto snapshot = tunerControl.CurrentSnapshot();
     output << "ownership: "
            << OwnershipClassification(snapshot->ownership) << '\n';
-    PrintHexReading(output, "mvlc_hardware_id", snapshot->mvlcHardwareId);
+    if (snapshot->controllerReadingsValid)
+    {
+        PrintHexReading(
+            output, "mvlc_hardware_id", snapshot->mvlcHardwareId);
+    }
+    else
+    {
+        output << "mvlc_hardware_id: not read\n";
+    }
     PrintHexReading(
         output, "mvlc_firmware_revision", snapshot->mvlcFirmwareRevision);
     PrintHexReading(output, "mvlc_daq_mode", snapshot->mvlcDaqMode);
@@ -512,6 +551,128 @@ int RunCliSession(
         return 130;
     }
     return sessionFailed ? 1 : 0;
+}
+
+int RunCliAudit(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    output << "I stopped the MVME run and completely quit MVME [y/N]: "
+           << std::flush;
+    std::string confirmation;
+    if (!std::getline(input, confirmation)
+        || !HandoffConfirmedByUser(std::move(confirmation)))
+    {
+        output << "session: not opened\n";
+        return interruptRequested && interruptRequested() ? 130 : 1;
+    }
+
+    const auto beforeConfirmation =
+        tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(SetMvmeHandoffConfirmedCommand{true});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeConfirmation,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.mvmeHandoffConfirmed;
+            }))
+    {
+        errorOutput << "error: handoff confirmation timed out\n";
+        return 1;
+    }
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const auto beforeOpen = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(OpenSessionCommand{});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeOpen,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.ownership
+                    != GuidedTunerOwnershipState::Checking;
+            }))
+    {
+        errorOutput << "error: session open timed out\n";
+        return 1;
+    }
+
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        errorOutput << "error: session open failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+    output << "session: open\n" << std::flush;
+
+    int result = 1;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeAudit = snapshot->revision;
+        tunerControl.Submit(RunStartupAuditCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeAudit,
+                [](const TunerSnapshot& value) {
+                    return value.startupAudit.state
+                            == StartupAuditState::Complete
+                        || value.startupAudit.state
+                            == StartupAuditState::Failed;
+                }))
+        {
+            errorOutput << "error: startup audit timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->startupAudit.state == StartupAuditState::Complete)
+            {
+                PrintStartupAudit(output, snapshot->startupAudit);
+                result = snapshot->startupAudit.blockingIssues == 0U
+                    ? 0
+                    : 1;
+            }
+            else
+            {
+                errorOutput << "error: startup audit failed: "
+                            << snapshot->startupAudit.message << '\n';
+            }
+        }
+    }
+
+    const bool interrupted = interruptRequested && interruptRequested();
+    if (!ReleaseSession(tunerControl, errorOutput))
+    {
+        return 1;
+    }
+    output << "session: released\n";
+    if (interrupted || (interruptRequested && interruptRequested()))
+    {
+        return 130;
+    }
+    return result;
 }
 
 } // namespace fidget

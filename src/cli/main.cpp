@@ -3,8 +3,8 @@
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/OwnershipService.h"
 
-#include <csignal>
 #include <cerrno>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <poll.h>
@@ -59,7 +59,11 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    std::signal(SIGINT, HandleInterrupt);
+    struct sigaction interruptAction{};
+    interruptAction.sa_handler = HandleInterrupt;
+    sigemptyset(&interruptAction.sa_mask);
+    interruptAction.sa_flags = 0;
+    (void)sigaction(SIGINT, &interruptAction, nullptr);
     auto transport = std::make_unique<fidget::MvlcCommandTransport>();
     fidget::OwnershipService tunerControl(std::move(transport));
     const auto interrupted = [] { return InterruptRequested != 0; };
@@ -72,12 +76,22 @@ int main(int argc, char** argv)
             std::cerr,
             interrupted);
     }
-    return fidget::RunCliSession(
+    if (parsed.options.command == fidget::CliCommand::Session)
+    {
+        return fidget::RunCliSession(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted,
+            WaitForSessionInput);
+    }
+    return fidget::RunCliAudit(
         parsed.options,
         tunerControl,
         std::cin,
         std::cout,
         std::cerr,
-        interrupted,
-        WaitForSessionInput);
+        interrupted);
 }
