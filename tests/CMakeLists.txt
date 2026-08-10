@@ -33,3 +33,11 @@ add_executable(guided_workflow_tests guided_workflow_tests.cpp)
 target_link_libraries(guided_workflow_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME guided_workflow_tests COMMAND guided_workflow_tests)
+
+add_executable(scp_transaction_plan_tests scp_transaction_plan_tests.cpp)
+target_link_libraries(scp_transaction_plan_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME scp_transaction_plan_tests COMMAND scp_transaction_plan_tests)
