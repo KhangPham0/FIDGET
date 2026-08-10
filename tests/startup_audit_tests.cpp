@@ -253,26 +253,33 @@ TEST_CASE("the event-threshold branch is the active seventh required check")
           StartupAuditAssessment::Blocked);
 }
 
-TEST_CASE("live controls warn without inventing corrective writes")
+TEST_CASE("every startup warning rule remains non-blocking")
 {
     using namespace fidget;
 
     struct WarningCase
     {
         std::uint16_t registerOffset;
+        std::uint16_t value;
         const char* noteFragment;
     };
 
-    const std::array<WarningCase, 3> cases{{
-        {0x603AU, "still accepts triggers"},
-        {0x6070U, "internal pulser is enabled"},
-        {0x607AU, "Analog monitor output is enabled"},
+    const std::array<WarningCase, 9> cases{{
+        {0x6006U, 2U, "Documented values are 0 and 1"},
+        {0x6036U, 7U, "EOB replaces BERR"},
+        {0x6032U, 6U, "outside the documented data-length"},
+        {0x6038U, 2U, "Documented marking types"},
+        {0x603AU, 1U, "still accepts triggers"},
+        {0x6042U, 6U, "Documented TDC-resolution"},
+        {0x6070U, 1U, "internal pulser is enabled"},
+        {0x607AU, 1U, "Analog monitor output is enabled"},
+        {0x6096U, 4U, "only timestamp-source bits 1:0"},
     }};
 
     for (const auto& warningCase : cases)
     {
         auto values = MakeReadyValues();
-        values[RegisterIndex(warningCase.registerOffset)] = 1U;
+        values[RegisterIndex(warningCase.registerOffset)] = warningCase.value;
         const auto result = ClassifyFw2051StartupAudit(0U, values);
         const auto& row = FindRow(result, warningCase.registerOffset);
 
