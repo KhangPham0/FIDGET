@@ -193,8 +193,9 @@ void App::DrawFrame()
 
     // The status strip is fixed chrome above the dockspace; everything
     // else docks below it.
+    const auto snapshot = m_tunerControl.CurrentSnapshot();
     const float stripHeight = ImGui::GetFrameHeight() + 8.0f;
-    DrawStatusStrip(stripHeight);
+    DrawStatusStrip(stripHeight, *snapshot);
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + stripHeight));
@@ -218,13 +219,12 @@ void App::DrawFrame()
     }
     ImGui::End();
 
-    const auto snapshot = m_tunerControl.CurrentSnapshot();
     DrawWorkflowPanel(*snapshot);
     DrawStagePanel(*snapshot);
-    DrawActivityLogPanel();
+    DrawActivityLogPanel(*snapshot);
 }
 
-void App::DrawStatusStrip(float height)
+void App::DrawStatusStrip(float height, const TunerSnapshot& snapshot)
 {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -240,11 +240,28 @@ void App::DrawStatusStrip(float height)
 
     ImGui::TextColored(m_theme.accent, "FIDGET");
 
-    // Placeholders until the tuner services publish real state.
     ImGui::SameLine(0.0f, 24.0f);
-    ImGui::TextDisabled("no project");
+    if (snapshot.projectActive)
+    {
+        ImGui::Text(
+            "%s",
+            snapshot.activeModuleName.empty()
+                ? "crate project active"
+                : snapshot.activeModuleName.c_str());
+    }
+    else
+    {
+        ImGui::TextDisabled("no project");
+    }
+
+    const auto decision = PlanGuidedTunerWorkflow(
+        MakeGuidedTunerInputs(snapshot));
     ImGui::SameLine(0.0f, 24.0f);
-    ImGui::TextDisabled("no session");
+    ImGui::Text(
+        "step %zu/%zu: %s",
+        decision.step,
+        decision.totalSteps,
+        GuidedTunerStageName(decision.stage));
 
     const char* version = "v" FIDGET_VERSION;
     float versionWidth = ImGui::CalcTextSize(version).x;
@@ -286,16 +303,36 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     }
     else
     {
-        ImGui::TextDisabled(
-            "This stage screen is not implemented in the current phase.");
+        m_sessionStage.Draw(m_tunerControl, snapshot, m_theme);
+        if (decision.step > 2U)
+        {
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "The next guided stage is not implemented yet. Session "
+                "release remains available above.");
+        }
     }
     ImGui::End();
 }
 
-void App::DrawActivityLogPanel()
+void App::DrawActivityLogPanel(const TunerSnapshot& snapshot)
 {
     ImGui::Begin(kActivityLogTitle);
-    ImGui::TextDisabled("Hardware operations will be recorded here.");
+    if (snapshot.statusMessages.empty())
+    {
+        ImGui::TextDisabled("No tuner status has been published.");
+    }
+    else
+    {
+        for (const auto& message : snapshot.statusMessages)
+        {
+            ImGui::TextWrapped("%s", message.summary.c_str());
+            if (!message.detail.empty())
+            {
+                ImGui::TextDisabled("%s", message.detail.c_str());
+            }
+        }
+    }
     ImGui::End();
 }
 

@@ -4,6 +4,7 @@
 #include "core/TunerControl.h"
 #include "ui/Fonts.h"
 #include "ui/ProjectStage.h"
+#include "ui/SessionStage.h"
 #include "ui/Theme.h"
 
 #include <string>
@@ -29,10 +30,10 @@ public:
 private:
     bool Init();
     void DrawFrame();
-    void DrawStatusStrip(float height);
+    void DrawStatusStrip(float height, const TunerSnapshot& snapshot);
     void DrawWorkflowPanel(const TunerSnapshot& snapshot);
     void DrawStagePanel(const TunerSnapshot& snapshot);
-    void DrawActivityLogPanel();
+    void DrawActivityLogPanel(const TunerSnapshot& snapshot);
     void HandleShortcuts();
     void ChangeFontScale(int direction);
     void BuildDefaultLayout(unsigned int dockspaceId);
@@ -47,6 +48,7 @@ private:
     Theme m_theme;
     Fonts m_fonts;
     ProjectStage m_projectStage;
+    SessionStage m_sessionStage;
 
     long m_frameLimit = -1;
 
