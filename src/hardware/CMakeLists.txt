@@ -1,6 +1,7 @@
 find_package(Threads REQUIRED)
 
 add_library(fidget_hardware STATIC
+    CommandWorker.cpp
     MvlcCommandTransport.cpp
     MvlcDataReceiver.cpp
     Transport.cpp

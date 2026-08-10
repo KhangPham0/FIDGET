@@ -84,3 +84,11 @@ target_link_libraries(mvlc_data_receiver_tests PRIVATE
 )
 
 add_test(NAME mvlc_data_receiver_tests COMMAND mvlc_data_receiver_tests)
+
+add_executable(command_worker_tests command_worker_tests.cpp)
+target_link_libraries(command_worker_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME command_worker_tests COMMAND command_worker_tests)
