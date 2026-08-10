@@ -5,6 +5,7 @@
 #include "ui/Fonts.h"
 #include "ui/ProjectStage.h"
 #include "ui/SessionStage.h"
+#include "ui/StartupAuditStage.h"
 #include "ui/Theme.h"
 
 #include <string>
@@ -49,6 +50,7 @@ private:
     Fonts m_fonts;
     ProjectStage m_projectStage;
     SessionStage m_sessionStage;
+    StartupAuditStage m_startupAuditStage;
 
     long m_frameLimit = -1;
 
