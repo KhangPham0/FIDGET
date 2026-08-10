@@ -197,4 +197,101 @@ ScpProfileApplicationPlan PlanFw2051ScpProfileApplication(
     return plan;
 }
 
+ScpStandaloneStartupPlan PlanFw2051ScpStandaloneStartup(
+    const ScpProfile& profile,
+    const Fw2051ScpConfigurationSnapshot& liveConfiguration)
+{
+    ScpStandaloneStartupPlan plan;
+    const auto comparison = CompareFw2051ScpConfiguration(
+        profile, liveConfiguration);
+    plan.valuesCompared = comparison.valuesCompared;
+    plan.configurationDifferences = comparison.differences.size();
+
+    if (!comparison.comparable)
+    {
+        plan.message = comparison.message;
+        return plan;
+    }
+
+    constexpr std::uint16_t RequiredIrqLevel = 1U;
+    constexpr std::uint16_t RequiredOutputFormat = 0x0018U;
+    const auto& target = profile.configuration;
+
+    if (target.hardwareId != Mdpp32HardwareId
+        || target.firmwareRevision != Mdpp32ScpFirmwareRevisionFw2051
+        || liveConfiguration.hardwareId != Mdpp32HardwareId
+        || liveConfiguration.firmwareRevision
+            != Mdpp32ScpFirmwareRevisionFw2051)
+    {
+        plan.message =
+            "Deterministic startup is enabled only for the tested "
+            "MDPP-32 hardware 0x5007 with SCP FW2051.";
+        return plan;
+    }
+
+    if (target.irqLevel != RequiredIrqLevel
+        || target.outputFormat != RequiredOutputFormat)
+    {
+        plan.message =
+            "The saved profile is not a tuner-startup profile: it must "
+            "record IRQ level 1 and sampled standard-streaming output "
+            "format 0x0018.";
+        return plan;
+    }
+
+    for (const auto& difference : comparison.differences)
+    {
+        if (difference.quad >= 0)
+        {
+            ++plan.bankedDifferences;
+            continue;
+        }
+
+        if (difference.hasRegister
+            && (difference.registerOffset == 0x6010U
+                || difference.registerOffset == 0x6044U))
+        {
+            ++plan.startupContractDifferences;
+            continue;
+        }
+
+        plan.message =
+            "Deterministic startup is blocked by the global identity "
+            "difference '" + difference.setting + "'.";
+        return plan;
+    }
+
+    // Normalize only the two globals owned by the proven startup preparation.
+    // The banked planner can then validate and order every 0x61xx difference.
+    auto preparedConfiguration = liveConfiguration;
+    preparedConfiguration.irqLevel = RequiredIrqLevel;
+    preparedConfiguration.outputFormat = RequiredOutputFormat;
+    const auto bankedPlan = PlanFw2051ScpProfileApplication(
+        profile, preparedConfiguration);
+    if (!bankedPlan.success)
+    {
+        plan.message = bankedPlan.message;
+        return plan;
+    }
+
+    if (bankedPlan.request.steps.size() != plan.bankedDifferences)
+    {
+        plan.message =
+            "The deterministic-startup planner did not account for every "
+            "banked difference; no hardware operation is enabled.";
+        return plan;
+    }
+
+    plan.bankedApplication = bankedPlan.request;
+    plan.success = true;
+    plan.message =
+        "Prepared a deterministic tuner-startup recipe: "
+        + std::to_string(plan.startupContractDifferences)
+        + " profile-visible module-wide mismatch(es) are handled by the "
+          "verified startup contract and "
+        + std::to_string(plan.bankedDifferences)
+        + " banked mismatch(es) by the saved SCP profile.";
+    return plan;
+}
+
 } // namespace fidget

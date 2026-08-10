@@ -119,3 +119,82 @@ TEST_CASE("complete application rejects global and invalid targets")
     CHECK_FALSE(invalidPlan.success);
     CHECK(invalidPlan.request.steps.empty());
 }
+
+TEST_CASE("standalone startup partitions only its owned differences")
+{
+    using namespace fidget;
+
+    ScpProfile profile;
+    profile.configuration = MakeConfiguration();
+
+    auto live = profile.configuration;
+    live.irqLevel = 2U;
+    live.outputFormat = 0x0008U;
+    live.quads[7].sampleConfiguration = 0x0000U;
+
+    const auto plan = PlanFw2051ScpStandaloneStartup(profile, live);
+    INFO(plan.message);
+    REQUIRE(plan.success);
+    CHECK(plan.valuesCompared == 141U);
+    CHECK(plan.configurationDifferences == 3U);
+    CHECK(plan.startupContractDifferences == 2U);
+    CHECK(plan.bankedDifferences == 1U);
+    REQUIRE(plan.bankedApplication.steps.size() == 1U);
+    CHECK(plan.bankedApplication.expectedLiveConfiguration.irqLevel == 1U);
+    CHECK(plan.bankedApplication.expectedLiveConfiguration.outputFormat
+          == 0x0018U);
+
+    const auto& step = plan.bankedApplication.steps.front();
+    CHECK(step.quad == 7);
+    CHECK(step.registerOffset == 0x614AU);
+    CHECK(step.expectedValue == 0x0000U);
+    CHECK(step.profileValue == 0x0003U);
+}
+
+TEST_CASE("standalone startup rejects unsafe profiles and identity changes")
+{
+    using namespace fidget;
+
+    ScpProfile profile;
+    profile.configuration = MakeConfiguration();
+
+    auto incompatibleProfile = profile;
+    incompatibleProfile.configuration.outputFormat = 0x0008U;
+    const auto incompatible = PlanFw2051ScpStandaloneStartup(
+        incompatibleProfile, profile.configuration);
+    CHECK_FALSE(incompatible.success);
+    CHECK(incompatible.bankedApplication.steps.empty());
+
+    auto wrongBase = profile.configuration;
+    wrongBase.baseAddress = 0x33330000U;
+    const auto identityMismatch = PlanFw2051ScpStandaloneStartup(
+        profile, wrongBase);
+    CHECK_FALSE(identityMismatch.success);
+    CHECK(identityMismatch.message.find("VME base") != std::string::npos);
+
+    auto untestedFirmware = profile.configuration;
+    untestedFirmware.firmwareRevision = 0x2052U;
+    auto matchingUntestedProfile = profile;
+    matchingUntestedProfile.configuration.firmwareRevision = 0x2052U;
+    const auto untested = PlanFw2051ScpStandaloneStartup(
+        matchingUntestedProfile, untestedFirmware);
+    CHECK_FALSE(untested.success);
+    CHECK(untested.bankedApplication.steps.empty());
+}
+
+TEST_CASE("standalone startup plans no writes for an exact configuration")
+{
+    using namespace fidget;
+
+    ScpProfile profile;
+    profile.configuration = MakeConfiguration();
+
+    const auto plan = PlanFw2051ScpStandaloneStartup(
+        profile, profile.configuration);
+    INFO(plan.message);
+    CHECK(plan.success);
+    CHECK(plan.configurationDifferences == 0U);
+    CHECK(plan.startupContractDifferences == 0U);
+    CHECK(plan.bankedDifferences == 0U);
+    CHECK(plan.bankedApplication.steps.empty());
+}

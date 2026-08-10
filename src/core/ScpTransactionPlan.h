@@ -35,7 +35,22 @@ struct ScpProfileApplicationPlan
     ScpProfileApplicationRequest request;
 };
 
+struct ScpStandaloneStartupPlan
+{
+    bool success = false;
+    std::string message;
+    std::size_t valuesCompared = 0;
+    std::size_t configurationDifferences = 0;
+    std::size_t startupContractDifferences = 0;
+    std::size_t bankedDifferences = 0;
+    ScpProfileApplicationRequest bankedApplication;
+};
+
 [[nodiscard]] ScpProfileApplicationPlan PlanFw2051ScpProfileApplication(
+    const ScpProfile& profile,
+    const Fw2051ScpConfigurationSnapshot& liveConfiguration);
+
+[[nodiscard]] ScpStandaloneStartupPlan PlanFw2051ScpStandaloneStartup(
     const ScpProfile& profile,
     const Fw2051ScpConfigurationSnapshot& liveConfiguration);
 
