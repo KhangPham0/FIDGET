@@ -35,7 +35,7 @@ ProjectStage::ProjectStage()
     m_draft.streamHost = "127.0.0.1";
     m_draft.streamPort = 42333U;
     m_draft.modules.push_back({
-        "MDPP-16 SCP",
+        "MDPP-32 SCP",
         0x11000000U,
         MdppBackend::Scp,
         "mdpp1_scp_profile.mwwscp",

@@ -13,6 +13,7 @@ namespace fidget {
 namespace {
 
 constexpr int ReadOnlyTransactionAttempts = 3;
+constexpr int MaximumReadOnlyResponseDatagrams = 8;
 constexpr int CommandReceiveTimeoutMilliseconds = 500;
 constexpr std::size_t CommandResponseBufferSize = 9000U;
 
@@ -450,35 +451,41 @@ OwnershipService::LocalReadResult OwnershipService::ReadLocalRegister(
             return result;
         }
 
-        const auto received = transport_->Receive(
-            response.data(),
-            response.size(),
-            CommandReceiveTimeoutMilliseconds);
-        if (received.status == TransportReceiveStatus::Timeout)
+        for (int datagram = 0;
+             datagram < MaximumReadOnlyResponseDatagrams
+                 && !cancelled.load();
+             ++datagram)
         {
-            continue;
-        }
-        if (received.status == TransportReceiveStatus::Error)
-        {
-            result.error = received.error;
-            return result;
-        }
+            const auto received = transport_->Receive(
+                response.data(),
+                response.size(),
+                CommandReceiveTimeoutMilliseconds);
+            if (received.status == TransportReceiveStatus::Timeout)
+            {
+                break;
+            }
+            if (received.status == TransportReceiveStatus::Error)
+            {
+                result.error = received.error;
+                return result;
+            }
 
-        const auto parsed = ParseMvlcLocalRegisterReadReply(
-            response.data(),
-            received.bytesReceived,
-            reference,
-            address);
-        if (parsed.status == MvlcLocalReadReplyStatus::Match)
-        {
-            result.success = true;
-            result.value = parsed.value;
-            return result;
-        }
-        if (parsed.status == MvlcLocalReadReplyStatus::Malformed)
-        {
-            result.error = "receive: malformed MVLC Ethernet response";
-            return result;
+            const auto parsed = ParseMvlcLocalRegisterReadReply(
+                response.data(),
+                received.bytesReceived,
+                reference,
+                address);
+            if (parsed.status == MvlcLocalReadReplyStatus::Match)
+            {
+                result.success = true;
+                result.value = parsed.value;
+                return result;
+            }
+            if (parsed.status == MvlcLocalReadReplyStatus::Malformed)
+            {
+                result.error = "receive: malformed MVLC Ethernet response";
+                return result;
+            }
         }
     }
 

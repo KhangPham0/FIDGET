@@ -82,7 +82,7 @@ fidget::CrateProject MakeProject()
     project.streamHost = "stream-test";
     project.streamPort = 42333U;
     project.modules.push_back({
-        "MDPP-16 SCP",
+        "MDPP-32 SCP",
         0x11000000U,
         fidget::MdppBackend::Scp,
         "mdpp1_scp_profile.mwwscp",
@@ -225,6 +225,43 @@ TEST_CASE("an active DAQ refuses ownership without reading the hardware ID")
     CHECK(service.CurrentSnapshot()->mvlcDaqMode == 0x000FU);
     CHECK(transport->SentRequests().size() == 2U);
     CHECK_FALSE(transport->IsOpen());
+    CheckOnlyReadRequests(*transport);
+}
+
+TEST_CASE("a stale local-read reply is skipped before the matching reply")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+
+    transport->QueueExchange({
+        MakeReadRequest(FirmwareRevisionRegister, 1U),
+        {
+            FakeReceiveAction::Datagram(MakeReadReply(
+                FirmwareRevisionRegister, 0x7777U, 0xDEADBEEFU)),
+            FakeReceiveAction::Datagram(MakeReadReply(
+                FirmwareRevisionRegister, 1U, 0x0046U)),
+        },
+    });
+    QueueRead(*transport, DaqModeRegister, 2U, 0U);
+    QueueRead(
+        *transport,
+        HardwareIdRegister,
+        3U,
+        ExpectedMvlcHardwareId);
+
+    service.Submit(CheckStatusCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership == GuidedTunerOwnershipState::Idle;
+    }));
+
+    CHECK(service.CurrentSnapshot()->mvlcFirmwareRevision == 0x0046U);
+    CHECK(transport->SentRequests().size() == 3U);
+    CHECK(transport->ReceiveCapacities().size() == 4U);
     CheckOnlyReadRequests(*transport);
 }
 
