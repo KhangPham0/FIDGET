@@ -65,3 +65,14 @@ target_link_libraries(vme_transaction_tests PRIVATE
 )
 
 add_test(NAME vme_transaction_tests COMMAND vme_transaction_tests)
+
+add_executable(mvlc_command_transport_tests mvlc_command_transport_tests.cpp)
+target_link_libraries(mvlc_command_transport_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(
+    NAME mvlc_command_transport_tests
+    COMMAND mvlc_command_transport_tests
+)

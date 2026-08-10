@@ -1,6 +1,7 @@
 find_package(Threads REQUIRED)
 
 add_library(fidget_hardware STATIC
+    MvlcCommandTransport.cpp
     Transport.cpp
     VmeTransaction.cpp
 )
