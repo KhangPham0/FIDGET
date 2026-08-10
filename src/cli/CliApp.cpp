@@ -1,0 +1,338 @@
+#include "cli/CliApp.h"
+
+#include "core/CrateProject.h"
+
+#include <charconv>
+#include <chrono>
+#include <iomanip>
+#include <limits>
+#include <ostream>
+#include <string_view>
+#include <system_error>
+#include <thread>
+#include <utility>
+
+namespace fidget {
+namespace {
+
+using namespace std::chrono_literals;
+
+constexpr auto CommandCompletionTimeout = std::chrono::seconds(15);
+
+bool ParseUnsigned(
+    std::string_view text,
+    std::uint64_t maximum,
+    std::uint64_t& value)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+
+    std::uint64_t parsed = 0U;
+    const auto result = std::from_chars(
+        text.data(), text.data() + text.size(), parsed, 10);
+    if (result.ec != std::errc{}
+        || result.ptr != text.data() + text.size()
+        || parsed > maximum)
+    {
+        return false;
+    }
+    value = parsed;
+    return true;
+}
+
+bool WaitForRevision(
+    ITunerControl& tunerControl,
+    std::uint64_t previousRevision,
+    const std::function<bool(const TunerSnapshot&)>& ready)
+{
+    const auto deadline =
+        std::chrono::steady_clock::now() + CommandCompletionTimeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        const auto snapshot = tunerControl.CurrentSnapshot();
+        if (snapshot->revision > previousRevision && ready(*snapshot))
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return false;
+}
+
+CrateProject MakeHostOnlyProject(
+    const std::string& host,
+    std::uint16_t port)
+{
+    CrateProject project;
+    project.mvlcHost = host;
+    project.mvlcCommandPort = port;
+    project.streamHost = host;
+    project.streamPort = 42333U;
+    project.modules.push_back({
+        "MDPP-32 SCP",
+        0x11000000U,
+        MdppBackend::Scp,
+        "not-used-by-controller-status.mwwscp",
+    });
+    return project;
+}
+
+const char* OwnershipClassification(GuidedTunerOwnershipState ownership)
+{
+    switch (ownership)
+    {
+    case GuidedTunerOwnershipState::Disconnected:
+        return "disconnected";
+    case GuidedTunerOwnershipState::Checking:
+        return "checking";
+    case GuidedTunerOwnershipState::Idle:
+        return "idle";
+    case GuidedTunerOwnershipState::InUse:
+        return "in-use";
+    case GuidedTunerOwnershipState::SessionOpen:
+        return "session-open";
+    case GuidedTunerOwnershipState::OwnershipLost:
+        return "ownership-lost";
+    case GuidedTunerOwnershipState::RecoveryRequired:
+        return "recovery-required";
+    case GuidedTunerOwnershipState::Failed:
+        return "failed";
+    }
+    return "unknown";
+}
+
+void PrintHexReading(
+    std::ostream& output,
+    const char* name,
+    std::uint32_t value)
+{
+    output << name << ": 0x"
+           << std::uppercase << std::hex << std::setw(8)
+           << std::setfill('0') << value
+           << std::dec << std::nouppercase << std::setfill(' ') << '\n';
+}
+
+bool ResolveProject(
+    const CliOptions& options,
+    CrateProject& project,
+    std::ostream& errorOutput)
+{
+    if (!options.projectPath.empty())
+    {
+        const auto loaded = LoadCrateProject(options.projectPath);
+        if (!loaded.success || !loaded.project)
+        {
+            errorOutput << "error: " << loaded.message << '\n';
+            return false;
+        }
+        project = *loaded.project;
+    }
+    else
+    {
+        project = MakeHostOnlyProject(
+            options.host, options.port.value_or(32768U));
+    }
+
+    if (!options.host.empty())
+    {
+        project.mvlcHost = options.host;
+    }
+    if (options.port)
+    {
+        project.mvlcCommandPort = *options.port;
+    }
+
+    const auto validation = ValidateCrateProject(project);
+    if (!validation.success)
+    {
+        errorOutput << "error: " << validation.message << '\n';
+        return false;
+    }
+    if (options.moduleIndex >= project.modules.size())
+    {
+        errorOutput << "error: module " << options.moduleIndex + 1U
+                    << " is outside the crate project\n";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+const char* FidgetCliUsage() noexcept
+{
+    return
+        "Usage:\n"
+        "  fidget_cli status (--project FILE | --host HOST) [options]\n"
+        "\n"
+        "Options:\n"
+        "  --project FILE  Load a crate project\n"
+        "  --host HOST     Use or override the MVLC host\n"
+        "  --port PORT     Use or override the MVLC command port\n"
+        "  --module N      Select the one-based project module (default 1)\n"
+        "  -h, --help      Show this help\n";
+}
+
+CliOptionsParseResult ParseCliOptions(
+    int argumentCount,
+    const char* const* arguments)
+{
+    CliOptionsParseResult result;
+    if (argumentCount < 2)
+    {
+        result.error = "missing command";
+        return result;
+    }
+
+    const std::string_view command = arguments[1];
+    if (command == "-h" || command == "--help")
+    {
+        result.success = true;
+        result.options.showHelp = true;
+        return result;
+    }
+    if (command != "status")
+    {
+        result.error = "unknown command '" + std::string(command) + "'";
+        return result;
+    }
+
+    for (int index = 2; index < argumentCount; ++index)
+    {
+        const std::string_view option = arguments[index];
+        if (option == "-h" || option == "--help")
+        {
+            result.options.showHelp = true;
+            continue;
+        }
+        if (option != "--project"
+            && option != "--host"
+            && option != "--port"
+            && option != "--module")
+        {
+            result.error = "unknown option '" + std::string(option) + "'";
+            return result;
+        }
+        if (++index >= argumentCount)
+        {
+            result.error = "missing value after '" + std::string(option) + "'";
+            return result;
+        }
+
+        const std::string value = arguments[index];
+        if (option == "--project")
+        {
+            result.options.projectPath = value;
+        }
+        else if (option == "--host")
+        {
+            result.options.host = value;
+        }
+        else if (option == "--port")
+        {
+            std::uint64_t port = 0U;
+            if (!ParseUnsigned(
+                    value,
+                    std::numeric_limits<std::uint16_t>::max(),
+                    port)
+                || port == 0U)
+            {
+                result.error = "invalid command port '" + value + "'";
+                return result;
+            }
+            result.options.port = static_cast<std::uint16_t>(port);
+        }
+        else
+        {
+            std::uint64_t module = 0U;
+            if (!ParseUnsigned(
+                    value,
+                    std::numeric_limits<std::size_t>::max(),
+                    module)
+                || module == 0U)
+            {
+                result.error = "invalid module number '" + value + "'";
+                return result;
+            }
+            result.options.moduleIndex = static_cast<std::size_t>(module - 1U);
+        }
+    }
+
+    if (result.options.projectPath.empty() && result.options.host.empty()
+        && !result.options.showHelp)
+    {
+        result.error = "status requires --project FILE or --host HOST";
+        return result;
+    }
+
+    result.success = true;
+    return result;
+}
+
+int RunCliStatus(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    CrateProject project;
+    if (!ResolveProject(options, project, errorOutput))
+    {
+        return 1;
+    }
+
+    const auto beforeProject = tunerControl.CurrentSnapshot()->revision;
+    UseCrateProjectCommand useProject;
+    useProject.projectPath = options.projectPath;
+    useProject.project = std::move(project);
+    useProject.activeModuleIndex = options.moduleIndex;
+    tunerControl.Submit(std::move(useProject));
+    if (!WaitForRevision(
+            tunerControl,
+            beforeProject,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.projectActive;
+            }))
+    {
+        errorOutput << "error: project activation timed out\n";
+        return 1;
+    }
+
+    const auto beforeCheck = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(CheckStatusCommand{});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeCheck,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.ownership
+                    != GuidedTunerOwnershipState::Checking;
+            }))
+    {
+        errorOutput << "error: MVLC status check timed out\n";
+        return 1;
+    }
+
+    const auto snapshot = tunerControl.CurrentSnapshot();
+    output << "ownership: "
+           << OwnershipClassification(snapshot->ownership) << '\n';
+    PrintHexReading(output, "mvlc_hardware_id", snapshot->mvlcHardwareId);
+    PrintHexReading(
+        output, "mvlc_firmware_revision", snapshot->mvlcFirmwareRevision);
+    PrintHexReading(output, "mvlc_daq_mode", snapshot->mvlcDaqMode);
+    if (!snapshot->statusMessages.empty())
+    {
+        output << "message: "
+               << snapshot->statusMessages.back().summary << '\n';
+    }
+
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+    return snapshot->ownership == GuidedTunerOwnershipState::Idle ? 0 : 1;
+}
+
+} // namespace fidget

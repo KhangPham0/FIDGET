@@ -1,5 +1,6 @@
 add_subdirectory(core)
 add_subdirectory(hardware)
+add_subdirectory(cli)
 
 add_executable(fidget
     main.cpp

@@ -108,3 +108,12 @@ target_link_libraries(ownership_service_tests PRIVATE
 )
 
 add_test(NAME ownership_service_tests COMMAND ownership_service_tests)
+
+add_executable(cli_tests cli_tests.cpp)
+target_link_libraries(cli_tests PRIVATE
+    fidget_cli_support
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME cli_tests COMMAND cli_tests)

@@ -1,0 +1,53 @@
+#ifndef FIDGET_CLI_CLI_APP_H
+#define FIDGET_CLI_CLI_APP_H
+
+#include "core/TunerControl.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iosfwd>
+#include <optional>
+#include <string>
+
+namespace fidget {
+
+enum class CliCommand
+{
+    Status,
+};
+
+struct CliOptions
+{
+    CliCommand command = CliCommand::Status;
+    std::string projectPath;
+    std::string host;
+    std::optional<std::uint16_t> port;
+    std::size_t moduleIndex = 0U;
+    bool showHelp = false;
+};
+
+struct CliOptionsParseResult
+{
+    bool success = false;
+    CliOptions options;
+    std::string error;
+};
+
+using CliInterruptRequested = std::function<bool()>;
+
+[[nodiscard]] const char* FidgetCliUsage() noexcept;
+[[nodiscard]] CliOptionsParseResult ParseCliOptions(
+    int argumentCount,
+    const char* const* arguments);
+
+[[nodiscard]] int RunCliStatus(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested);
+
+} // namespace fidget
+
+#endif
