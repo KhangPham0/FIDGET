@@ -6,6 +6,7 @@ add_executable(fidget
     ui/App.cpp
     ui/Fonts.cpp
     ui/Theme.cpp
+    ui/WorkflowRail.cpp
 )
 
 # The version shown in the status strip comes from the project() call.
@@ -17,7 +18,7 @@ target_include_directories(fidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(OpenGL REQUIRED)
 
 # implot links imgui publicly, so imgui and glfw come with it.
-target_link_libraries(fidget PRIVATE fidget_core implot OpenGL::GL)
+target_link_libraries(fidget PRIVATE fidget_hardware implot OpenGL::GL)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(fidget PRIVATE -Wall -Wextra -Wpedantic)

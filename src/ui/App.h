@@ -1,10 +1,11 @@
 #ifndef FIDGET_UI_APP_H
 #define FIDGET_UI_APP_H
 
-#include <string>
-
+#include "core/TunerControl.h"
 #include "ui/Fonts.h"
 #include "ui/Theme.h"
+
+#include <string>
 
 struct GLFWwindow;
 
@@ -15,6 +16,8 @@ namespace fidget {
 class App
 {
 public:
+    explicit App(ITunerControl& tunerControl);
+
     // Smoke test mode: render this many frames, then close. A negative
     // count (the default) runs until the user closes the window.
     void SetFrameLimit(long frames);
@@ -26,8 +29,8 @@ private:
     bool Init();
     void DrawFrame();
     void DrawStatusStrip(float height);
-    void DrawWorkflowPanel();
-    void DrawStagePanel();
+    void DrawWorkflowPanel(const TunerSnapshot& snapshot);
+    void DrawStagePanel(const TunerSnapshot& snapshot);
     void DrawActivityLogPanel();
     void HandleShortcuts();
     void ChangeFontScale(int direction);
@@ -39,6 +42,7 @@ private:
     void Shutdown();
 
     GLFWwindow* m_window = nullptr;
+    ITunerControl& m_tunerControl;
     Theme m_theme;
     Fonts m_fonts;
 

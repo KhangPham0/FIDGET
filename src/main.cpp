@@ -3,12 +3,17 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
+#include "hardware/MvlcCommandTransport.h"
+#include "hardware/OwnershipService.h"
 #include "ui/App.h"
 
 int main(int argc, char** argv)
 {
-    fidget::App app;
+    auto transport = std::make_unique<fidget::MvlcCommandTransport>();
+    fidget::OwnershipService tunerControl(std::move(transport));
+    fidget::App app(tunerControl);
 
     // Smoke test mode: "fidget --frames N" renders N frames and exits, so a
     // build can be verified without a person closing the window.

@@ -1,5 +1,9 @@
 #include "App.h"
 
+#include "core/GuidedWorkflow.h"
+#include "core/TunerSnapshot.h"
+#include "ui/WorkflowRail.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -56,6 +60,11 @@ std::filesystem::path ExecutableDirectory()
 }
 
 } // namespace
+
+App::App(ITunerControl& tunerControl)
+    : m_tunerControl(tunerControl)
+{
+}
 
 void App::SetFrameLimit(long frames)
 {
@@ -209,8 +218,9 @@ void App::DrawFrame()
     }
     ImGui::End();
 
-    DrawWorkflowPanel();
-    DrawStagePanel();
+    const auto snapshot = m_tunerControl.CurrentSnapshot();
+    DrawWorkflowPanel(*snapshot);
+    DrawStagePanel(*snapshot);
     DrawActivityLogPanel();
 }
 
@@ -246,19 +256,27 @@ void App::DrawStatusStrip(float height)
     ImGui::PopStyleColor();
 }
 
-void App::DrawWorkflowPanel()
+void App::DrawWorkflowPanel(const TunerSnapshot& snapshot)
 {
     ImGui::Begin(kWorkflowTitle);
-    ImGui::TextDisabled("The guided workflow rail");
-    ImGui::TextDisabled("arrives with the tuner");
-    ImGui::TextDisabled("services.");
+    const auto decision = PlanGuidedTunerWorkflow(
+        MakeGuidedTunerInputs(snapshot));
+    if (DrawWorkflowRail(decision, m_theme))
+    {
+        ImGui::SetWindowFocus(kStageTitle);
+    }
     ImGui::End();
 }
 
-void App::DrawStagePanel()
+void App::DrawStagePanel(const TunerSnapshot& snapshot)
 {
     ImGui::Begin(kStageTitle);
-    ImGui::TextDisabled("Stage screens arrive with the tuner services.");
+    const auto decision = PlanGuidedTunerWorkflow(
+        MakeGuidedTunerInputs(snapshot));
+    ImGui::TextColored(
+        m_theme.highlight, "%s", GuidedTunerStageName(decision.stage));
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", GuidedTunerStageMessage(decision.stage));
     ImGui::End();
 }
 
