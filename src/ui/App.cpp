@@ -301,26 +301,26 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     {
         m_projectStage.Draw(m_tunerControl, snapshot, m_theme);
     }
-    else if (decision.step == 2U || decision.step == 3U)
+    else if (decision.step == 2U)
     {
         m_sessionStage.Draw(m_tunerControl, snapshot, m_theme);
-        if (decision.step == 3U)
-        {
-            ImGui::Spacing();
-            ImGui::TextDisabled(
-                "The next guided stage is not implemented yet. Session "
-                "release remains available above.");
-        }
+    }
+    else if (decision.step == 3U)
+    {
+        m_profileStage.Draw(m_tunerControl, snapshot, m_theme);
+    }
+    else if (decision.step == 4U)
+    {
+        m_startupAuditStage.Draw(m_tunerControl, snapshot, m_theme);
     }
     else
     {
-        m_startupAuditStage.Draw(m_tunerControl, snapshot, m_theme);
+        m_configurationStage.Draw(m_tunerControl, snapshot, m_theme);
         if (decision.step > 5U)
         {
             ImGui::Spacing();
             ImGui::TextDisabled(
-                "The next guided stage is not implemented yet. Session "
-                "release remains available above.");
+                "Startup planning and acquisition arrive in later phases.");
         }
     }
     ImGui::End();

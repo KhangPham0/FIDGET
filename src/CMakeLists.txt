@@ -9,7 +9,9 @@ endif()
 add_executable(fidget
     main.cpp
     ui/App.cpp
+    ui/ConfigurationStage.cpp
     ui/Fonts.cpp
+    ui/ProfileStage.cpp
     ui/ProjectStage.cpp
     ui/SessionStage.cpp
     ui/StartupAuditStage.cpp

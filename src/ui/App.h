@@ -2,7 +2,9 @@
 #define FIDGET_UI_APP_H
 
 #include "core/TunerControl.h"
+#include "ui/ConfigurationStage.h"
 #include "ui/Fonts.h"
+#include "ui/ProfileStage.h"
 #include "ui/ProjectStage.h"
 #include "ui/SessionStage.h"
 #include "ui/StartupAuditStage.h"
@@ -50,7 +52,9 @@ private:
     Fonts m_fonts;
     ProjectStage m_projectStage;
     SessionStage m_sessionStage;
+    ProfileStage m_profileStage;
     StartupAuditStage m_startupAuditStage;
+    ConfigurationStage m_configurationStage;
 
     long m_frameLimit = -1;
 
