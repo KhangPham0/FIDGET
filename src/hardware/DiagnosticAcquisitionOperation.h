@@ -20,6 +20,9 @@ inline constexpr std::uint16_t DiagnosticReadoutResetRegister = 0x6034U;
 inline constexpr std::uint16_t DiagnosticAcquisitionControlRegister = 0x603AU;
 inline constexpr std::uint16_t DiagnosticFifoResetRegister = 0x603CU;
 inline constexpr std::uint16_t DiagnosticOutputFormatRegister = 0x6044U;
+inline constexpr std::uint16_t DiagnosticDaqModeRegister = 0x1300U;
+inline constexpr std::uint32_t DiagnosticDaqEnableValue = 0x000FU;
+inline constexpr int DiagnosticDataReceiveTimeoutMilliseconds = 100;
 
 struct DiagnosticAcquisitionPreparationRequest
 {
@@ -52,6 +55,14 @@ PrepareDiagnosticAcquisition(
     const DiagnosticAcquisitionPreparationRequest& request,
     const std::atomic<bool>& cancellationRequested,
     const ScpCaptureOwnershipGate& ownershipGate);
+
+[[nodiscard]] DiagnosticAcquisitionPreparationResult
+StartPreparedDiagnosticAcquisition(
+    ICommandTransport& commandTransport,
+    IDataReceiver& dataReceiver,
+    DiagnosticAcquisitionPreparationResult prepared,
+    const DiagnosticAcquisitionPreparationRequest& request,
+    const std::atomic<bool>& cancellationRequested);
 
 } // namespace fidget
 

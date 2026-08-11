@@ -13,14 +13,17 @@
 namespace fidget {
 namespace {
 
+constexpr int DefaultDataSocketTimeoutMilliseconds = 100;
+
 std::string DataSocketError(const char* operation)
 {
     return std::string(operation) + ": " + std::strerror(errno);
 }
 
-bool SetDataReceiveTimeout(int socketDescriptor,
-                           int timeoutMilliseconds,
-                           std::string& error)
+bool SetDataSocketTimeout(int socketDescriptor,
+                          int option,
+                          int timeoutMilliseconds,
+                          std::string& error)
 {
     if (timeoutMilliseconds < 0)
     {
@@ -35,7 +38,7 @@ bool SetDataReceiveTimeout(int socketDescriptor,
     if (::setsockopt(
             socketDescriptor,
             SOL_SOCKET,
-            SO_RCVTIMEO,
+            option,
             &timeout,
             sizeof(timeout)) != 0)
     {
@@ -120,6 +123,21 @@ TransportOperationResult MvlcDataReceiver::Open(
     {
         return {false, lastError};
     }
+    std::string timeoutError;
+    if (!SetDataSocketTimeout(
+            socketDescriptor_,
+            SO_RCVTIMEO,
+            DefaultDataSocketTimeoutMilliseconds,
+            timeoutError)
+        || !SetDataSocketTimeout(
+            socketDescriptor_,
+            SO_SNDTIMEO,
+            DefaultDataSocketTimeoutMilliseconds,
+            timeoutError))
+    {
+        Close();
+        return {false, std::move(timeoutError)};
+    }
     return {true, {}};
 }
 
@@ -164,8 +182,9 @@ TransportReceiveResult MvlcDataReceiver::Receive(
     }
 
     std::string timeoutError;
-    if (!SetDataReceiveTimeout(
-            socketDescriptor_, timeoutMilliseconds, timeoutError))
+    if (!SetDataSocketTimeout(
+            socketDescriptor_, SO_RCVTIMEO,
+            timeoutMilliseconds, timeoutError))
     {
         return {
             TransportReceiveStatus::Error,

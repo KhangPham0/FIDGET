@@ -457,4 +457,228 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
     return prepared;
 }
 
+DiagnosticAcquisitionPreparationResult StartPreparedDiagnosticAcquisition(
+    ICommandTransport& commandTransport,
+    IDataReceiver& dataReceiver,
+    DiagnosticAcquisitionPreparationResult prepared,
+    const DiagnosticAcquisitionPreparationRequest& request,
+    const std::atomic<bool>& cancellationRequested)
+{
+    auto& result = prepared.acquisition;
+    std::string failure;
+    const auto fail = [&failure](std::string message) {
+        if (!failure.empty())
+        {
+            failure += ' ';
+        }
+        failure += std::move(message);
+    };
+
+    if (result.state != DiagnosticAcquisitionState::Starting
+        || !result.recoveryJournalPrepared)
+    {
+        fail("Diagnostic acquisition cannot start without completed "
+             "isolation and a prepared recovery journal.");
+    }
+    if (request.commandPort == 0xFFFFU)
+    {
+        fail("The MVLC command port has no adjacent data port.");
+    }
+    if (!failure.empty())
+    {
+        result.state = DiagnosticAcquisitionState::Failed;
+        result.message = failure;
+        return prepared;
+    }
+
+    result.dataPort = static_cast<std::uint16_t>(request.commandPort + 1U);
+    const auto opened = dataReceiver.Open(request.host, result.dataPort);
+    if (!opened.success)
+    {
+        fail("Could not open the MVLC data path: " + opened.error);
+    }
+
+    if (failure.empty())
+    {
+        const std::array<std::uint32_t, 2> redirectWords{
+            MvlcCommandBufferStart,
+            MvlcCommandBufferEnd,
+        };
+        const auto redirect = EncodeMvlcWordsLittleEndian(
+            redirectWords.data(), redirectWords.size());
+        const auto sent = dataReceiver.Send(
+            redirect.data(), redirect.size());
+        if (!sent.success)
+        {
+            fail("Could not redirect the MVLC Ethernet data stream: "
+                 + sent.error);
+        }
+    }
+
+    const auto writeLocal = [&](const MvlcLocalRegisterWrite* writes,
+                                const std::size_t writeCount,
+                                std::string message) {
+        const auto written = WriteLocalRegisters(
+            commandTransport,
+            writes,
+            writeCount,
+            prepared.nextSuperReference,
+            cancellationRequested);
+        if (!written.success)
+        {
+            fail(std::move(message) + written.error);
+            return false;
+        }
+        return true;
+    };
+    const auto writeVme = [&](const std::uint16_t registerOffset,
+                              const std::uint16_t value,
+                              const char* name) {
+        const auto written = WriteVmeD16(
+            commandTransport,
+            result.baseAddress + registerOffset,
+            value,
+            prepared.nextSuperReference,
+            prepared.nextStackReference,
+            cancellationRequested);
+        if (!written.success)
+        {
+            fail(RegisterOperationError(
+                "write", name, registerOffset, written.error));
+            return false;
+        }
+        return true;
+    };
+
+    if (failure.empty())
+    {
+        auto stackInstallWrites = prepared.readoutPlan.stackUploadWrites;
+        stackInstallWrites.push_back({
+            prepared.recoveryRecord.ownershipTokenRegister,
+            prepared.recoveryRecord.ownershipTokenValue,
+        });
+        static_cast<void>(writeLocal(
+            stackInstallWrites.data(),
+            stackInstallWrites.size(),
+            "Could not upload the diagnostic readout stack and unique "
+            "ownership token: "));
+    }
+    if (failure.empty())
+    {
+        const std::array<MvlcLocalRegisterWrite, 2> setupWrites{{
+            {
+                prepared.readoutPlan.stackOffsetRegister,
+                prepared.readoutPlan.stackMemoryOffset,
+            },
+            {prepared.readoutPlan.stackTriggerRegister, 0U},
+        }};
+        static_cast<void>(writeLocal(
+            setupWrites.data(),
+            setupWrites.size(),
+            "Could not prepare the diagnostic readout stack: "));
+    }
+    if (failure.empty())
+    {
+        const MvlcLocalRegisterWrite triggerWrite{
+            prepared.readoutPlan.stackTriggerRegister,
+            prepared.readoutPlan.triggerValue,
+        };
+        static_cast<void>(writeLocal(
+            &triggerWrite,
+            1U,
+            "Could not enable the diagnostic IRQ stack: "));
+    }
+
+    struct MdppControlWrite
+    {
+        std::uint16_t registerOffset;
+        std::uint16_t value;
+        const char* name;
+    };
+    constexpr std::array<MdppControlWrite, 4> StartSequence{{
+        {DiagnosticAcquisitionControlRegister, 0U, "stop acquisition"},
+        {DiagnosticFifoResetRegister, 1U, "reset FIFO"},
+        {DiagnosticReadoutResetRegister, 1U, "reset readout"},
+        {DiagnosticAcquisitionControlRegister, 1U, "start acquisition"},
+    }};
+    for (const auto& write : StartSequence)
+    {
+        if (!failure.empty() || cancellationRequested.load())
+        {
+            break;
+        }
+        static_cast<void>(writeVme(
+            write.registerOffset, write.value, write.name));
+    }
+
+    if (failure.empty() && !cancellationRequested.load())
+    {
+        const MvlcLocalRegisterWrite daqWrite{
+            DiagnosticDaqModeRegister,
+            DiagnosticDaqEnableValue,
+        };
+        static_cast<void>(writeLocal(
+            &daqWrite,
+            1U,
+            "Could not enable MVLC DAQ mode: "));
+    }
+
+    if (failure.empty() && !cancellationRequested.load())
+    {
+        constexpr std::array<std::uint16_t, 1> DaqModeAddress{
+            DiagnosticDaqModeRegister,
+        };
+        const auto daqMode = ReadLocalRegisters(
+            commandTransport,
+            DaqModeAddress.data(),
+            DaqModeAddress.size(),
+            prepared.nextSuperReference,
+            cancellationRequested);
+        if (!daqMode.success)
+        {
+            fail("Could not verify MVLC DAQ mode: " + daqMode.error);
+        }
+        else if (daqMode.values.empty()
+                 || (daqMode.values.front() & 0x1U) == 0U)
+        {
+            fail("MVLC DAQ mode did not enable autonomous-stack bit 0.");
+        }
+    }
+
+    if (failure.empty() && !cancellationRequested.load())
+    {
+        prepared.recoveryRecord.phase = TunerRecoveryPhase::Active;
+        const auto saved = SaveTunerRecoveryJournal(
+            prepared.recoveryRecord, request.recoveryJournalPath);
+        if (!saved.success)
+        {
+            fail("DAQ mode was enabled, but the active recovery record "
+                 "could not be committed: " + saved.message);
+        }
+        else
+        {
+            result.recoveryJournalActive = true;
+        }
+    }
+    if (cancellationRequested.load() && failure.empty())
+    {
+        fail("Direct acquisition startup was cancelled.");
+    }
+
+    if (!failure.empty())
+    {
+        result.state = DiagnosticAcquisitionState::Failed;
+        result.message = failure;
+        dataReceiver.Close();
+        return prepared;
+    }
+
+    result.state = DiagnosticAcquisitionState::Running;
+    result.message =
+        "Direct diagnostic acquisition is running with every configured "
+        "non-target MDPP quiesced. The selected module's sample source and "
+        "all filtering registers are unchanged.";
+    return prepared;
+}
+
 } // namespace fidget

@@ -399,4 +399,83 @@ MvlcLocalWriteResult WriteLocalRegisters(
     return result;
 }
 
+MvlcLocalBatchReadResult ReadLocalRegisters(
+    ICommandTransport& transport,
+    const std::uint16_t* addresses,
+    const std::size_t addressCount,
+    std::uint16_t& nextReference,
+    const std::atomic<bool>& cancellationRequested)
+{
+    MvlcLocalBatchReadResult result;
+    const std::uint16_t reference = nextReference++;
+    const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+        reference, addresses, addressCount);
+    if (!request.success)
+    {
+        result.error = request.error;
+        return result;
+    }
+    const auto requestBytes = EncodeMvlcWordsLittleEndian(
+        request.words.data(), request.words.size());
+    std::array<std::byte, MvlcCommandResponseBufferSize> response{};
+
+    for (int attempt = 0;
+         attempt < MvlcFingerprintReadAttemptCount
+             && !cancellationRequested.load();
+         ++attempt)
+    {
+        const auto sent = transport.Send(
+            requestBytes.data(), requestBytes.size());
+        if (!sent.success)
+        {
+            result.error = sent.error;
+            return result;
+        }
+
+        for (int packetIndex = 0;
+             packetIndex < MvlcMaximumResponseDatagrams
+                 && !cancellationRequested.load();
+             ++packetIndex)
+        {
+            const auto received = transport.Receive(
+                response.data(),
+                response.size(),
+                MvlcCommandResponseTimeoutMilliseconds);
+            if (received.status == TransportReceiveStatus::Timeout)
+            {
+                break;
+            }
+            if (received.status == TransportReceiveStatus::Error)
+            {
+                result.error = received.error;
+                return result;
+            }
+
+            auto parsed = ParseMvlcLocalRegisterBatchReadReply(
+                response.data(),
+                received.bytesReceived,
+                reference,
+                addresses,
+                addressCount);
+            if (parsed.status == MvlcLocalReadReplyStatus::Match)
+            {
+                result.success = true;
+                result.values = std::move(parsed.values);
+                return result;
+            }
+            if (parsed.status == MvlcLocalReadReplyStatus::Malformed)
+            {
+                result.error =
+                    "receive: malformed MVLC register-batch response";
+                return result;
+            }
+        }
+    }
+
+    result.error = cancellationRequested.load()
+        ? "MVLC register-batch read cancelled"
+        : "No matching MVLC response after six register-batch attempts";
+    return result;
+}
+
 } // namespace fidget

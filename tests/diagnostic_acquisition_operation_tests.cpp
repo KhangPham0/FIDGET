@@ -8,14 +8,85 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
 constexpr std::uint32_t TargetBase = 0x11000000U;
 constexpr std::uint32_t OtherBase = 0x22000000U;
 constexpr std::uint32_t OwnershipToken = 0xA55A1234U;
+
+class FakeDataReceiver final : public fidget::IDataReceiver
+{
+public:
+    [[nodiscard]] fidget::TransportOperationResult Open(
+        const std::string& host,
+        const std::uint16_t port) override
+    {
+        host_ = host;
+        port_ = port;
+        open_ = true;
+        return {true, {}};
+    }
+
+    [[nodiscard]] fidget::TransportOperationResult Send(
+        const std::byte* data,
+        const std::size_t size) override
+    {
+        if (!open_)
+        {
+            return {false, "fake data send: receiver is closed"};
+        }
+        sent_.emplace_back(data, data + size);
+        return {true, {}};
+    }
+
+    [[nodiscard]] fidget::TransportReceiveResult Receive(
+        std::byte*, std::size_t, int) override
+    {
+        return {
+            fidget::TransportReceiveStatus::Timeout,
+            0U,
+            "data receive: timed out",
+        };
+    }
+
+    void Close() noexcept override
+    {
+        open_ = false;
+    }
+
+    [[nodiscard]] bool IsOpen() const noexcept
+    {
+        return open_;
+    }
+
+    [[nodiscard]] const std::string& Host() const noexcept
+    {
+        return host_;
+    }
+
+    [[nodiscard]] std::uint16_t Port() const noexcept
+    {
+        return port_;
+    }
+
+    [[nodiscard]] const std::vector<std::vector<std::byte>>& Sent() const
+        noexcept
+    {
+        return sent_;
+    }
+
+private:
+    bool open_ = false;
+    std::string host_;
+    std::uint16_t port_ = 0U;
+    std::vector<std::vector<std::byte>> sent_;
+};
 
 class JournalPath
 {
@@ -150,6 +221,48 @@ void QueueIsolationWrites(
         references,
         OtherBase + fidget::DiagnosticReadoutResetRegister,
         1U);
+}
+
+void QueueLocalWrite(
+    fidget::test::FakeCommandTransport& transport,
+    fidget::test::TransactionReferences& references,
+    const std::vector<fidget::MvlcLocalRegisterWrite>& writes)
+{
+    const auto request = fidget::BuildMvlcLocalRegisterWriteRequest(
+        references.super, writes.data(), writes.size());
+    REQUIRE(request.success);
+    transport.QueueExchange({
+        fidget::test::EncodeWords(request.words),
+        {fidget::test::FakeReceiveAction::Datagram(
+            fidget::test::MakeCommandPacket({
+                fidget::test::MakeSuperFrame(references.super),
+            }))},
+    });
+    ++references.super;
+}
+
+void QueueLocalRead(
+    fidget::test::FakeCommandTransport& transport,
+    fidget::test::TransactionReferences& references,
+    const std::uint16_t address,
+    const std::uint32_t value)
+{
+    const auto request = fidget::BuildMvlcLocalRegisterBatchReadRequest(
+        references.super, &address, 1U);
+    REQUIRE(request.success);
+    const std::vector<std::uint32_t> frame{
+        (static_cast<std::uint32_t>(fidget::MvlcSuperFrameType) << 24U)
+            | 3U,
+        fidget::MvlcReferenceWordCommand | references.super,
+        fidget::MvlcReadLocalCommand | address,
+        value,
+    };
+    transport.QueueExchange({
+        fidget::test::EncodeWords(request.words),
+        {fidget::test::FakeReceiveAction::Datagram(
+            fidget::test::MakeCommandPacket({frame}))},
+    });
+    ++references.super;
 }
 
 } // namespace
@@ -330,4 +443,148 @@ TEST_CASE("acquisition cannot begin when recovery journaling is unavailable")
         CHECK(operation.address != 0x1104U);
         CHECK(operation.address != 0x1204U);
     }
+}
+
+TEST_CASE("a prepared acquisition installs the stack starts and journals active")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences queued{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, queued);
+
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+    CHECK(prepared.nextSuperReference == queued.super);
+    CHECK(prepared.nextStackReference == queued.stack);
+
+    std::vector<MvlcLocalRegisterWrite> stackWrites =
+        prepared.readoutPlan.stackUploadWrites;
+    stackWrites.push_back({0x221CU, OwnershipToken});
+    QueueLocalWrite(transport, queued, stackWrites);
+    QueueLocalWrite(
+        transport,
+        queued,
+        {
+            {0x1204U, 0x0200U},
+            {0x1104U, 0U},
+        });
+    QueueLocalWrite(
+        transport,
+        queued,
+        {{0x1104U, prepared.readoutPlan.triggerValue}});
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticFifoResetRegister,
+        1U);
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticReadoutResetRegister,
+        1U);
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        1U);
+    QueueLocalWrite(
+        transport,
+        queued,
+        {{DiagnosticDaqModeRegister, DiagnosticDaqEnableValue}});
+    QueueLocalRead(
+        transport,
+        queued,
+        DiagnosticDaqModeRegister,
+        DiagnosticDaqEnableValue);
+
+    FakeDataReceiver dataReceiver;
+    prepared = StartPreparedDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Running);
+    CHECK(prepared.acquisition.dataPort == 32769U);
+    CHECK(prepared.acquisition.recoveryJournalActive);
+    CHECK(dataReceiver.IsOpen());
+    CHECK(dataReceiver.Host() == "mvlc-test");
+    CHECK(dataReceiver.Port() == 32769U);
+    REQUIRE(dataReceiver.Sent().size() == 1U);
+    const std::array<std::uint32_t, 2> redirectWords{
+        MvlcCommandBufferStart,
+        MvlcCommandBufferEnd,
+    };
+    CHECK(dataReceiver.Sent().front()
+          == EncodeMvlcWordsLittleEndian(
+              redirectWords.data(), redirectWords.size()));
+    CHECK(prepared.nextSuperReference == queued.super);
+    CHECK(prepared.nextStackReference == queued.stack);
+
+    const auto loaded = LoadTunerRecoveryJournal(journal.Get());
+    REQUIRE(loaded.success);
+    REQUIRE(loaded.record.has_value());
+    CHECK(loaded.record->phase == TunerRecoveryPhase::Active);
+
+    const auto operations = DecodeWireOperations(transport);
+    // The generic wire decoder also recognizes the VME-write opcode stored
+    // inside the uploaded readout stack. The four final operations are the
+    // actual MDPP stop, resets, and start transaction.
+    REQUIRE(operations.size() == 8U);
+    CHECK(operations[4].write);
+    CHECK(operations[4].address
+          == TargetBase + DiagnosticAcquisitionControlRegister);
+    CHECK(operations[4].value == 0U);
+    CHECK(operations[7].write);
+    CHECK(operations[7].address
+          == TargetBase + DiagnosticAcquisitionControlRegister);
+    CHECK(operations[7].value == 1U);
+}
+
+TEST_CASE("command port 65535 refuses acquisition before opening data")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+
+    auto request = MakeRequest(journal.Get());
+    request.commandPort = 0xFFFFU;
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+
+    FakeDataReceiver dataReceiver;
+    prepared = StartPreparedDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.message
+          == "The MVLC command port has no adjacent data port.");
+    CHECK_FALSE(dataReceiver.IsOpen());
+    CHECK(dataReceiver.Sent().empty());
 }
