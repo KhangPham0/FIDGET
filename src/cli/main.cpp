@@ -87,7 +87,27 @@ int main(int argc, char** argv)
             interrupted,
             WaitForSessionInput);
     }
-    return fidget::RunCliAudit(
+    if (parsed.options.command == fidget::CliCommand::Audit)
+    {
+        return fidget::RunCliAudit(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
+    if (parsed.options.command == fidget::CliCommand::Capture)
+    {
+        return fidget::RunCliCapture(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
+    return fidget::RunCliCompare(
         parsed.options,
         tunerControl,
         std::cin,

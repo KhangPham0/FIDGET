@@ -3,6 +3,7 @@ add_library(fidget_cli_support STATIC
 )
 
 target_include_directories(fidget_cli_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(fidget_cli_support PUBLIC fidget_core)
 
 add_executable(fidget_cli main.cpp)
 target_link_libraries(fidget_cli PRIVATE

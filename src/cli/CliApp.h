@@ -17,6 +17,8 @@ enum class CliCommand
     Status,
     Session,
     Audit,
+    Capture,
+    Compare,
 };
 
 enum class CliSessionWaitResult
@@ -34,6 +36,8 @@ struct CliOptions
     std::string host;
     std::optional<std::uint16_t> port;
     std::size_t moduleIndex = 0U;
+    std::string savePath;
+    std::string profilePath;
     bool showHelp = false;
 };
 
@@ -69,6 +73,22 @@ using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
     const CliWaitForSessionInput& waitForInput);
 
 [[nodiscard]] int RunCliAudit(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliCapture(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliCompare(
     const CliOptions& options,
     ITunerControl& tunerControl,
     std::istream& input,

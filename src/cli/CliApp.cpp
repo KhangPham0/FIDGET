@@ -1,10 +1,13 @@
 #include "cli/CliApp.h"
 
 #include "core/CrateProject.h"
+#include "core/ScpProfile.h"
+#include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 
 #include <charconv>
 #include <chrono>
+#include <cstdio>
 #include <iomanip>
 #include <istream>
 #include <limits>
@@ -225,6 +228,254 @@ bool ReleaseSession(
     return true;
 }
 
+int ConfirmAndOpenSession(
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    output << "I stopped the MVME run and completely quit MVME [y/N]: "
+           << std::flush;
+    std::string confirmation;
+    if (!std::getline(input, confirmation)
+        || !HandoffConfirmedByUser(std::move(confirmation)))
+    {
+        output << "session: not opened\n";
+        return interruptRequested && interruptRequested() ? 130 : 1;
+    }
+
+    const auto beforeConfirmation =
+        tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(SetMvmeHandoffConfirmedCommand{true});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeConfirmation,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.mvmeHandoffConfirmed;
+            }))
+    {
+        errorOutput << "error: handoff confirmation timed out\n";
+        return 1;
+    }
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const auto beforeOpen = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(OpenSessionCommand{});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeOpen,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.ownership
+                    != GuidedTunerOwnershipState::Checking;
+            }))
+    {
+        errorOutput << "error: session open timed out\n";
+        return 1;
+    }
+
+    const auto snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        errorOutput << "error: session open failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+
+    output << "session: open\n" << std::flush;
+    return 0;
+}
+
+int ReleaseOperationSession(
+    ITunerControl& tunerControl,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested,
+    int operationResult)
+{
+    const bool interrupted = interruptRequested && interruptRequested();
+    if (!ReleaseSession(tunerControl, errorOutput))
+    {
+        return 1;
+    }
+    output << "session: released\n";
+    if (interrupted || (interruptRequested && interruptRequested()))
+    {
+        return 130;
+    }
+    return operationResult;
+}
+
+void PrintConfigurationValue(
+    std::ostream& output,
+    const std::string& scope,
+    const std::string& registerName,
+    const std::string& setting,
+    std::uint32_t value,
+    bool hexadecimal)
+{
+    output << "value scope=" << scope
+           << " register=" << registerName
+           << " setting=\"" << setting << "\" value=";
+    if (hexadecimal)
+    {
+        output << "0x" << std::uppercase << std::hex
+               << std::setw(value > 0xFFFFU ? 8 : 4)
+               << std::setfill('0') << value
+               << std::dec << std::nouppercase << std::setfill(' ');
+    }
+    else
+    {
+        output << value;
+    }
+    output << '\n';
+}
+
+void PrintSelectorWrites(
+    std::ostream& output,
+    const Fw2051ScpConfigurationSnapshot& configuration)
+{
+    output << "selector_writes:\n";
+    for (const auto& write : configuration.selectorWrites)
+    {
+        output << "selector_write register=0x"
+               << std::uppercase << std::hex << std::setw(4)
+               << std::setfill('0') << write.registerOffset
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << " value=" << write.value
+               << " purpose="
+               << (write.parkingWrite ? "parking" : "bank-selection")
+               << " result=" << (write.success ? "success" : "failed");
+        if (!write.success)
+        {
+            output << " message=\"" << write.message << '"';
+        }
+        output << '\n';
+    }
+}
+
+void PrintScpConfiguration(
+    std::ostream& output,
+    const Fw2051ScpConfigurationSnapshot& configuration)
+{
+    PrintSelectorWrites(output, configuration);
+    output << "configuration_values:\n";
+    PrintConfigurationValue(
+        output,
+        "global",
+        "metadata",
+        "VME base",
+        configuration.baseAddress,
+        true);
+    PrintConfigurationValue(
+        output, "global", "0x6008", "Hardware ID",
+        configuration.hardwareId, true);
+    PrintConfigurationValue(
+        output, "global", "0x600E", "Firmware revision",
+        configuration.firmwareRevision, true);
+    PrintConfigurationValue(
+        output, "global", "0x6010", "IRQ level",
+        configuration.irqLevel, false);
+    PrintConfigurationValue(
+        output, "global", "0x6044", "Output format",
+        configuration.outputFormat, true);
+
+    for (const auto& quad : configuration.quads)
+    {
+        for (const auto& definition : Fw2051ScpSettingRegistry)
+        {
+            const auto value = Fw2051ScpQuadRegisterValue(
+                quad, definition.registerOffset);
+            if (!value)
+            {
+                continue;
+            }
+            char registerName[8]{};
+            std::snprintf(
+                registerName,
+                sizeof(registerName),
+                "0x%04X",
+                static_cast<unsigned>(definition.registerOffset));
+            PrintConfigurationValue(
+                output,
+                "quad-" + std::to_string(quad.quad),
+                registerName,
+                definition.name,
+                *value,
+                definition.registerOffset == 0x614AU);
+        }
+    }
+    output << "capture_summary: values="
+           << Fw2051ScpConfigurationValueCount
+           << " selector_writes=" << configuration.selectorWrites.size()
+           << " selector_parked="
+           << (configuration.selectorParkedAtQuadZero ? "yes" : "no")
+           << '\n';
+}
+
+void PrintComparison(
+    std::ostream& output,
+    const ScpConfigurationComparison& comparison)
+{
+    output << "differences:\n";
+    for (const auto& difference : comparison.differences)
+    {
+        output << "difference quad=";
+        if (difference.quad < 0)
+        {
+            output << "global";
+        }
+        else
+        {
+            output << difference.quad;
+        }
+        output << " register=";
+        if (difference.hasRegister)
+        {
+            output << "0x" << std::uppercase << std::hex << std::setw(4)
+                   << std::setfill('0') << difference.registerOffset
+                   << std::dec << std::nouppercase << std::setfill(' ');
+        }
+        else
+        {
+            output << "metadata";
+        }
+        output << " setting=\"" << difference.setting << "\" profile=";
+        if (difference.displayHexadecimal)
+        {
+            output << "0x" << std::uppercase << std::hex
+                   << std::setw(difference.profileValue > 0xFFFFU ? 8 : 4)
+                   << std::setfill('0') << difference.profileValue
+                   << " live=0x"
+                   << std::setw(difference.liveValue > 0xFFFFU ? 8 : 4)
+                   << difference.liveValue
+                   << std::dec << std::nouppercase << std::setfill(' ');
+        }
+        else
+        {
+            output << difference.profileValue
+                   << " live=" << difference.liveValue;
+        }
+        output << '\n';
+    }
+    output << "compare_summary: comparable="
+           << (comparison.comparable ? "yes" : "no")
+           << " compared=" << comparison.valuesCompared
+           << " differences=" << comparison.differences.size()
+           << " identical="
+           << (comparison.comparable && comparison.differences.empty()
+                   ? "yes"
+                   : "no")
+           << '\n';
+}
+
 } // namespace
 
 const char* FidgetCliUsage() noexcept
@@ -234,12 +485,17 @@ const char* FidgetCliUsage() noexcept
         "  fidget_cli status (--project FILE | --host HOST) [options]\n"
         "  fidget_cli session (--project FILE | --host HOST) [options]\n"
         "  fidget_cli audit (--project FILE | --host HOST) [options]\n"
+        "  fidget_cli capture (--project FILE | --host HOST) [options]\n"
+        "  fidget_cli compare (--project FILE | --host HOST) --profile FILE "
+        "[options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
         "  --host HOST     Use or override the MVLC host\n"
         "  --port PORT     Use or override the MVLC command port\n"
         "  --module N      Select the one-based project module (default 1)\n"
+        "  --save FILE     Save a successful capture as an SCP profile\n"
+        "  --profile FILE  Load this SCP profile for comparison\n"
         "  -h, --help      Show this help\n";
 }
 
@@ -273,6 +529,14 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.options.command = CliCommand::Audit;
     }
+    else if (command == "capture")
+    {
+        result.options.command = CliCommand::Capture;
+    }
+    else if (command == "compare")
+    {
+        result.options.command = CliCommand::Compare;
+    }
     else
     {
         result.error = "unknown command '" + std::string(command) + "'";
@@ -290,7 +554,9 @@ CliOptionsParseResult ParseCliOptions(
         if (option != "--project"
             && option != "--host"
             && option != "--port"
-            && option != "--module")
+            && option != "--module"
+            && option != "--save"
+            && option != "--profile")
         {
             result.error = "unknown option '" + std::string(option) + "'";
             return result;
@@ -324,7 +590,7 @@ CliOptionsParseResult ParseCliOptions(
             }
             result.options.port = static_cast<std::uint16_t>(port);
         }
-        else
+        else if (option == "--module")
         {
             std::uint64_t module = 0U;
             if (!ParseUnsigned(
@@ -338,6 +604,14 @@ CliOptionsParseResult ParseCliOptions(
             }
             result.options.moduleIndex = static_cast<std::size_t>(module - 1U);
         }
+        else if (option == "--save")
+        {
+            result.options.savePath = value;
+        }
+        else
+        {
+            result.options.profilePath = value;
+        }
     }
 
     if (result.options.projectPath.empty() && result.options.host.empty()
@@ -345,6 +619,25 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.error = std::string(command)
             + " requires --project FILE or --host HOST";
+        return result;
+    }
+    if (!result.options.savePath.empty()
+        && result.options.command != CliCommand::Capture)
+    {
+        result.error = "--save is valid only for the capture command";
+        return result;
+    }
+    if (!result.options.profilePath.empty()
+        && result.options.command != CliCommand::Compare)
+    {
+        result.error = "--profile is valid only for the compare command";
+        return result;
+    }
+    if (result.options.command == CliCommand::Compare
+        && result.options.profilePath.empty()
+        && !result.options.showHelp)
+    {
+        result.error = "compare requires --profile FILE";
         return result;
     }
 
@@ -444,61 +737,14 @@ int RunCliSession(
         return statusResult;
     }
 
-    output << "I stopped the MVME run and completely quit MVME [y/N]: "
-           << std::flush;
-    std::string confirmation;
-    if (!std::getline(input, confirmation)
-        || !HandoffConfirmedByUser(std::move(confirmation)))
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
     {
-        output << "session: not opened\n";
-        return interruptRequested && interruptRequested() ? 130 : 1;
-    }
-
-    const auto beforeConfirmation =
-        tunerControl.CurrentSnapshot()->revision;
-    tunerControl.Submit(SetMvmeHandoffConfirmedCommand{true});
-    if (!WaitForRevision(
-            tunerControl,
-            beforeConfirmation,
-            [](const TunerSnapshot& snapshot) {
-                return snapshot.mvmeHandoffConfirmed;
-            }))
-    {
-        errorOutput << "error: handoff confirmation timed out\n";
-        return 1;
-    }
-    if (interruptRequested && interruptRequested())
-    {
-        return 130;
-    }
-
-    const auto beforeOpen = tunerControl.CurrentSnapshot()->revision;
-    tunerControl.Submit(OpenSessionCommand{});
-    if (!WaitForRevision(
-            tunerControl,
-            beforeOpen,
-            [](const TunerSnapshot& snapshot) {
-                return snapshot.ownership
-                    != GuidedTunerOwnershipState::Checking;
-            }))
-    {
-        errorOutput << "error: session open timed out\n";
-        return 1;
+        return openResult;
     }
 
     auto snapshot = tunerControl.CurrentSnapshot();
-    if (snapshot->ownership != GuidedTunerOwnershipState::SessionOpen)
-    {
-        errorOutput << "error: session open failed";
-        if (!snapshot->statusMessages.empty())
-        {
-            errorOutput << ": " << snapshot->statusMessages.back().summary;
-        }
-        errorOutput << '\n';
-        return 1;
-    }
-
-    output << "session: open\n" << std::flush;
     bool sessionFailed = false;
     while (!(interruptRequested && interruptRequested()))
     {
@@ -572,60 +818,14 @@ int RunCliAudit(
         return statusResult;
     }
 
-    output << "I stopped the MVME run and completely quit MVME [y/N]: "
-           << std::flush;
-    std::string confirmation;
-    if (!std::getline(input, confirmation)
-        || !HandoffConfirmedByUser(std::move(confirmation)))
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
     {
-        output << "session: not opened\n";
-        return interruptRequested && interruptRequested() ? 130 : 1;
-    }
-
-    const auto beforeConfirmation =
-        tunerControl.CurrentSnapshot()->revision;
-    tunerControl.Submit(SetMvmeHandoffConfirmedCommand{true});
-    if (!WaitForRevision(
-            tunerControl,
-            beforeConfirmation,
-            [](const TunerSnapshot& snapshot) {
-                return snapshot.mvmeHandoffConfirmed;
-            }))
-    {
-        errorOutput << "error: handoff confirmation timed out\n";
-        return 1;
-    }
-    if (interruptRequested && interruptRequested())
-    {
-        return 130;
-    }
-
-    const auto beforeOpen = tunerControl.CurrentSnapshot()->revision;
-    tunerControl.Submit(OpenSessionCommand{});
-    if (!WaitForRevision(
-            tunerControl,
-            beforeOpen,
-            [](const TunerSnapshot& snapshot) {
-                return snapshot.ownership
-                    != GuidedTunerOwnershipState::Checking;
-            }))
-    {
-        errorOutput << "error: session open timed out\n";
-        return 1;
+        return openResult;
     }
 
     auto snapshot = tunerControl.CurrentSnapshot();
-    if (snapshot->ownership != GuidedTunerOwnershipState::SessionOpen)
-    {
-        errorOutput << "error: session open failed";
-        if (!snapshot->statusMessages.empty())
-        {
-            errorOutput << ": " << snapshot->statusMessages.back().summary;
-        }
-        errorOutput << '\n';
-        return 1;
-    }
-    output << "session: open\n" << std::flush;
 
     int result = 1;
     if (!(interruptRequested && interruptRequested()))
@@ -662,17 +862,227 @@ int RunCliAudit(
         }
     }
 
-    const bool interrupted = interruptRequested && interruptRequested();
-    if (!ReleaseSession(tunerControl, errorOutput))
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
+}
+
+int RunCliCapture(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
     {
+        return statusResult;
+    }
+
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
+    {
+        return openResult;
+    }
+
+    int result = 1;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeCapture =
+            tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(CaptureConfigurationCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeCapture,
+                [](const TunerSnapshot& snapshot) {
+                    return snapshot.configurationCapture.state ==
+                            ScpConfigurationState::Complete ||
+                        snapshot.configurationCapture.state ==
+                            ScpConfigurationState::Failed;
+                }))
+        {
+            errorOutput << "error: SCP configuration capture timed out\n";
+        }
+        else
+        {
+            const auto snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->configurationCapture.state ==
+                ScpConfigurationState::Complete)
+            {
+                PrintScpConfiguration(
+                    output, snapshot->configurationCapture);
+                result = 0;
+            }
+            else
+            {
+                PrintSelectorWrites(
+                    output, snapshot->configurationCapture);
+                errorOutput << "error: SCP configuration capture failed: "
+                            << snapshot->configurationCapture.message
+                            << '\n';
+            }
+        }
+    }
+
+    if (result == 0 && !options.savePath.empty() &&
+        !(interruptRequested && interruptRequested()))
+    {
+        const auto beforeSave = tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(SaveProfileCommand{options.savePath});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeSave,
+                [](const TunerSnapshot&) { return true; }))
+        {
+            errorOutput << "error: SCP profile save timed out\n";
+            result = 1;
+        }
+        else
+        {
+            const auto saved = tunerControl.CurrentSnapshot();
+            const bool saveSucceeded = !saved->statusMessages.empty() &&
+                saved->statusMessages.back().level ==
+                    TunerStatusLevel::Success;
+            if (saveSucceeded)
+            {
+                output << "profile_saved: " << options.savePath << '\n';
+            }
+            else
+            {
+                errorOutput << "error: SCP profile save failed";
+                if (!saved->statusMessages.empty())
+                {
+                    errorOutput << ": "
+                                << saved->statusMessages.back().summary;
+                }
+                errorOutput << '\n';
+                result = 1;
+            }
+        }
+    }
+
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
+}
+
+int RunCliCompare(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    const auto beforeLoad = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(LoadProfileCommand{options.profilePath});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeLoad,
+            [](const TunerSnapshot&) { return true; }))
+    {
+        errorOutput << "error: SCP profile load timed out\n";
         return 1;
     }
-    output << "session: released\n";
-    if (interrupted || (interruptRequested && interruptRequested()))
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (!snapshot->profileLoadedForTarget)
+    {
+        errorOutput << "error: SCP profile load failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+    output << "profile_loaded: " << options.profilePath << '\n';
+    if (interruptRequested && interruptRequested())
     {
         return 130;
     }
-    return result;
+
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
+    {
+        return openResult;
+    }
+
+    int result = 1;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeCapture =
+            tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(CaptureConfigurationCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeCapture,
+                [](const TunerSnapshot& value) {
+                    return value.configurationCapture.state ==
+                            ScpConfigurationState::Complete ||
+                        value.configurationCapture.state ==
+                            ScpConfigurationState::Failed;
+                }))
+        {
+            errorOutput << "error: SCP configuration capture timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->configurationCapture.state ==
+                ScpConfigurationState::Complete)
+            {
+                PrintScpConfiguration(
+                    output, snapshot->configurationCapture);
+                PrintComparison(
+                    output, snapshot->configurationComparison);
+                result = snapshot->configurationComparison.comparable &&
+                        snapshot->configurationComparison.differences.empty()
+                    ? 0
+                    : 1;
+            }
+            else
+            {
+                PrintSelectorWrites(
+                    output, snapshot->configurationCapture);
+                errorOutput << "error: SCP configuration capture failed: "
+                            << snapshot->configurationCapture.message
+                            << '\n';
+            }
+        }
+    }
+
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
 }
 
 } // namespace fidget

@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "cli/CliApp.h"
+#include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 
 #include <array>
@@ -52,6 +53,59 @@ fidget::StartupAuditResult MakeAuditResult(bool blocked)
     return fidget::ClassifyFw2051StartupAudit(0x11000000U, values);
 }
 
+fidget::Fw2051ScpConfigurationSnapshot MakeConfiguration(bool differs)
+{
+    using namespace fidget;
+
+    Fw2051ScpConfigurationSnapshot configuration;
+    configuration.state = ScpConfigurationState::Complete;
+    configuration.message = "Captured all eight SCP channel quads.";
+    configuration.baseAddress = 0x11000000U;
+    configuration.hardwareId = Mdpp32HardwareId;
+    configuration.firmwareRevision = Mdpp32ScpFirmwareRevisionFw2051;
+    configuration.irqLevel = 1U;
+    configuration.outputFormat = 0x18U;
+    configuration.selectorParkedAtQuadZero = true;
+    for (std::uint16_t quadIndex = 0U;
+         quadIndex < Fw2051ScpQuadCount;
+         ++quadIndex)
+    {
+        Fw2051ScpQuadConfiguration quad;
+        quad.quad = quadIndex;
+        quad.timingFilter = 8U;
+        quad.poleZero = {2000U, 2010U, 2020U, 2030U};
+        quad.gain = 200U;
+        quad.thresholds = {1000U, 1001U, 1002U, 1003U};
+        quad.shapingTime = 160U;
+        quad.baselineRestorer = 2U;
+        quad.resetTime = 16U;
+        quad.signalRiseTime = 4U;
+        quad.preSamples = 50U;
+        quad.totalSamples = 400U;
+        quad.sampleConfiguration = 0U;
+        configuration.quads.push_back(quad);
+        configuration.selectorWrites.push_back({
+            Fw2051ScpSelectorRegister,
+            quadIndex,
+            false,
+            true,
+            "Selector write completed.",
+        });
+    }
+    configuration.selectorWrites.push_back({
+        Fw2051ScpSelectorRegister,
+        0U,
+        true,
+        true,
+        "Selector write completed.",
+    });
+    if (differs)
+    {
+        configuration.quads[5].thresholds[1] = 4321U;
+    }
+    return configuration;
+}
+
 std::size_t CountOccurrences(
     const std::string& text,
     const std::string& pattern)
@@ -72,10 +126,12 @@ public:
     explicit FakeTunerControl(
         fidget::GuidedTunerOwnershipState checkResult =
             fidget::GuidedTunerOwnershipState::Idle,
-        bool auditBlocked = false)
+        bool auditBlocked = false,
+        bool captureDiffers = false)
         : snapshot_(std::make_shared<const fidget::TunerSnapshot>())
         , checkResult_(checkResult)
         , auditBlocked_(auditBlocked)
+        , captureDiffers_(captureDiffers)
     {
     }
 
@@ -102,6 +158,9 @@ public:
             next.activeModuleBaseAddress =
                 project->project.modules[project->activeModuleIndex]
                     .baseAddress;
+            next.activeModuleProfilePath =
+                project->project.modules[project->activeModuleIndex]
+                    .profilePath;
             next.targetSupported = true;
         }
         else if (std::holds_alternative<fidget::CheckStatusCommand>(command))
@@ -147,6 +206,52 @@ public:
             next.startupAuditReady =
                 next.startupAudit.readyForDiagnosticStart;
         }
+        else if (std::holds_alternative<
+                     fidget::CaptureConfigurationCommand>(command))
+        {
+            ++captureCommands;
+            next.configurationCapture =
+                MakeConfiguration(captureDiffers_);
+            next.configurationCompleteForTarget = true;
+            next.configurationFresh = true;
+            if (next.profileLoadedForTarget)
+            {
+                next.configurationComparison =
+                    fidget::CompareFw2051ScpConfiguration(
+                        next.loadedProfile,
+                        next.configurationCapture);
+                next.profileMatchesExactly =
+                    next.configurationComparison.comparable &&
+                    next.configurationComparison.differences.empty();
+            }
+        }
+        else if (const auto* save =
+                     std::get_if<fidget::SaveProfileCommand>(&command))
+        {
+            ++saveCommands;
+            savedPath = save->path;
+            next.statusMessages = {{
+                fidget::TunerStatusLevel::Success,
+                "Saved the read-only SCP profile.",
+                {},
+            }};
+        }
+        else if (const auto* load =
+                     std::get_if<fidget::LoadProfileCommand>(&command))
+        {
+            ++loadCommands;
+            loadedPath = load->path;
+            next.profileLoaded = true;
+            next.profileLoadedForTarget = true;
+            next.loadedProfilePath = load->path;
+            next.loadedProfile.configuration = MakeConfiguration(false);
+            next.loadedProfile.configuration.selectorWrites.clear();
+            next.statusMessages = {{
+                fidget::TunerStatusLevel::Success,
+                "Loaded the SCP profile.",
+                {},
+            }};
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -162,12 +267,18 @@ public:
     int handoffCommands = 0;
     int openCommands = 0;
     int auditCommands = 0;
+    int captureCommands = 0;
+    int saveCommands = 0;
+    int loadCommands = 0;
     int releaseCommands = 0;
+    std::string savedPath;
+    std::string loadedPath;
 
 private:
     std::shared_ptr<const fidget::TunerSnapshot> snapshot_;
     fidget::GuidedTunerOwnershipState checkResult_;
     bool auditBlocked_ = false;
+    bool captureDiffers_ = false;
 };
 
 } // namespace
@@ -210,6 +321,26 @@ TEST_CASE("CLI options accept project and host status forms")
         REQUIRE(parsed.success);
         CHECK(parsed.options.projectPath == "crate.mwwcrate");
     }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "capture", "--host", "mvlc-test",
+            "--save", "captured.mwwscp",
+        };
+        const auto parsed = fidget::ParseCliOptions(6, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Capture);
+        CHECK(parsed.options.savePath == "captured.mwwscp");
+    }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "compare", "--host", "mvlc-test",
+            "--profile", "expected.mwwscp",
+        };
+        const auto parsed = fidget::ParseCliOptions(6, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Compare);
+        CHECK(parsed.options.profilePath == "expected.mwwscp");
+    }
 }
 
 TEST_CASE("CLI options reject unsafe or incomplete status arguments")
@@ -226,6 +357,18 @@ TEST_CASE("CLI options reject unsafe or incomplete status arguments")
         "fidget_cli", "status", "--host", "mvlc-test", "--module", "0",
     };
     CHECK_FALSE(fidget::ParseCliOptions(6, zeroModule).success);
+
+    const char* compareWithoutProfile[] = {
+        "fidget_cli", "compare", "--host", "mvlc-test",
+    };
+    CHECK_FALSE(
+        fidget::ParseCliOptions(4, compareWithoutProfile).success);
+
+    const char* saveOnStatus[] = {
+        "fidget_cli", "status", "--host", "mvlc-test",
+        "--save", "capture.mwwscp",
+    };
+    CHECK_FALSE(fidget::ParseCliOptions(6, saveOnStatus).success);
 }
 
 TEST_CASE("status prints idle readings and exits successfully")
@@ -532,4 +675,128 @@ TEST_CASE("audit defaults to no when confirmation input is closed")
     CHECK(control.openCommands == 0);
     CHECK(control.auditCommands == 0);
     CHECK(control.releaseCommands == 0);
+}
+
+TEST_CASE("capture prints 141 values, logs selector writes, and saves")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Capture;
+    options.host = "mvlc-test";
+    options.savePath = "captured.mwwscp";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliCapture(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.statusCommands == 1);
+    CHECK(control.openCommands == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.saveCommands == 1);
+    CHECK(control.savedPath == "captured.mwwscp");
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(CountOccurrences(output.str(), "\nvalue ") == 141U);
+    CHECK(CountOccurrences(output.str(), "\nselector_write ") == 9U);
+    CHECK(output.str().find(
+              "capture_summary: values=141 selector_writes=9 "
+              "selector_parked=yes\n") != std::string::npos);
+    CHECK(output.str().find("profile_saved: captured.mwwscp\n") !=
+          std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("compare exits successfully only for an identical profile")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Compare;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliCompare(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.loadCommands == 1);
+    CHECK(control.loadedPath == "expected.mwwscp");
+    CHECK(control.captureCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find(
+              "compare_summary: comparable=yes compared=141 "
+              "differences=0 identical=yes\n") != std::string::npos);
+}
+
+TEST_CASE("compare prints complete attribution for every difference")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Compare;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliCompare(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find(
+              "difference quad=5 register=0x611E "
+              "setting=\"Threshold ch 1\" profile=1001 live=4321\n") !=
+          std::string::npos);
+    CHECK(output.str().find(
+              "compare_summary: comparable=yes compared=141 "
+              "differences=1 identical=no\n") != std::string::npos);
+}
+
+TEST_CASE("capture defers SIGINT until the session is released")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Capture;
+    options.host = "mvlc-test";
+    FakeTunerControl control;
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliCapture(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.captureCommands > 0; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
 }
