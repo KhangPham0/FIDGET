@@ -223,6 +223,10 @@ public:
                 next.profileMatchesExactly =
                     next.configurationComparison.comparable &&
                     next.configurationComparison.differences.empty();
+                next.profileApplicationPlan =
+                    fidget::PlanFw2051ScpProfileApplication(
+                        next.loadedProfile,
+                        next.configurationCapture);
             }
         }
         else if (const auto* save =
@@ -252,6 +256,61 @@ public:
                 {},
             }};
         }
+        else if (const auto* apply =
+                     std::get_if<fidget::ApplyProfileRowCommand>(&command))
+        {
+            ++applyCommands;
+            next.singleRepairResult = {};
+            next.singleRepairResult.state =
+                fidget::ScpSingleRepairState::Passed;
+            next.singleRepairResult.message =
+                "Applied and retained one profile value.";
+            next.singleRepairResult.selectedQuad = apply->quad;
+            next.singleRepairResult.registerOffset = apply->registerOffset;
+            next.singleRepairResult.writeAttempted = true;
+            next.singleRepairResult.writeVerified = true;
+            next.singleRepairResult.selectorParkedAtQuadZero = true;
+            next.singleRepairResult.profileValueRetained = true;
+            next.configurationFresh = false;
+        }
+        else if (std::holds_alternative<
+                     fidget::ApplyAllDifferencesCommand>(command))
+        {
+            ++applyAllCommands;
+            next.bulkApplyResult = {};
+            next.bulkApplyResult.state = fidget::ScpBulkApplyState::Passed;
+            next.bulkApplyResult.message =
+                "Applied and retained all profile values.";
+            next.bulkApplyResult.plannedWrites =
+                next.profileApplicationPlan.request.steps.size();
+            next.bulkApplyResult.writesAttempted =
+                next.bulkApplyResult.plannedWrites;
+            next.bulkApplyResult.writesVerified =
+                next.bulkApplyResult.plannedWrites;
+            next.bulkApplyResult.fullPreflightMatched = true;
+            next.bulkApplyResult.moduleStopSent = true;
+            next.bulkApplyResult.moduleStopVerified = true;
+            next.bulkApplyResult.moduleLeftStopped = true;
+            next.bulkApplyResult.selectorParkedAtQuadZero = true;
+            next.bulkApplyResult.fifoResetSent = true;
+            next.bulkApplyResult.readoutResetSent = true;
+            next.bulkApplyResult.profileValuesRetained = true;
+            for (const auto& step :
+                 next.profileApplicationPlan.request.steps)
+            {
+                fidget::ScpAppliedValueResult value;
+                value.quad = step.quad;
+                value.registerOffset = step.registerOffset;
+                value.settingName = step.settingName;
+                value.expectedValue = step.expectedValue;
+                value.profileValue = step.profileValue;
+                value.writeAttempted = true;
+                value.writeVerified = true;
+                value.profileValueRetained = true;
+                next.bulkApplyResult.values.push_back(std::move(value));
+            }
+            next.configurationFresh = false;
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -270,6 +329,8 @@ public:
     int captureCommands = 0;
     int saveCommands = 0;
     int loadCommands = 0;
+    int applyCommands = 0;
+    int applyAllCommands = 0;
     int releaseCommands = 0;
     std::string savedPath;
     std::string loadedPath;
@@ -341,6 +402,29 @@ TEST_CASE("CLI options accept project and host status forms")
         CHECK(parsed.options.command == fidget::CliCommand::Compare);
         CHECK(parsed.options.profilePath == "expected.mwwscp");
     }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "apply", "--host", "mvlc-test",
+            "--profile", "expected.mwwscp", "--register", "0x611A",
+            "--quad", "7",
+        };
+        const auto parsed = fidget::ParseCliOptions(10, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Apply);
+        REQUIRE(parsed.options.registerOffset);
+        CHECK(*parsed.options.registerOffset == 0x611AU);
+        REQUIRE(parsed.options.quad);
+        CHECK(*parsed.options.quad == 7U);
+    }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "apply-all", "--host", "mvlc-test",
+            "--profile", "expected.mwwscp",
+        };
+        const auto parsed = fidget::ParseCliOptions(6, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::ApplyAll);
+    }
 }
 
 TEST_CASE("CLI options reject unsafe or incomplete status arguments")
@@ -369,6 +453,20 @@ TEST_CASE("CLI options reject unsafe or incomplete status arguments")
         "--save", "capture.mwwscp",
     };
     CHECK_FALSE(fidget::ParseCliOptions(6, saveOnStatus).success);
+
+    const char* applyWithoutRegister[] = {
+        "fidget_cli", "apply", "--host", "mvlc-test",
+        "--profile", "expected.mwwscp", "--quad", "7",
+    };
+    CHECK_FALSE(
+        fidget::ParseCliOptions(8, applyWithoutRegister).success);
+
+    const char* invalidQuad[] = {
+        "fidget_cli", "apply", "--host", "mvlc-test",
+        "--profile", "expected.mwwscp", "--register", "0x611A",
+        "--quad", "8",
+    };
+    CHECK_FALSE(fidget::ParseCliOptions(10, invalidQuad).success);
 }
 
 TEST_CASE("status prints idle readings and exits successfully")
@@ -797,6 +895,142 @@ TEST_CASE("capture defers SIGINT until the session is released")
 
     CHECK(exitCode == 130);
     CHECK(control.captureCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("apply prints one exact plan and retains the selected value")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Apply;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.registerOffset = 0x611EU;
+    options.quad = 5U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliApply(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.applyCommands == 1);
+    CHECK(control.applyAllCommands == 0);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find("plan: writes=1\n") != std::string::npos);
+    CHECK(output.str().find(
+              "plan_step quad=5 register=0x611E "
+              "setting=\"Threshold ch 1\" live=4321 profile=1001\n") !=
+          std::string::npos);
+    CHECK(output.str().find(
+              "transaction_result: state=passed write=verified "
+              "rollback=none retained=profile parked=yes\n") !=
+          std::string::npos);
+    CHECK(output.str().find(
+              "stale_reminder: recapture all eight quads before comparing "
+              "or applying another value\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("apply defaults to no at a closed confirmation input")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Apply;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.registerOffset = 0x611EU;
+    options.quad = 5U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliApply(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.applyCommands == 0);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("transaction: not applied\n") !=
+          std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("apply-all prints its count and releases after retained values")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::ApplyAll;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliApply(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.applyCommands == 0);
+    CHECK(control.applyAllCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find(
+              "Apply 1 banked profile write(s) [y/N]: ") !=
+          std::string::npos);
+    CHECK(output.str().find(
+              "transaction_summary: state=passed planned=1 written=1 "
+              "rolled_back=0 retained=yes module_stopped=yes parked=yes\n") !=
+          std::string::npos);
+}
+
+TEST_CASE("SIGINT during apply is reported only after session release")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Apply;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.registerOffset = 0x611EU;
+    options.quad = 5U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliApply(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.applyCommands > 0; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.applyCommands == 1);
     CHECK(control.releaseCommands == 1);
     CHECK(output.str().find("session: released\n") != std::string::npos);
 }

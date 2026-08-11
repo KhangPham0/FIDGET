@@ -107,7 +107,17 @@ int main(int argc, char** argv)
             std::cerr,
             interrupted);
     }
-    return fidget::RunCliCompare(
+    if (parsed.options.command == fidget::CliCommand::Compare)
+    {
+        return fidget::RunCliCompare(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
+    return fidget::RunCliApply(
         parsed.options,
         tunerControl,
         std::cin,

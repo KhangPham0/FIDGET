@@ -3,8 +3,10 @@
 #include "core/CrateProject.h"
 #include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
+#include "core/ScpTransactionPlan.h"
 #include "core/StartupAudit.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace fidget {
 namespace {
@@ -44,6 +47,34 @@ bool ParseUnsigned(
         return false;
     }
     value = parsed;
+    return true;
+}
+
+bool ParseRegisterOffset(
+    std::string_view text,
+    std::uint16_t& value)
+{
+    int base = 10;
+    if (text.size() > 2U && text[0] == '0' &&
+        (text[1] == 'x' || text[1] == 'X'))
+    {
+        text.remove_prefix(2U);
+        base = 16;
+    }
+    if (text.empty())
+    {
+        return false;
+    }
+
+    std::uint32_t parsed = 0U;
+    const auto result = std::from_chars(
+        text.data(), text.data() + text.size(), parsed, base);
+    if (result.ec != std::errc{} ||
+        result.ptr != text.data() + text.size() || parsed > 0xFFFFU)
+    {
+        return false;
+    }
+    value = static_cast<std::uint16_t>(parsed);
     return true;
 }
 
@@ -206,6 +237,18 @@ bool HandoffConfirmedByUser(std::string response)
         }
     }
     return response == "y" || response == "yes";
+}
+
+bool TransactionConfirmedByUser(std::string response)
+{
+    const auto first = response.find_first_not_of(" \t\r");
+    if (first == std::string::npos)
+    {
+        return false;
+    }
+    const auto last = response.find_last_not_of(" \t\r");
+    response = response.substr(first, last - first + 1U);
+    return response == "y" || response == "Y";
 }
 
 bool ReleaseSession(
@@ -476,6 +519,79 @@ void PrintComparison(
            << '\n';
 }
 
+void PrintApplicationStep(
+    std::ostream& output,
+    const ScpProfileApplicationStep& step)
+{
+    output << "plan_step quad=" << step.quad
+           << " register=0x" << std::uppercase << std::hex
+           << std::setw(4) << std::setfill('0') << step.registerOffset
+           << std::dec << std::nouppercase << std::setfill(' ')
+           << " setting=\"" << step.settingName << "\" live="
+           << step.expectedValue << " profile=" << step.profileValue
+           << '\n';
+}
+
+void PrintSingleRepairResult(
+    std::ostream& output,
+    const ScpSingleRepairResult& result)
+{
+    output << "transaction_result: state="
+           << (result.state == ScpSingleRepairState::Passed
+                   ? "passed"
+                   : "failed")
+           << " write=" << (result.writeVerified ? "verified" :
+                              result.writeAttempted ? "unverified" : "none")
+           << " rollback="
+           << (result.rollbackVerified ? "verified" :
+               result.rollbackAttempted ? "unverified" : "none")
+           << " retained="
+           << (result.profileValueRetained ? "profile" : "not-profile")
+           << " parked="
+           << (result.selectorParkedAtQuadZero ? "yes" : "no")
+           << '\n';
+    output << "transaction_message: " << result.message << '\n';
+}
+
+void PrintBulkApplyResult(
+    std::ostream& output,
+    const ScpBulkApplyResult& result)
+{
+    output << "transaction_values:\n";
+    for (const auto& value : result.values)
+    {
+        output << "transaction_value quad=" << value.quad
+               << " register=0x" << std::uppercase << std::hex
+               << std::setw(4) << std::setfill('0')
+               << value.registerOffset
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << " setting=\"" << value.settingName << "\" write="
+               << (value.writeVerified ? "verified" :
+                   value.writeAttempted ? "unverified" : "none")
+               << " rollback="
+               << (value.rollbackVerified ? "verified" :
+                   value.rollbackAttempted ? "unverified" : "none")
+               << " retained="
+               << (value.profileValueRetained ? "profile" : "not-profile")
+               << '\n';
+    }
+    output << "transaction_summary: state="
+           << (result.state == ScpBulkApplyState::Passed
+                   ? "passed"
+                   : "failed")
+           << " planned=" << result.plannedWrites
+           << " written=" << result.writesVerified
+           << " rolled_back=" << result.rollbackWritesVerified
+           << " retained="
+           << (result.profileValuesRetained ? "yes" : "no")
+           << " module_stopped="
+           << (result.moduleLeftStopped ? "yes" : "no")
+           << " parked="
+           << (result.selectorParkedAtQuadZero ? "yes" : "no")
+           << '\n';
+    output << "transaction_message: " << result.message << '\n';
+}
+
 } // namespace
 
 const char* FidgetCliUsage() noexcept
@@ -488,6 +604,10 @@ const char* FidgetCliUsage() noexcept
         "  fidget_cli capture (--project FILE | --host HOST) [options]\n"
         "  fidget_cli compare (--project FILE | --host HOST) --profile FILE "
         "[options]\n"
+        "  fidget_cli apply (--project FILE | --host HOST) --profile FILE "
+        "--register OFFSET --quad N [options]\n"
+        "  fidget_cli apply-all (--project FILE | --host HOST) --profile "
+        "FILE [options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -495,7 +615,9 @@ const char* FidgetCliUsage() noexcept
         "  --port PORT     Use or override the MVLC command port\n"
         "  --module N      Select the one-based project module (default 1)\n"
         "  --save FILE     Save a successful capture as an SCP profile\n"
-        "  --profile FILE  Load this SCP profile for comparison\n"
+        "  --profile FILE  Load this SCP profile for compare or apply\n"
+        "  --register OFF  Select a banked register, decimal or 0x-prefixed\n"
+        "  --quad N        Select channel quad 0 through 7\n"
         "  -h, --help      Show this help\n";
 }
 
@@ -537,6 +659,14 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.options.command = CliCommand::Compare;
     }
+    else if (command == "apply")
+    {
+        result.options.command = CliCommand::Apply;
+    }
+    else if (command == "apply-all")
+    {
+        result.options.command = CliCommand::ApplyAll;
+    }
     else
     {
         result.error = "unknown command '" + std::string(command) + "'";
@@ -556,7 +686,9 @@ CliOptionsParseResult ParseCliOptions(
             && option != "--port"
             && option != "--module"
             && option != "--save"
-            && option != "--profile")
+            && option != "--profile"
+            && option != "--register"
+            && option != "--quad")
         {
             result.error = "unknown option '" + std::string(option) + "'";
             return result;
@@ -608,9 +740,29 @@ CliOptionsParseResult ParseCliOptions(
         {
             result.options.savePath = value;
         }
-        else
+        else if (option == "--profile")
         {
             result.options.profilePath = value;
+        }
+        else if (option == "--register")
+        {
+            std::uint16_t registerOffset = 0U;
+            if (!ParseRegisterOffset(value, registerOffset))
+            {
+                result.error = "invalid register offset '" + value + "'";
+                return result;
+            }
+            result.options.registerOffset = registerOffset;
+        }
+        else
+        {
+            std::uint64_t quad = 0U;
+            if (!ParseUnsigned(value, 7U, quad))
+            {
+                result.error = "invalid channel quad '" + value + "'";
+                return result;
+            }
+            result.options.quad = static_cast<std::uint16_t>(quad);
         }
     }
 
@@ -628,16 +780,33 @@ CliOptionsParseResult ParseCliOptions(
         return result;
     }
     if (!result.options.profilePath.empty()
-        && result.options.command != CliCommand::Compare)
+        && result.options.command != CliCommand::Compare
+        && result.options.command != CliCommand::Apply
+        && result.options.command != CliCommand::ApplyAll)
     {
         result.error = "--profile is valid only for the compare command";
         return result;
     }
-    if (result.options.command == CliCommand::Compare
+    if ((result.options.command == CliCommand::Compare
+         || result.options.command == CliCommand::Apply
+         || result.options.command == CliCommand::ApplyAll)
         && result.options.profilePath.empty()
         && !result.options.showHelp)
     {
-        result.error = "compare requires --profile FILE";
+        result.error = std::string(command) + " requires --profile FILE";
+        return result;
+    }
+    if ((result.options.registerOffset || result.options.quad) &&
+        result.options.command != CliCommand::Apply)
+    {
+        result.error = "--register and --quad are valid only for apply";
+        return result;
+    }
+    if (result.options.command == CliCommand::Apply &&
+        (!result.options.registerOffset || !result.options.quad) &&
+        !result.options.showHelp)
+    {
+        result.error = "apply requires --register OFFSET and --quad N";
         return result;
     }
 
@@ -1074,6 +1243,258 @@ int RunCliCompare(
                             << snapshot->configurationCapture.message
                             << '\n';
             }
+        }
+    }
+
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
+}
+
+int RunCliApply(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    const auto beforeLoad = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(LoadProfileCommand{options.profilePath});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeLoad,
+            [](const TunerSnapshot&) { return true; }))
+    {
+        errorOutput << "error: SCP profile load timed out\n";
+        return 1;
+    }
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (!snapshot->profileLoadedForTarget)
+    {
+        errorOutput << "error: SCP profile load failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+    output << "profile_loaded: " << options.profilePath << '\n';
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
+    {
+        return openResult;
+    }
+
+    int result = 1;
+    bool readyToApply = false;
+    std::vector<ScpProfileApplicationStep> steps;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeCapture =
+            tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(CaptureConfigurationCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeCapture,
+                [](const TunerSnapshot& value) {
+                    return value.configurationCapture.state ==
+                            ScpConfigurationState::Complete ||
+                        value.configurationCapture.state ==
+                            ScpConfigurationState::Failed;
+                }))
+        {
+            errorOutput << "error: SCP configuration capture timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->configurationCapture.state !=
+                ScpConfigurationState::Complete)
+            {
+                errorOutput << "error: SCP configuration capture failed: "
+                            << snapshot->configurationCapture.message
+                            << '\n';
+            }
+            else if (!snapshot->configurationComparison.comparable)
+            {
+                errorOutput << "error: profile comparison failed: "
+                            << snapshot->configurationComparison.message
+                            << '\n';
+            }
+            else if (options.command == CliCommand::ApplyAll)
+            {
+                if (!snapshot->profileApplicationPlan.success)
+                {
+                    errorOutput << "error: profile application is blocked: "
+                                << snapshot->profileApplicationPlan.message
+                                << '\n';
+                }
+                else if (snapshot->profileApplicationPlan.request.steps
+                             .empty())
+                {
+                    errorOutput <<
+                        "error: there are no banked profile differences "
+                        "to apply\n";
+                }
+                else
+                {
+                    steps = snapshot->profileApplicationPlan.request.steps;
+                    readyToApply = true;
+                }
+            }
+            else if (!options.registerOffset || !options.quad)
+            {
+                errorOutput <<
+                    "error: apply requires a register and channel quad\n";
+            }
+            else
+            {
+                const auto difference = std::find_if(
+                    snapshot->configurationComparison.differences.begin(),
+                    snapshot->configurationComparison.differences.end(),
+                    [&options](const ScpConfigurationDifference& value) {
+                        return value.quad ==
+                                static_cast<int>(*options.quad) &&
+                            value.hasRegister &&
+                            value.registerOffset ==
+                                *options.registerOffset;
+                    });
+                if (difference ==
+                    snapshot->configurationComparison.differences.end())
+                {
+                    errorOutput <<
+                        "error: the selected row is not a current banked "
+                        "profile difference\n";
+                }
+                else if (FindFw2051ScpSetting(*options.registerOffset) ==
+                         nullptr || difference->liveValue > 0xFFFFU ||
+                         difference->profileValue > 0xFFFFU)
+                {
+                    errorOutput <<
+                        "error: the selected difference is not an "
+                        "applicable FW2051 D16 register\n";
+                }
+                else
+                {
+                    steps.push_back({
+                        difference->quad,
+                        *options.registerOffset,
+                        difference->setting,
+                        static_cast<std::uint16_t>(difference->liveValue),
+                        static_cast<std::uint16_t>(difference->profileValue),
+                        difference->displayHexadecimal,
+                    });
+                    readyToApply = true;
+                }
+            }
+        }
+    }
+
+    if (readyToApply && !(interruptRequested && interruptRequested()))
+    {
+        output << "plan: writes=" << steps.size() << '\n';
+        for (const auto& step : steps)
+        {
+            PrintApplicationStep(output, step);
+        }
+        output << "Apply " << steps.size()
+               << " banked profile write(s) [y/N]: " << std::flush;
+        std::string confirmation;
+        if (!std::getline(input, confirmation) ||
+            !TransactionConfirmedByUser(std::move(confirmation)))
+        {
+            output << "transaction: not applied\n";
+        }
+        else if (!(interruptRequested && interruptRequested()))
+        {
+            const auto beforeApply =
+                tunerControl.CurrentSnapshot()->revision;
+            if (options.command == CliCommand::ApplyAll)
+            {
+                tunerControl.Submit(ApplyAllDifferencesCommand{});
+                if (!WaitForRevision(
+                        tunerControl,
+                        beforeApply,
+                        [](const TunerSnapshot& value) {
+                            return value.bulkApplyResult.state ==
+                                    ScpBulkApplyState::Passed ||
+                                value.bulkApplyResult.state ==
+                                    ScpBulkApplyState::Failed;
+                        }))
+                {
+                    errorOutput <<
+                        "error: bulk SCP profile transaction timed out\n";
+                }
+                else
+                {
+                    snapshot = tunerControl.CurrentSnapshot();
+                    PrintBulkApplyResult(output, snapshot->bulkApplyResult);
+                    result = snapshot->bulkApplyResult.state ==
+                                ScpBulkApplyState::Passed &&
+                            snapshot->bulkApplyResult.profileValuesRetained &&
+                            snapshot->bulkApplyResult.selectorParkedAtQuadZero
+                        ? 0
+                        : 1;
+                }
+            }
+            else
+            {
+                tunerControl.Submit(ApplyProfileRowCommand{
+                    *options.registerOffset,
+                    *options.quad,
+                });
+                if (!WaitForRevision(
+                        tunerControl,
+                        beforeApply,
+                        [](const TunerSnapshot& value) {
+                            return value.singleRepairResult.state ==
+                                    ScpSingleRepairState::Passed ||
+                                value.singleRepairResult.state ==
+                                    ScpSingleRepairState::Failed;
+                        }))
+                {
+                    errorOutput <<
+                        "error: single SCP profile transaction timed out\n";
+                }
+                else
+                {
+                    snapshot = tunerControl.CurrentSnapshot();
+                    PrintSingleRepairResult(
+                        output, snapshot->singleRepairResult);
+                    result = snapshot->singleRepairResult.state ==
+                                ScpSingleRepairState::Passed &&
+                            snapshot->singleRepairResult.writeVerified &&
+                            snapshot->singleRepairResult.profileValueRetained &&
+                            snapshot->singleRepairResult
+                                .selectorParkedAtQuadZero
+                        ? 0
+                        : 1;
+                }
+            }
+            output << "stale_reminder: recapture all eight quads before "
+                      "comparing or applying another value\n";
         }
     }
 
