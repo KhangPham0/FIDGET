@@ -11,8 +11,6 @@
 
 namespace fidget {
 
-inline constexpr std::uint16_t Fw2051ScpSelectorRegister = 0x6100U;
-
 enum class ScpCaptureGateStatus
 {
     Allowed,

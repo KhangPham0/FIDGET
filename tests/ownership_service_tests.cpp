@@ -976,6 +976,7 @@ TEST_CASE("the service captures eight distinct banks and clears on release")
     CHECK(snapshot->configurationCapture.firmwareRevision == 0x2051U);
     CHECK(snapshot->configurationCapture.quads.size() == 8U);
     CHECK(snapshot->configurationCapture.selectorParkedAtQuadZero);
+    CHECK(snapshot->configurationCapture.selectorWrites.size() == 9U);
     CHECK(transport->SentRequests().size() == 313U);
 
     for (std::uint16_t quadIndex = 0U; quadIndex < 8U; ++quadIndex)

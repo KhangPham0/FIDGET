@@ -120,6 +120,21 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
         }
         return true;
     };
+    const auto writeSelector = [&](
+                                   const std::uint16_t value,
+                                   const bool parkingWrite,
+                                   std::string& error) {
+        const bool success = writeRegister(
+            Fw2051ScpSelectorRegister, value, error);
+        result.selectorWrites.push_back({
+            Fw2051ScpSelectorRegister,
+            value,
+            parkingWrite,
+            success,
+            success ? "Selector write completed." : error,
+        });
+        return success;
+    };
 
     struct GlobalRead
     {
@@ -188,8 +203,7 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
         quad.quad = quadIndex;
         std::string selectorError;
         selectionAttempted = true;
-        if (!writeRegister(
-                Fw2051ScpSelectorRegister, quadIndex, selectorError))
+        if (!writeSelector(quadIndex, false, selectorError))
         {
             failure = RegisterOperationError(
                 "write",
@@ -246,8 +260,8 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
     if (selectionAttempted && ownershipCertain)
     {
         std::string parkingError;
-        result.selectorParkedAtQuadZero = writeRegister(
-            Fw2051ScpSelectorRegister, 0U, parkingError);
+        result.selectorParkedAtQuadZero = writeSelector(
+            0U, true, parkingError);
         if (result.selectorParkedAtQuadZero)
         {
             std::this_thread::sleep_for(SelectorSettleTime);

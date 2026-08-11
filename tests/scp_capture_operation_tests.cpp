@@ -317,6 +317,19 @@ TEST_CASE("the capture performs 149 ordered operations and nine gates")
     CHECK(result.configuration.outputFormat == 0x18U);
     CHECK(result.configuration.quads.size() == Fw2051ScpQuadCount);
     CHECK(result.configuration.selectorParkedAtQuadZero);
+    REQUIRE(result.configuration.selectorWrites.size() == 9U);
+    for (std::size_t index = 0U; index < 8U; ++index)
+    {
+        const auto& write = result.configuration.selectorWrites[index];
+        CHECK(write.registerOffset == Fw2051ScpSelectorRegister);
+        CHECK(write.value == index);
+        CHECK_FALSE(write.parkingWrite);
+        CHECK(write.success);
+    }
+    const auto& parking = result.configuration.selectorWrites.back();
+    CHECK(parking.value == 0U);
+    CHECK(parking.parkingWrite);
+    CHECK(parking.success);
     REQUIRE(gateNames.size() == 9U);
     CHECK(gateNames.front() == "the SCP configuration snapshot");
     CHECK(gateNames[1] == "SCP configuration bank 1");
@@ -418,6 +431,9 @@ TEST_CASE("foreign ownership before a later bank prevents selector parking")
     CHECK(result.configuration.message == "foreign DAQ");
     CHECK(result.configuration.quads.size() == 3U);
     CHECK_FALSE(result.configuration.selectorParkedAtQuadZero);
+    REQUIRE(result.configuration.selectorWrites.size() == 3U);
+    CHECK(result.configuration.selectorWrites.back().value == 2U);
+    CHECK_FALSE(result.configuration.selectorWrites.back().parkingWrite);
     CHECK(result.lastGateStatus == ScpCaptureGateStatus::OwnershipLost);
 
     const auto operations = DecodeWireOperations(transport);
@@ -484,6 +500,10 @@ TEST_CASE("a bank read failure still parks while ownership remains certain")
           std::string::npos);
     CHECK(result.configuration.quads.size() == 2U);
     CHECK(result.configuration.selectorParkedAtQuadZero);
+    REQUIRE(result.configuration.selectorWrites.size() == 4U);
+    CHECK(result.configuration.selectorWrites[2].value == 2U);
+    CHECK(result.configuration.selectorWrites.back().parkingWrite);
+    CHECK(result.configuration.selectorWrites.back().success);
     CHECK(gateCount == 4U);
 
     const auto operations = DecodeWireOperations(transport);

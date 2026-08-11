@@ -12,6 +12,7 @@ namespace fidget {
 inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
 inline constexpr std::uint16_t Mdpp32AlternateHardwareId = 0x500CU;
 inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
+inline constexpr std::uint16_t Fw2051ScpSelectorRegister = 0x6100U;
 inline constexpr std::size_t Fw2051ScpQuadCount = 8U;
 inline constexpr std::size_t Fw2051ScpBankedSettingCount = 17U;
 inline constexpr std::size_t Fw2051ScpConfigurationValueCount =
@@ -41,6 +42,15 @@ struct Fw2051ScpQuadConfiguration
     std::uint16_t sampleConfiguration = 0;
 };
 
+struct Fw2051ScpSelectorWriteRecord
+{
+    std::uint16_t registerOffset = Fw2051ScpSelectorRegister;
+    std::uint16_t value = 0U;
+    bool parkingWrite = false;
+    bool success = false;
+    std::string message;
+};
+
 struct Fw2051ScpConfigurationSnapshot
 {
     ScpConfigurationState state = ScpConfigurationState::NotRun;
@@ -51,6 +61,7 @@ struct Fw2051ScpConfigurationSnapshot
     std::uint16_t irqLevel = 0;
     std::uint16_t outputFormat = 0;
     bool selectorParkedAtQuadZero = false;
+    std::vector<Fw2051ScpSelectorWriteRecord> selectorWrites;
     std::vector<Fw2051ScpQuadConfiguration> quads;
 };
 
