@@ -565,6 +565,8 @@ void UseProject(fidget::OwnershipService& service)
     REQUIRE(WaitFor(service, [](const fidget::TunerSnapshot& snapshot) {
         return snapshot.projectActive;
     }));
+    CHECK(service.CurrentSnapshot()->activeModuleProfilePath ==
+          "mdpp1_scp_profile.mwwscp");
 }
 
 void CheckIdle(

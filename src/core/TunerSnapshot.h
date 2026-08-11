@@ -41,6 +41,7 @@ struct TunerSnapshot
     std::string activeModuleName;
     std::uint32_t activeModuleBaseAddress = 0U;
     MdppBackend activeModuleBackend = MdppBackend::Scp;
+    std::string activeModuleProfilePath;
     bool targetSupported = false;
 
     GuidedTunerOwnershipState ownership =

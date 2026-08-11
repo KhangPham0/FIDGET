@@ -203,6 +203,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     snapshot.activeModuleName = module.name;
     snapshot.activeModuleBaseAddress = module.baseAddress;
     snapshot.activeModuleBackend = module.backend;
+    snapshot.activeModuleProfilePath = module.profilePath;
     snapshot.targetSupported = MdppBackendImplemented(module.backend);
     snapshot.ownership = GuidedTunerOwnershipState::Disconnected;
 
