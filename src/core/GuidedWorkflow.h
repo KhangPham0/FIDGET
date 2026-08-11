@@ -32,6 +32,7 @@ enum class GuidedTunerOperation
     None,
     Audit,
     ConfigurationCapture,
+    ProfileApplication,
     StartupPreparation,
     Other,
 };

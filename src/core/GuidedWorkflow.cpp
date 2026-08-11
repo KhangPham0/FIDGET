@@ -137,6 +137,11 @@ GuidedTunerDecision PlanGuidedTunerWorkflow(
             step = 5U;
         }
         else if (inputs.activeOperation
+                 == GuidedTunerOperation::ProfileApplication)
+        {
+            step = 5U;
+        }
+        else if (inputs.activeOperation
                  == GuidedTunerOperation::StartupPreparation)
         {
             step = 6U;

@@ -5,6 +5,7 @@
 #include "core/TunerSnapshot.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <variant>
@@ -57,6 +58,16 @@ struct LoadProfileCommand
     std::string path;
 };
 
+struct ApplyProfileRowCommand
+{
+    std::uint16_t registerOffset = 0U;
+    std::uint16_t quad = 0U;
+};
+
+struct ApplyAllDifferencesCommand
+{
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -67,6 +78,8 @@ using TunerCommand = std::variant<
     CaptureConfigurationCommand,
     SaveProfileCommand,
     LoadProfileCommand,
+    ApplyProfileRowCommand,
+    ApplyAllDifferencesCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl

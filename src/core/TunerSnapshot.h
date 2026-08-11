@@ -5,6 +5,8 @@
 #include "core/GuidedWorkflow.h"
 #include "core/ScpConfiguration.h"
 #include "core/ScpProfile.h"
+#include "core/ScpTransactionPlan.h"
+#include "core/ScpTransactionResult.h"
 #include "core/StartupAudit.h"
 
 #include <cstddef>
@@ -65,7 +67,10 @@ struct TunerSnapshot
     bool configurationFresh = false;
     Fw2051ScpConfigurationSnapshot configurationCapture;
     ScpConfigurationComparison configurationComparison;
+    ScpProfileApplicationPlan profileApplicationPlan;
     bool profileMatchesExactly = false;
+    ScpSingleRepairResult singleRepairResult;
+    ScpBulkApplyResult bulkApplyResult;
     bool startupPlanAvailable = false;
     bool deterministicStartupPassed = false;
     GuidedTunerAcquisitionState acquisition =

@@ -4,6 +4,8 @@
 #include "core/TunerControl.h"
 #include "hardware/CommandWorker.h"
 #include "hardware/ScpCaptureOperation.h"
+#include "hardware/ScpBulkApplyOperation.h"
+#include "hardware/ScpSingleRepairOperation.h"
 #include "hardware/Transport.h"
 
 #include <atomic>
@@ -65,6 +67,8 @@ private:
     void CaptureConfiguration();
     void SaveProfile(const std::string& path);
     void LoadProfile(const std::string& path);
+    void ApplyProfileRow(const ApplyProfileRowCommand& command);
+    void ApplyAllDifferences();
     void ReleaseSession();
     void ProbeController(TunerSnapshot snapshot, bool retainSession);
 
@@ -75,6 +79,8 @@ private:
     [[nodiscard]] PreWriteGateResult CheckPreWriteGate(
         const std::string& operationName);
     [[nodiscard]] ScpCaptureGateResult CheckCaptureOwnershipGate(
+        const std::string& operationName);
+    [[nodiscard]] ScpCaptureGateResult CheckApplyOwnershipGate(
         const std::string& operationName);
     static void RefreshProfileComparison(TunerSnapshot& snapshot);
 

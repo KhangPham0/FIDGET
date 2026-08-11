@@ -2,10 +2,13 @@
 
 #include "core/CrateProject.h"
 #include "core/ScpProfile.h"
+#include "core/ScpRegistry.h"
+#include "core/ScpTransactionPlan.h"
 #include "core/StartupAudit.h"
 #include "core/VmeProtocol.h"
 #include "hardware/VmeTransaction.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdio>
@@ -146,6 +149,17 @@ void OwnershipService::Submit(TunerCommand command)
     {
         const std::string path = load->path;
         (void)worker_.Post([this, path] { LoadProfile(path); });
+        return;
+    }
+    if (const auto* apply = std::get_if<ApplyProfileRowCommand>(&command))
+    {
+        const auto request = *apply;
+        (void)worker_.Post([this, request] { ApplyProfileRow(request); });
+        return;
+    }
+    if (std::holds_alternative<ApplyAllDifferencesCommand>(command))
+    {
+        (void)worker_.Post([this] { ApplyAllDifferences(); });
         return;
     }
 
@@ -322,6 +336,8 @@ void OwnershipService::OpenSession()
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
     snapshot.configurationCapture = {};
+    snapshot.singleRepairResult = {};
+    snapshot.bulkApplyResult = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         snapshot,
@@ -445,6 +461,8 @@ void OwnershipService::LoadProfile(const std::string& path)
     snapshot.profileLoadedForTarget = false;
     snapshot.loadedProfilePath.clear();
     snapshot.loadedProfile = {};
+    snapshot.singleRepairResult = {};
+    snapshot.bulkApplyResult = {};
     snapshot.configurationComparison = {};
     snapshot.profileMatchesExactly = false;
 
@@ -479,6 +497,172 @@ void OwnershipService::LoadProfile(const std::string& path)
         std::move(snapshot),
         TunerStatusLevel::Success,
         loaded.message);
+}
+
+void OwnershipService::ApplyProfileRow(
+    const ApplyProfileRowCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before applying an SCP profile value.");
+        return;
+    }
+    if (!snapshot.profileLoadedForTarget)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Load an SCP profile for the active module before applying a "
+            "value.");
+        return;
+    }
+    if (!snapshot.configurationCompleteForTarget ||
+        !snapshot.configurationFresh ||
+        !snapshot.configurationComparison.comparable)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Capture all eight SCP quads again before applying a profile "
+            "value.");
+        return;
+    }
+
+    const auto found = std::find_if(
+        snapshot.configurationComparison.differences.begin(),
+        snapshot.configurationComparison.differences.end(),
+        [&command](const ScpConfigurationDifference& difference) {
+            return difference.quad == static_cast<int>(command.quad) &&
+                difference.hasRegister &&
+                difference.registerOffset == command.registerOffset;
+        });
+    if (found == snapshot.configurationComparison.differences.end() ||
+        FindFw2051ScpSetting(command.registerOffset) == nullptr ||
+        found->liveValue > 0xFFFFU || found->profileValue > 0xFFFFU)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The requested row is not an applicable banked SCP profile "
+            "difference.");
+        return;
+    }
+
+    ScpSingleRepairRequest request;
+    request.baseAddress = snapshot.activeModuleBaseAddress;
+    request.quad = command.quad;
+    request.registerOffset = command.registerOffset;
+    request.expectedLiveValue = static_cast<std::uint16_t>(found->liveValue);
+    request.profileValue = static_cast<std::uint16_t>(found->profileValue);
+
+    snapshot.activeOperation = GuidedTunerOperation::ProfileApplication;
+    snapshot.singleRepairResult = {};
+    snapshot.singleRepairResult.state = ScpSingleRepairState::Applying;
+    snapshot.singleRepairResult.message =
+        "Rechecking the selected live register before one profile write...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Applying one banked SCP profile difference.");
+
+    const auto result = RepairFw2051ScpProfileValue(
+        *transport_,
+        request,
+        serviceStopRequested_,
+        [this](const std::string& operationName) {
+            return CheckApplyOwnershipGate(operationName);
+        });
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.singleRepairResult = result;
+    snapshot.configurationFresh = false;
+    RefreshProfileComparison(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        result.state == ScpSingleRepairState::Passed
+            ? TunerStatusLevel::Success
+            : TunerStatusLevel::Error,
+        result.message);
+}
+
+void OwnershipService::ApplyAllDifferences()
+{
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before applying an SCP profile.");
+        return;
+    }
+    if (!snapshot.profileLoadedForTarget)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Load an SCP profile for the active module before applying it.");
+        return;
+    }
+    if (!snapshot.configurationCompleteForTarget ||
+        !snapshot.configurationFresh ||
+        !snapshot.configurationComparison.comparable)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Capture all eight SCP quads again before applying a profile.");
+        return;
+    }
+
+    RefreshProfileComparison(snapshot);
+    if (!snapshot.profileApplicationPlan.success ||
+        snapshot.profileApplicationPlan.request.steps.empty())
+    {
+        const auto message = snapshot.profileApplicationPlan.message.empty()
+            ? "There are no applicable banked SCP differences to apply."
+            : snapshot.profileApplicationPlan.message;
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Warning, message);
+        return;
+    }
+
+    const auto request = snapshot.profileApplicationPlan.request;
+    snapshot.activeOperation = GuidedTunerOperation::ProfileApplication;
+    snapshot.bulkApplyResult = {};
+    snapshot.bulkApplyResult.state = ScpBulkApplyState::Applying;
+    snapshot.bulkApplyResult.plannedWrites = request.steps.size();
+    snapshot.bulkApplyResult.message =
+        "Rereading all 140 hardware values before the first profile write...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Applying all planned banked SCP profile differences.");
+
+    const auto result = ApplyFw2051ScpProfile(
+        *transport_,
+        request,
+        serviceStopRequested_,
+        [this](const std::string& operationName) {
+            return CheckApplyOwnershipGate(operationName);
+        });
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.bulkApplyResult = result;
+    snapshot.configurationFresh = false;
+    RefreshProfileComparison(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        result.state == ScpBulkApplyState::Passed
+            ? TunerStatusLevel::Success
+            : TunerStatusLevel::Error,
+        result.message);
 }
 
 void OwnershipService::ProbeController(
@@ -620,7 +804,10 @@ void OwnershipService::ReleaseSession()
     snapshot.configurationFresh = false;
     snapshot.configurationCapture = {};
     snapshot.configurationComparison = {};
+    snapshot.profileApplicationPlan = {};
     snapshot.profileMatchesExactly = false;
+    snapshot.singleRepairResult = {};
+    snapshot.bulkApplyResult = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -937,9 +1124,66 @@ ScpCaptureGateResult OwnershipService::CheckCaptureOwnershipGate(
     return {ScpCaptureGateStatus::Allowed, {}};
 }
 
+ScpCaptureGateResult OwnershipService::CheckApplyOwnershipGate(
+    const std::string& operationName)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (serviceStopRequested_.load())
+    {
+        return {
+            ScpCaptureGateStatus::Cancelled,
+            "The SCP profile transaction was cancelled.",
+        };
+    }
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        return {
+            snapshot.ownership == GuidedTunerOwnershipState::OwnershipLost
+                ? ScpCaptureGateStatus::OwnershipLost
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            "No open tuner session is available.",
+        };
+    }
+
+    const auto daq = ReadLocalRegister(
+        DaqModeRegister, nextReadReference_++, serviceStopRequested_);
+    if (!daq.success)
+    {
+        const std::string message =
+            "The SCP profile transaction stopped because MVLC command "
+            "communication is temporarily uncertain before " +
+            operationName + ". No further hardware write was sent. The "
+            "session remains open and the watchdog will retry: " +
+            daq.error;
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Warning, message);
+        return {
+            serviceStopRequested_.load()
+                ? ScpCaptureGateStatus::Cancelled
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            message,
+        };
+    }
+
+    if (daq.value != 0U)
+    {
+        const std::string message =
+            "A DAQ became active before " + operationName +
+            ". The tuner passively detached and sent no further MDPP or "
+            "readout-stack write.";
+        DetachForForeignDaq(daq.value, message);
+        return {ScpCaptureGateStatus::OwnershipLost, message};
+    }
+
+    snapshot.mvlcDaqMode = daq.value;
+    Publish(std::move(snapshot));
+    return {ScpCaptureGateStatus::Allowed, {}};
+}
+
 void OwnershipService::RefreshProfileComparison(TunerSnapshot& snapshot)
 {
     snapshot.configurationComparison = {};
+    snapshot.profileApplicationPlan = {};
     snapshot.profileMatchesExactly = false;
     if (!snapshot.profileLoadedForTarget)
     {
@@ -962,6 +1206,13 @@ void OwnershipService::RefreshProfileComparison(TunerSnapshot& snapshot)
     snapshot.profileMatchesExactly =
         snapshot.configurationComparison.comparable &&
         snapshot.configurationComparison.differences.empty();
+    if (snapshot.configurationComparison.comparable)
+    {
+        snapshot.profileApplicationPlan =
+            PlanFw2051ScpProfileApplication(
+                snapshot.loadedProfile,
+                snapshot.configurationCapture);
+    }
 }
 
 void OwnershipService::StartWatchdog()

@@ -29,6 +29,20 @@ struct TemporaryProfile
 {
     std::string path;
 
+    TemporaryProfile() = default;
+    explicit TemporaryProfile(std::string profilePath)
+        : path(std::move(profilePath))
+    {
+    }
+    TemporaryProfile(const TemporaryProfile&) = delete;
+    TemporaryProfile& operator=(const TemporaryProfile&) = delete;
+    TemporaryProfile(TemporaryProfile&& other) noexcept
+        : path(std::move(other.path))
+    {
+        other.path.clear();
+    }
+    TemporaryProfile& operator=(TemporaryProfile&&) = delete;
+
     ~TemporaryProfile()
     {
         if (!path.empty())
@@ -47,10 +61,9 @@ TemporaryProfile MakeTemporaryProfile()
     }
     const auto unique = std::chrono::steady_clock::now()
         .time_since_epoch().count();
-    return {
+    return TemporaryProfile(
         std::string(directory) + "/fidget_service_profile_" +
-            std::to_string(unique) + ".mwwscp",
-    };
+        std::to_string(unique) + ".mwwscp");
 }
 
 std::vector<std::byte> EncodeWords(
@@ -538,6 +551,234 @@ fidget::CrateProject MakeProject()
         "mdpp1_scp_profile.mwwscp",
     });
     return project;
+}
+
+bool WaitFor(
+    fidget::OwnershipService& service,
+    const std::function<bool(const fidget::TunerSnapshot&)>& predicate);
+
+fidget::Fw2051ScpConfigurationSnapshot MakeValidConfiguration()
+{
+    using namespace fidget;
+
+    Fw2051ScpConfigurationSnapshot configuration;
+    configuration.state = ScpConfigurationState::Complete;
+    configuration.message = "service transaction test";
+    configuration.baseAddress = 0x11000000U;
+    configuration.hardwareId = Mdpp32HardwareId;
+    configuration.firmwareRevision = Mdpp32ScpFirmwareRevisionFw2051;
+    configuration.irqLevel = 1U;
+    configuration.outputFormat = 0x18U;
+    configuration.selectorParkedAtQuadZero = true;
+    for (std::uint16_t quadIndex = 0U;
+         quadIndex < Fw2051ScpQuadCount;
+         ++quadIndex)
+    {
+        Fw2051ScpQuadConfiguration quad;
+        quad.quad = quadIndex;
+        quad.timingFilter = static_cast<std::uint16_t>(10U + quadIndex);
+        quad.poleZero = {
+            static_cast<std::uint16_t>(2000U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2001U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2002U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2003U + quadIndex * 10U),
+        };
+        quad.gain = quadIndex == 7U ? 250U : 200U;
+        quad.thresholds = {
+            static_cast<std::uint16_t>(2500U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2501U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2502U + quadIndex * 10U),
+            static_cast<std::uint16_t>(2503U + quadIndex * 10U),
+        };
+        quad.shapingTime = static_cast<std::uint16_t>(160U + quadIndex);
+        quad.baselineRestorer = 2U;
+        quad.resetTime = 16U;
+        quad.signalRiseTime = 4U;
+        quad.preSamples = 50U;
+        quad.totalSamples = 400U;
+        quad.sampleConfiguration = quadIndex == 7U ? 3U : 0U;
+        configuration.quads.push_back(quad);
+    }
+    return configuration;
+}
+
+std::uint16_t QueueValidConfigurationCapture(
+    fidget::test::FakeCommandTransport& transport,
+    const fidget::Fw2051ScpConfigurationSnapshot& configuration,
+    std::uint16_t nextGateReference)
+{
+    using namespace fidget;
+
+    CaptureReferences references;
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeRead(
+        transport,
+        references,
+        configuration.baseAddress + 0x6008U,
+        configuration.hardwareId);
+    QueueVmeRead(
+        transport,
+        references,
+        configuration.baseAddress + 0x600EU,
+        configuration.firmwareRevision);
+    QueueVmeRead(
+        transport,
+        references,
+        configuration.baseAddress + 0x6010U,
+        configuration.irqLevel);
+    QueueVmeRead(
+        transport,
+        references,
+        configuration.baseAddress + 0x6044U,
+        configuration.outputFormat);
+
+    for (std::size_t quadIndex = 0U;
+         quadIndex < configuration.quads.size();
+         ++quadIndex)
+    {
+        if (quadIndex > 0U)
+        {
+            QueueRead(
+                transport, DaqModeRegister, nextGateReference++, 0U);
+        }
+        QueueVmeWrite(
+            transport,
+            references,
+            configuration.baseAddress + Fw2051ScpSelectorRegister,
+            static_cast<std::uint16_t>(quadIndex));
+        for (const auto& definition : Fw2051ScpSettingRegistry)
+        {
+            const auto value = Fw2051ScpQuadRegisterValue(
+                configuration.quads[quadIndex],
+                definition.registerOffset);
+            REQUIRE(value.has_value());
+            QueueVmeRead(
+                transport,
+                references,
+                configuration.baseAddress + definition.registerOffset,
+                *value);
+        }
+    }
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        configuration.baseAddress + Fw2051ScpSelectorRegister,
+        0U);
+    return nextGateReference;
+}
+
+void QueueSingleGainApply(
+    fidget::test::FakeCommandTransport& transport,
+    std::uint16_t nextGateReference)
+{
+    using namespace fidget;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    CaptureReferences references{0x3A00U, 0x9D100001U};
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeRead(
+        transport, references, Base + 0x6008U, Mdpp32HardwareId);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + 0x600EU,
+        Mdpp32ScpFirmwareRevisionFw2051);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport, references, Base + Fw2051ScpSelectorRegister, 7U);
+    QueueVmeRead(transport, references, Base + 0x611AU, 250U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(transport, references, Base + 0x611AU, 200U);
+    QueueVmeRead(transport, references, Base + 0x611AU, 200U);
+    QueueRead(transport, DaqModeRegister, nextGateReference, 0U);
+    QueueVmeWrite(
+        transport, references, Base + Fw2051ScpSelectorRegister, 0U);
+}
+
+void QueueBulkApply(
+    fidget::test::FakeCommandTransport& transport,
+    const fidget::Fw2051ScpConfigurationSnapshot& configuration,
+    std::uint16_t nextGateReference)
+{
+    using namespace fidget;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    nextGateReference = QueueValidConfigurationCapture(
+        transport, configuration, nextGateReference);
+    CaptureReferences references{0x3C00U, 0x9D200001U};
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport, references, Base + Fw2051ScpSelectorRegister, 7U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(transport, references, Base + 0x611AU, 200U);
+    QueueVmeRead(transport, references, Base + 0x611AU, 200U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(transport, references, Base + 0x614AU, 0U);
+    QueueVmeRead(transport, references, Base + 0x614AU, 0U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport, references, Base + Fw2051ScpSelectorRegister, 0U);
+    QueueRead(transport, DaqModeRegister, nextGateReference, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051FifoResetRegister,
+        Fw2051ResetCommandValue);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051ReadoutResetRegister,
+        Fw2051ResetCommandValue);
+}
+
+void CaptureValidConfiguration(
+    fidget::OwnershipService& service,
+    fidget::test::FakeCommandTransport& transport,
+    const fidget::Fw2051ScpConfigurationSnapshot& configuration)
+{
+    QueueValidConfigurationCapture(transport, configuration, 4U);
+    service.Submit(fidget::CaptureConfigurationCommand{});
+    REQUIRE(WaitFor(service, [](const fidget::TunerSnapshot& snapshot) {
+        return snapshot.configurationCapture.state ==
+            fidget::ScpConfigurationState::Complete;
+    }));
+}
+
+TemporaryProfile SaveTestProfile(
+    const fidget::Fw2051ScpConfigurationSnapshot& configuration)
+{
+    auto file = MakeTemporaryProfile();
+    const auto saved = fidget::SaveFw2051ScpProfile(
+        configuration, file.path);
+    REQUIRE(saved.success);
+    return file;
+}
+
+void LoadTestProfile(
+    fidget::OwnershipService& service,
+    const std::string& path,
+    std::size_t expectedDifferences)
+{
+    service.Submit(fidget::LoadProfileCommand{path});
+    REQUIRE(WaitFor(service, [expectedDifferences](
+                                const fidget::TunerSnapshot& snapshot) {
+        return snapshot.profileLoadedForTarget &&
+            snapshot.configurationComparison.comparable &&
+            snapshot.configurationComparison.differences.size() ==
+                expectedDifferences;
+    }));
 }
 
 bool WaitFor(
@@ -1166,4 +1407,160 @@ TEST_CASE("a capture read failure parks after a final certain gate")
     CHECK(operations.back().write);
     CHECK(operations.back().address == Base + Fw2051ScpSelectorRegister);
     CHECK(operations.back().value == 0U);
+}
+
+TEST_CASE("the service applies one row and makes the capture stale")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    const auto live = MakeValidConfiguration();
+    CaptureValidConfiguration(service, *transport, live);
+    auto profileConfiguration = live;
+    profileConfiguration.quads[7].gain = 200U;
+    const auto profile = SaveTestProfile(profileConfiguration);
+    LoadTestProfile(service, profile.path, 1U);
+
+    const auto ready = service.CurrentSnapshot();
+    CHECK(ready->configurationFresh);
+    CHECK(ready->profileApplicationPlan.success);
+    REQUIRE(ready->profileApplicationPlan.request.steps.size() == 1U);
+    CHECK(ready->profileApplicationPlan.request.steps[0].registerOffset ==
+          0x611AU);
+
+    QueueSingleGainApply(*transport, 13U);
+    service.Submit(ApplyProfileRowCommand{0x611AU, 7U});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.singleRepairResult.state ==
+            ScpSingleRepairState::Passed;
+    }));
+
+    const auto applied = service.CurrentSnapshot();
+    CHECK(applied->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(applied->activeOperation == GuidedTunerOperation::None);
+    CHECK(applied->singleRepairResult.writeVerified);
+    CHECK_FALSE(applied->singleRepairResult.rollbackAttempted);
+    CHECK(applied->singleRepairResult.profileValueRetained);
+    CHECK(applied->singleRepairResult.selectorParkedAtQuadZero);
+    CHECK(applied->configurationCompleteForTarget);
+    CHECK_FALSE(applied->configurationFresh);
+    CHECK_FALSE(applied->configurationComparison.comparable);
+    CHECK_FALSE(applied->profileApplicationPlan.success);
+    CHECK(applied->configurationComparison.message.find(
+              "Capture a fresh SCP configuration") != std::string::npos);
+
+    const auto requestCount = transport->SentRequests().size();
+    const auto beforeRefusal = applied->revision;
+    service.Submit(ApplyProfileRowCommand{0x611AU, 7U});
+    REQUIRE(WaitFor(service, [beforeRefusal](const TunerSnapshot& snapshot) {
+        return snapshot.revision > beforeRefusal;
+    }));
+    CHECK(transport->SentRequests().size() == requestCount);
+    CHECK(service.CurrentSnapshot()->statusMessages.back().summary ==
+          "Capture all eight SCP quads again before applying a profile "
+          "value.");
+
+    service.Submit(ReleaseSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership ==
+            GuidedTunerOwnershipState::Disconnected;
+    }));
+    CHECK(service.CurrentSnapshot()->singleRepairResult.state ==
+          ScpSingleRepairState::NotRun);
+}
+
+TEST_CASE("the service applies the planned banked differences and stales")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    const auto live = MakeValidConfiguration();
+    CaptureValidConfiguration(service, *transport, live);
+    auto profileConfiguration = live;
+    profileConfiguration.quads[7].gain = 200U;
+    profileConfiguration.quads[7].sampleConfiguration = 0U;
+    const auto profile = SaveTestProfile(profileConfiguration);
+    LoadTestProfile(service, profile.path, 2U);
+
+    const auto ready = service.CurrentSnapshot();
+    REQUIRE(ready->profileApplicationPlan.success);
+    REQUIRE(ready->profileApplicationPlan.request.steps.size() == 2U);
+    CHECK(ready->profileApplicationPlan.request.steps[0].registerOffset ==
+          0x611AU);
+    CHECK(ready->profileApplicationPlan.request.steps[1].registerOffset ==
+          0x614AU);
+
+    QueueBulkApply(*transport, live, 13U);
+    service.Submit(ApplyAllDifferencesCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.bulkApplyResult.state == ScpBulkApplyState::Passed;
+    }));
+
+    const auto applied = service.CurrentSnapshot();
+    CHECK(applied->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(applied->bulkApplyResult.fullPreflightMatched);
+    CHECK(applied->bulkApplyResult.moduleStopVerified);
+    CHECK(applied->bulkApplyResult.moduleLeftStopped);
+    CHECK(applied->bulkApplyResult.writesVerified == 2U);
+    CHECK(applied->bulkApplyResult.profileValuesRetained);
+    CHECK(applied->bulkApplyResult.selectorParkedAtQuadZero);
+    CHECK(applied->bulkApplyResult.fifoResetSent);
+    CHECK(applied->bulkApplyResult.readoutResetSent);
+    CHECK_FALSE(applied->configurationFresh);
+    CHECK_FALSE(applied->configurationComparison.comparable);
+}
+
+TEST_CASE("the service exposes the planner reason for a global mismatch")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    const auto live = MakeValidConfiguration();
+    CaptureValidConfiguration(service, *transport, live);
+    auto profileConfiguration = live;
+    profileConfiguration.outputFormat = 0x10U;
+    const auto profile = SaveTestProfile(profileConfiguration);
+    LoadTestProfile(service, profile.path, 1U);
+
+    const auto ready = service.CurrentSnapshot();
+    CHECK_FALSE(ready->profileApplicationPlan.success);
+    CHECK(ready->profileApplicationPlan.message.find(
+              "global setting 'Output format' differs") !=
+          std::string::npos);
+    CHECK(ready->configurationFresh);
+
+    const auto requestCount = transport->SentRequests().size();
+    const auto beforeRefusal = ready->revision;
+    service.Submit(ApplyAllDifferencesCommand{});
+    REQUIRE(WaitFor(service, [beforeRefusal](const TunerSnapshot& snapshot) {
+        return snapshot.revision > beforeRefusal;
+    }));
+    const auto refused = service.CurrentSnapshot();
+    CHECK(refused->configurationFresh);
+    CHECK(refused->bulkApplyResult.state == ScpBulkApplyState::NotRun);
+    CHECK(refused->statusMessages.back().summary.find(
+              "global setting 'Output format' differs") !=
+          std::string::npos);
+    CHECK(transport->SentRequests().size() == requestCount);
 }
