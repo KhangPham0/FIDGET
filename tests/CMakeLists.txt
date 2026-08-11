@@ -91,6 +91,14 @@ target_link_libraries(mvlc_data_receiver_tests PRIVATE
 
 add_test(NAME mvlc_data_receiver_tests COMMAND mvlc_data_receiver_tests)
 
+add_executable(acquisition_receiver_tests acquisition_receiver_tests.cpp)
+target_link_libraries(acquisition_receiver_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME acquisition_receiver_tests COMMAND acquisition_receiver_tests)
+
 add_executable(command_worker_tests command_worker_tests.cpp)
 target_link_libraries(command_worker_tests PRIVATE
     fidget_hardware

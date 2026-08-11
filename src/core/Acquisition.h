@@ -1,6 +1,8 @@
 #ifndef FIDGET_CORE_ACQUISITION_H
 #define FIDGET_CORE_ACQUISITION_H
 
+#include "core/StreamDecoder.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -71,6 +73,20 @@ struct DiagnosticAcquisitionResult
     std::size_t nonTargetModulesQuiesced = 0U;
     std::size_t nonTargetModulesVerifiedStoppedOnCleanup = 0U;
     std::vector<DiagnosticModuleIsolation> moduleIsolation;
+};
+
+struct DiagnosticStreamSnapshot
+{
+    bool receiverRunning = false;
+    std::string receiverError;
+    std::uint16_t requestedChannel = 0U;
+    MdppRequestedChannelTarget requestedTarget;
+    MdppChannelHistorySnapshots histories;
+    StreamDecoderStats decoderStats;
+    std::uint64_t datagramsReceived = 0U;
+    std::uint64_t bytesReceived = 0U;
+    double datagramsPerSecond = 0.0;
+    double waveformsPerSecond = 0.0;
 };
 
 } // namespace fidget

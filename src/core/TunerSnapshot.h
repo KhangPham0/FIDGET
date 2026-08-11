@@ -83,6 +83,7 @@ struct TunerSnapshot
     GuidedTunerAcquisitionState acquisition =
         GuidedTunerAcquisitionState::NotRun;
     DiagnosticAcquisitionResult diagnosticAcquisition;
+    DiagnosticStreamSnapshot diagnosticStream;
     bool cleanupVerified = false;
 
     std::vector<TunerStatusMessage> statusMessages;
