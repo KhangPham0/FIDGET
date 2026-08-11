@@ -61,6 +61,9 @@ TEST_CASE("ownership commands remain explicit semantic types")
     command = RunStartupAuditCommand{};
     CHECK(std::holds_alternative<RunStartupAuditCommand>(command));
 
+    command = CaptureConfigurationCommand{};
+    CHECK(std::holds_alternative<CaptureConfigurationCommand>(command));
+
     UseCrateProjectCommand useProject;
     useProject.project.mvlcHost = "mvlc-test";
     command = useProject;

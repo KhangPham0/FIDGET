@@ -3,6 +3,7 @@
 
 #include "core/CrateProject.h"
 #include "core/GuidedWorkflow.h"
+#include "core/ScpConfiguration.h"
 #include "core/StartupAudit.h"
 
 #include <cstddef>
@@ -57,6 +58,7 @@ struct TunerSnapshot
     StartupAuditResult startupAudit;
     bool configurationCompleteForTarget = false;
     bool configurationFresh = false;
+    Fw2051ScpConfigurationSnapshot configurationCapture;
     bool profileMatchesExactly = false;
     bool startupPlanAvailable = false;
     bool deterministicStartupPassed = false;

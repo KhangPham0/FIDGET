@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "core/VmeProtocol.h"
+#include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 #include "fake_command_transport.h"
 #include "hardware/OwnershipService.h"
@@ -86,6 +87,16 @@ std::vector<std::uint32_t> MakeReadStackFrame(
     };
 }
 
+std::vector<std::uint32_t> MakeWriteStackFrame(
+    std::uint32_t stackReference)
+{
+    return {
+        (static_cast<std::uint32_t>(fidget::MvlcStackFrameType) << 24U)
+            | 1U,
+        stackReference,
+    };
+}
+
 std::vector<std::byte> MakeUploadRequest(
     std::uint16_t superReference,
     std::uint32_t stackReference,
@@ -105,6 +116,150 @@ std::vector<std::byte> MakeExecuteRequest(std::uint16_t superReference)
     return EncodeWords(fidget::BuildMvlcStackExecuteRequest(superReference));
 }
 
+std::vector<std::byte> MakeWriteUploadRequest(
+    std::uint16_t superReference,
+    std::uint32_t stackReference,
+    std::uint32_t address,
+    std::uint16_t value)
+{
+    const auto operation = fidget::EncodeMvlcVmeWriteD16Words(address, value);
+    const auto request = fidget::BuildMvlcStackUploadRequest(
+        superReference,
+        stackReference,
+        operation.data(),
+        operation.size());
+    return EncodeWords(request);
+}
+
+struct CaptureReferences
+{
+    std::uint16_t super = 0x1800U;
+    std::uint32_t stack = 0x9C100001U;
+};
+
+void QueueVmeRead(
+    fidget::test::FakeCommandTransport& transport,
+    CaptureReferences& references,
+    std::uint32_t address,
+    std::uint16_t value)
+{
+    transport.QueueExchange({
+        MakeUploadRequest(references.super, references.stack, address),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({MakeSuperFrame(references.super)}))},
+    });
+    ++references.super;
+    transport.QueueExchange({
+        MakeExecuteRequest(references.super),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({
+                MakeSuperFrame(references.super),
+                MakeReadStackFrame(references.stack, value),
+            }))},
+    });
+    ++references.super;
+    ++references.stack;
+}
+
+void QueueFailedVmeRead(
+    fidget::test::FakeCommandTransport& transport,
+    CaptureReferences& references,
+    std::uint32_t address)
+{
+    transport.QueueExchange({
+        MakeUploadRequest(references.super, references.stack, address),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({MakeSuperFrame(references.super)}))},
+    });
+    ++references.super;
+    transport.QueueExchange({
+        MakeExecuteRequest(references.super),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({
+                MakeSuperFrame(references.super),
+                {
+                    (static_cast<std::uint32_t>(
+                         fidget::MvlcStackFrameType)
+                     << 24U)
+                        | (static_cast<std::uint32_t>(
+                               fidget::MvlcBusErrorFlag)
+                           << 20U)
+                        | 2U,
+                    references.stack,
+                    0U,
+                },
+            }))},
+    });
+    ++references.super;
+    ++references.stack;
+}
+
+void QueueVmeWrite(
+    fidget::test::FakeCommandTransport& transport,
+    CaptureReferences& references,
+    std::uint32_t address,
+    std::uint16_t value)
+{
+    transport.QueueExchange({
+        MakeWriteUploadRequest(
+            references.super, references.stack, address, value),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({MakeSuperFrame(references.super)}))},
+    });
+    ++references.super;
+    transport.QueueExchange({
+        MakeExecuteRequest(references.super),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({
+                MakeSuperFrame(references.super),
+                MakeWriteStackFrame(references.stack),
+            }))},
+    });
+    ++references.super;
+    ++references.stack;
+}
+
+std::uint16_t CaptureBankValue(
+    std::uint16_t quad,
+    std::size_t settingIndex)
+{
+    return static_cast<std::uint16_t>(
+        1000U + quad * 100U + settingIndex);
+}
+
+void QueueCaptureGlobals(
+    fidget::test::FakeCommandTransport& transport,
+    CaptureReferences& references)
+{
+    constexpr std::uint32_t Base = 0x11000000U;
+    QueueVmeRead(transport, references, Base + 0x6008U, 0x5007U);
+    QueueVmeRead(transport, references, Base + 0x600EU, 0x2051U);
+    QueueVmeRead(transport, references, Base + 0x6010U, 1U);
+    QueueVmeRead(transport, references, Base + 0x6044U, 0x18U);
+}
+
+void QueueCaptureBank(
+    fidget::test::FakeCommandTransport& transport,
+    CaptureReferences& references,
+    std::uint16_t quad)
+{
+    constexpr std::uint32_t Base = 0x11000000U;
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + fidget::Fw2051ScpSelectorRegister,
+        quad);
+    for (std::size_t index = 0U;
+         index < fidget::Fw2051ScpSettingRegistry.size(); ++index)
+    {
+        QueueVmeRead(
+            transport,
+            references,
+            Base + fidget::Fw2051ScpSettingRegistry[index].registerOffset,
+            CaptureBankValue(quad, index));
+    }
+}
+
 void QueueRead(
     fidget::test::FakeCommandTransport& transport,
     std::uint16_t address,
@@ -116,6 +271,33 @@ void QueueRead(
         {fidget::test::FakeReceiveAction::Datagram(
             MakeReadReply(address, reference, value))},
     });
+}
+
+void QueueCompleteConfigurationCapture(
+    fidget::test::FakeCommandTransport& transport)
+{
+    constexpr std::uint32_t Base = 0x11000000U;
+    CaptureReferences references;
+    QueueRead(transport, fidget::DaqModeRegister, 4U, 0U);
+    QueueCaptureGlobals(transport, references);
+    QueueCaptureBank(transport, references, 0U);
+    for (std::uint16_t quad = 1U;
+         quad < fidget::Fw2051ScpQuadCount;
+         ++quad)
+    {
+        QueueRead(
+            transport,
+            fidget::DaqModeRegister,
+            static_cast<std::uint16_t>(4U + quad),
+            0U);
+        QueueCaptureBank(transport, references, quad);
+    }
+    QueueRead(transport, fidget::DaqModeRegister, 12U, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + fidget::Fw2051ScpSelectorRegister,
+        0U);
 }
 
 void QueueIdleProbe(fidget::test::FakeCommandTransport& transport)
@@ -238,6 +420,41 @@ std::vector<std::uint32_t> DecodeWords(
         words.push_back(fidget::LoadLittleEndian32(bytes.data() + offset));
     }
     return words;
+}
+
+struct CapturedWireOperation
+{
+    bool write = false;
+    std::uint32_t address = 0U;
+    std::uint16_t value = 0U;
+};
+
+std::vector<CapturedWireOperation> DecodeCapturedWireOperations(
+    const fidget::test::FakeCommandTransport& transport)
+{
+    std::vector<CapturedWireOperation> operations;
+    for (const auto& request : transport.SentRequests())
+    {
+        const auto words = DecodeWords(request);
+        for (std::size_t index = 0U; index < words.size(); ++index)
+        {
+            if (words[index] == fidget::MvlcVmeReadA32D16Command)
+            {
+                REQUIRE(index + 2U < words.size());
+                operations.push_back({false, words[index + 2U], 0U});
+            }
+            else if (words[index] == fidget::MvlcVmeWriteA32D16Command)
+            {
+                REQUIRE(index + 4U < words.size());
+                operations.push_back({
+                    true,
+                    words[index + 2U],
+                    static_cast<std::uint16_t>(words[index + 4U]),
+                });
+            }
+        }
+    }
+    return operations;
 }
 
 void CheckStartupAuditWireRequests(
@@ -697,4 +914,198 @@ TEST_CASE("the startup audit gate stops before its first VME transaction")
           "or readout stacks.");
     CHECK(transport->SentRequests().size() == 7U);
     CheckOnlyReadRequests(*transport);
+}
+
+TEST_CASE("the service captures eight distinct banks and clears on release")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    QueueCompleteConfigurationCapture(*transport);
+    service.Submit(CaptureConfigurationCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.configurationCapture.state ==
+            ScpConfigurationState::Complete;
+    }));
+
+    const auto snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(snapshot->activeOperation == GuidedTunerOperation::None);
+    CHECK(snapshot->configurationCompleteForTarget);
+    CHECK(snapshot->configurationFresh);
+    CHECK(snapshot->configurationCapture.baseAddress == Base);
+    CHECK(snapshot->configurationCapture.hardwareId == 0x5007U);
+    CHECK(snapshot->configurationCapture.firmwareRevision == 0x2051U);
+    CHECK(snapshot->configurationCapture.quads.size() == 8U);
+    CHECK(snapshot->configurationCapture.selectorParkedAtQuadZero);
+    CHECK(transport->SentRequests().size() == 313U);
+
+    for (std::uint16_t quadIndex = 0U; quadIndex < 8U; ++quadIndex)
+    {
+        const auto& quad = snapshot->configurationCapture.quads[quadIndex];
+        CHECK(quad.quad == quadIndex);
+        for (std::size_t settingIndex = 0U;
+             settingIndex < Fw2051ScpSettingRegistry.size();
+             ++settingIndex)
+        {
+            const auto value = Fw2051ScpQuadRegisterValue(
+                quad,
+                Fw2051ScpSettingRegistry[settingIndex].registerOffset);
+            REQUIRE(value.has_value());
+            CHECK(*value == CaptureBankValue(quadIndex, settingIndex));
+        }
+    }
+
+    const auto operations = DecodeCapturedWireOperations(*transport);
+    REQUIRE(operations.size() == 149U);
+    std::vector<std::uint16_t> selectorValues;
+    for (const auto& operation : operations)
+    {
+        if (operation.write &&
+            operation.address == Base + Fw2051ScpSelectorRegister)
+        {
+            selectorValues.push_back(operation.value);
+        }
+    }
+    CHECK(selectorValues ==
+          std::vector<std::uint16_t>{0U, 1U, 2U, 3U, 4U,
+                                     5U, 6U, 7U, 0U});
+
+    service.Submit(ReleaseSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& value) {
+        return value.ownership == GuidedTunerOwnershipState::Disconnected;
+    }));
+    const auto released = service.CurrentSnapshot();
+    CHECK_FALSE(released->configurationCompleteForTarget);
+    CHECK_FALSE(released->configurationFresh);
+    CHECK(released->configurationCapture.state ==
+          ScpConfigurationState::NotRun);
+}
+
+TEST_CASE("foreign DAQ activity mid-capture detaches without parking")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    CaptureReferences references;
+    QueueRead(*transport, DaqModeRegister, 4U, 0U);
+    QueueCaptureGlobals(*transport, references);
+    QueueCaptureBank(*transport, references, 0U);
+    QueueRead(*transport, DaqModeRegister, 5U, 0U);
+    QueueCaptureBank(*transport, references, 1U);
+    QueueRead(*transport, DaqModeRegister, 6U, 0U);
+    QueueCaptureBank(*transport, references, 2U);
+    QueueRead(*transport, DaqModeRegister, 7U, 0x000FU);
+
+    service.Submit(CaptureConfigurationCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.configurationCapture.state ==
+                ScpConfigurationState::Failed &&
+            snapshot.ownership == GuidedTunerOwnershipState::OwnershipLost;
+    }));
+
+    const auto snapshot = service.CurrentSnapshot();
+    CHECK_FALSE(transport->IsOpen());
+    CHECK_FALSE(snapshot->configurationCompleteForTarget);
+    CHECK_FALSE(snapshot->configurationFresh);
+    CHECK(snapshot->configurationCapture.quads.size() == 3U);
+    CHECK_FALSE(snapshot->configurationCapture.selectorParkedAtQuadZero);
+    CHECK(snapshot->configurationCapture.message ==
+          "A DAQ became active before SCP configuration bank 3. The tuner "
+          "passively detached and sent no further MDPP or readout-stack "
+          "write.");
+
+    const auto operations = DecodeCapturedWireOperations(*transport);
+    std::vector<std::uint16_t> selectorValues;
+    for (const auto& operation : operations)
+    {
+        if (operation.write &&
+            operation.address == Base + Fw2051ScpSelectorRegister)
+        {
+            selectorValues.push_back(operation.value);
+        }
+    }
+    CHECK(selectorValues == std::vector<std::uint16_t>{0U, 1U, 2U});
+}
+
+TEST_CASE("a capture read failure parks after a final certain gate")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    CaptureReferences references;
+    QueueRead(*transport, DaqModeRegister, 4U, 0U);
+    QueueCaptureGlobals(*transport, references);
+    QueueCaptureBank(*transport, references, 0U);
+    QueueRead(*transport, DaqModeRegister, 5U, 0U);
+    QueueCaptureBank(*transport, references, 1U);
+    QueueRead(*transport, DaqModeRegister, 6U, 0U);
+    QueueVmeWrite(
+        *transport,
+        references,
+        Base + Fw2051ScpSelectorRegister,
+        2U);
+    for (std::size_t index = 0U; index < 5U; ++index)
+    {
+        QueueVmeRead(
+            *transport,
+            references,
+            Base + Fw2051ScpSettingRegistry[index].registerOffset,
+            CaptureBankValue(2U, index));
+    }
+    QueueFailedVmeRead(
+        *transport,
+        references,
+        Base + Fw2051ScpSettingRegistry[5].registerOffset);
+    QueueRead(*transport, DaqModeRegister, 7U, 0U);
+    QueueVmeWrite(
+        *transport,
+        references,
+        Base + Fw2051ScpSelectorRegister,
+        0U);
+
+    service.Submit(CaptureConfigurationCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.configurationCapture.state ==
+            ScpConfigurationState::Failed;
+    }));
+
+    const auto snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK_FALSE(snapshot->configurationCompleteForTarget);
+    CHECK_FALSE(snapshot->configurationFresh);
+    CHECK(snapshot->configurationCapture.quads.size() == 2U);
+    CHECK(snapshot->configurationCapture.selectorParkedAtQuadZero);
+    CHECK(snapshot->configurationCapture.message.find("Quad 2") !=
+          std::string::npos);
+
+    const auto operations = DecodeCapturedWireOperations(*transport);
+    REQUIRE_FALSE(operations.empty());
+    CHECK(operations.back().write);
+    CHECK(operations.back().address == Base + Fw2051ScpSelectorRegister);
+    CHECK(operations.back().value == 0U);
 }

@@ -3,6 +3,7 @@
 
 #include "core/TunerControl.h"
 #include "hardware/CommandWorker.h"
+#include "hardware/ScpCaptureOperation.h"
 #include "hardware/Transport.h"
 
 #include <atomic>
@@ -61,6 +62,7 @@ private:
     void SetHandoffConfirmed(bool confirmed);
     void OpenSession();
     void RunStartupAudit();
+    void CaptureConfiguration();
     void ReleaseSession();
     void ProbeController(TunerSnapshot snapshot, bool retainSession);
 
@@ -69,6 +71,8 @@ private:
         std::uint16_t reference,
         const std::atomic<bool>& cancelled);
     [[nodiscard]] PreWriteGateResult CheckPreWriteGate(
+        const std::string& operationName);
+    [[nodiscard]] ScpCaptureGateResult CheckCaptureOwnershipGate(
         const std::string& operationName);
 
     void StartWatchdog();

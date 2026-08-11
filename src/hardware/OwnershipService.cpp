@@ -130,6 +130,11 @@ void OwnershipService::Submit(TunerCommand command)
         (void)worker_.Post([this] { RunStartupAudit(); });
         return;
     }
+    if (std::holds_alternative<CaptureConfigurationCommand>(command))
+    {
+        (void)worker_.Post([this] { CaptureConfiguration(); });
+        return;
+    }
 
     StopWatchdog();
     (void)worker_.Post([this] { ReleaseSession(); });
@@ -300,12 +305,97 @@ void OwnershipService::OpenSession()
     snapshot.startupAuditCompleteForTarget = false;
     snapshot.startupAuditReady = false;
     snapshot.startupAudit = {};
+    snapshot.configurationCompleteForTarget = false;
+    snapshot.configurationFresh = false;
+    snapshot.configurationCapture = {};
+    snapshot.profileMatchesExactly = false;
     PublishStatus(
         snapshot,
         TunerStatusLevel::Information,
         "Opening the tuner session.");
 
     ProbeController(std::move(snapshot), true);
+}
+
+void OwnershipService::CaptureConfiguration()
+{
+    auto snapshot = *CurrentSnapshot();
+    const std::uint32_t baseAddress = snapshot.activeModuleBaseAddress;
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        Fw2051ScpConfigurationSnapshot capture;
+        capture.state = ScpConfigurationState::Failed;
+        capture.baseAddress = baseAddress;
+        capture.message =
+            "Open a tuner session before reading an SCP configuration.";
+        snapshot.configurationCapture = std::move(capture);
+        snapshot.configurationCompleteForTarget = false;
+        snapshot.configurationFresh = false;
+        snapshot.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before reading an SCP configuration.");
+        return;
+    }
+    if (!snapshot.targetSupported)
+    {
+        Fw2051ScpConfigurationSnapshot capture;
+        capture.state = ScpConfigurationState::Failed;
+        capture.baseAddress = baseAddress;
+        capture.message =
+            "The selected module backend is not implemented for SCP "
+            "configuration capture.";
+        snapshot.configurationCapture = std::move(capture);
+        snapshot.configurationCompleteForTarget = false;
+        snapshot.configurationFresh = false;
+        snapshot.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The selected module backend is not implemented for SCP "
+            "configuration capture.");
+        return;
+    }
+
+    Fw2051ScpConfigurationSnapshot reading;
+    reading.state = ScpConfigurationState::Reading;
+    reading.baseAddress = baseAddress;
+    reading.message =
+        "Reading the global SCP settings and all eight channel quads...";
+    snapshot.configurationCapture = reading;
+    snapshot.configurationCompleteForTarget = false;
+    snapshot.configurationFresh = false;
+    snapshot.profileMatchesExactly = false;
+    snapshot.activeOperation = GuidedTunerOperation::ConfigurationCapture;
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        reading.message);
+
+    const auto operation = CaptureFw2051ScpConfiguration(
+        *transport_,
+        baseAddress,
+        serviceStopRequested_,
+        [this](const std::string& operationName) {
+            return CheckCaptureOwnershipGate(operationName);
+        });
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.configurationCapture = operation.configuration;
+    snapshot.configurationCompleteForTarget =
+        operation.configuration.state == ScpConfigurationState::Complete &&
+        operation.configuration.baseAddress ==
+            snapshot.activeModuleBaseAddress;
+    snapshot.configurationFresh =
+        snapshot.configurationCompleteForTarget;
+    snapshot.profileMatchesExactly = false;
+    const auto level = snapshot.configurationCompleteForTarget
+        ? TunerStatusLevel::Success
+        : TunerStatusLevel::Error;
+    const std::string message = operation.configuration.message;
+    PublishStatus(std::move(snapshot), level, message);
 }
 
 void OwnershipService::ProbeController(
@@ -439,6 +529,10 @@ void OwnershipService::ReleaseSession()
     snapshot.startupAuditCompleteForTarget = false;
     snapshot.startupAuditReady = false;
     snapshot.startupAudit = {};
+    snapshot.configurationCompleteForTarget = false;
+    snapshot.configurationFresh = false;
+    snapshot.configurationCapture = {};
+    snapshot.profileMatchesExactly = false;
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -699,6 +793,62 @@ PreWriteGateResult OwnershipService::CheckPreWriteGate(
     return {true, {}};
 }
 
+ScpCaptureGateResult OwnershipService::CheckCaptureOwnershipGate(
+    const std::string& operationName)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (serviceStopRequested_.load())
+    {
+        return {
+            ScpCaptureGateStatus::Cancelled,
+            "SCP configuration capture was cancelled.",
+        };
+    }
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        return {
+            snapshot.ownership == GuidedTunerOwnershipState::OwnershipLost
+                ? ScpCaptureGateStatus::OwnershipLost
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            "No open tuner session is available.",
+        };
+    }
+
+    const auto daq = ReadLocalRegister(
+        DaqModeRegister, nextReadReference_++, serviceStopRequested_);
+    if (!daq.success)
+    {
+        const std::string message =
+            "SCP configuration capture stopped because MVLC command "
+            "communication is temporarily uncertain before " +
+            operationName + ". No further selector write was sent. The "
+            "session remains open and the watchdog will retry: " +
+            daq.error;
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Warning, message);
+        return {
+            serviceStopRequested_.load()
+                ? ScpCaptureGateStatus::Cancelled
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            message,
+        };
+    }
+
+    if (daq.value != 0U)
+    {
+        const std::string message =
+            "A DAQ became active before " + operationName +
+            ". The tuner passively detached and sent no further MDPP or "
+            "readout-stack write.";
+        DetachForForeignDaq(daq.value, message);
+        return {ScpCaptureGateStatus::OwnershipLost, message};
+    }
+
+    snapshot.mvlcDaqMode = daq.value;
+    Publish(std::move(snapshot));
+    return {ScpCaptureGateStatus::Allowed, {}};
+}
+
 void OwnershipService::StartWatchdog()
 {
     watchdogStopRequested_.store(false);
@@ -814,6 +964,9 @@ void OwnershipService::DetachForForeignDaq(
     snapshot.startupAuditCompleteForTarget = false;
     snapshot.startupAuditReady = false;
     snapshot.startupAudit = {};
+    snapshot.configurationCompleteForTarget = false;
+    snapshot.configurationFresh = false;
+    snapshot.profileMatchesExactly = false;
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,
