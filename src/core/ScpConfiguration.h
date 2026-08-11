@@ -12,7 +12,12 @@ namespace fidget {
 inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
 inline constexpr std::uint16_t Mdpp32AlternateHardwareId = 0x500CU;
 inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
+inline constexpr std::uint16_t Fw2051AcquisitionControlRegister = 0x603AU;
+inline constexpr std::uint16_t Fw2051FifoResetRegister = 0x603CU;
+inline constexpr std::uint16_t Fw2051ReadoutResetRegister = 0x6034U;
 inline constexpr std::uint16_t Fw2051ScpSelectorRegister = 0x6100U;
+inline constexpr std::uint16_t Fw2051StopAcquisitionValue = 0U;
+inline constexpr std::uint16_t Fw2051ResetCommandValue = 1U;
 inline constexpr std::size_t Fw2051ScpQuadCount = 8U;
 inline constexpr std::size_t Fw2051ScpBankedSettingCount = 17U;
 inline constexpr std::size_t Fw2051ScpConfigurationValueCount =

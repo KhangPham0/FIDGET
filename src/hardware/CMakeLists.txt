@@ -6,6 +6,7 @@ add_library(fidget_hardware STATIC
     MvlcDataReceiver.cpp
     OwnershipService.cpp
     ScpCaptureOperation.cpp
+    ScpSingleRepairOperation.cpp
     Transport.cpp
     VmeTransaction.cpp
 )
