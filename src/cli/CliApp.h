@@ -21,6 +21,7 @@ enum class CliCommand
     Compare,
     Apply,
     ApplyAll,
+    Startup,
 };
 
 enum class CliSessionWaitResult
@@ -101,6 +102,14 @@ using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
     const CliInterruptRequested& interruptRequested);
 
 [[nodiscard]] int RunCliApply(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliStartup(
     const CliOptions& options,
     ITunerControl& tunerControl,
     std::istream& input,

@@ -1,10 +1,12 @@
 #include "cli/CliApp.h"
 
 #include "core/CrateProject.h"
+#include "core/DeterministicStartup.h"
 #include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
 #include "core/ScpTransactionPlan.h"
 #include "core/StartupAudit.h"
+#include "core/StartupPreparation.h"
 
 #include <algorithm>
 #include <charconv>
@@ -26,6 +28,7 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr auto CommandCompletionTimeout = std::chrono::seconds(15);
+constexpr auto StartupCompletionTimeout = std::chrono::minutes(2);
 
 bool ParseUnsigned(
     std::string_view text,
@@ -81,10 +84,12 @@ bool ParseRegisterOffset(
 bool WaitForRevision(
     ITunerControl& tunerControl,
     std::uint64_t previousRevision,
-    const std::function<bool(const TunerSnapshot&)>& ready)
+    const std::function<bool(const TunerSnapshot&)>& ready,
+    const std::chrono::steady_clock::duration timeout =
+        CommandCompletionTimeout)
 {
     const auto deadline =
-        std::chrono::steady_clock::now() + CommandCompletionTimeout;
+        std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline)
     {
         const auto snapshot = tunerControl.CurrentSnapshot();
@@ -592,6 +597,66 @@ void PrintBulkApplyResult(
     output << "transaction_message: " << result.message << '\n';
 }
 
+void PrintStartupRecipe(
+    std::ostream& output,
+    const TunerSnapshot& snapshot)
+{
+    const auto& plan = snapshot.standaloneStartupPlan;
+    output << "startup_recipe:\n"
+           << "recipe_step: prepare and verify the eight-register "
+              "module-wide readout contract\n"
+           << "recipe_step: recapture all eight SCP banks before "
+              "planning a write\n"
+           << "recipe_step: apply the fresh banked plan with exact "
+              "readback and rollback protection\n"
+           << "recipe_step: recapture and prove all 141 saved values\n"
+           << "recipe_step: leave acquisition stopped\n";
+    for (const auto& mismatch : snapshot.startupPreparationMismatches)
+    {
+        output << "preparation_step register=0x"
+               << std::uppercase << std::hex << std::setw(4)
+               << std::setfill('0') << mismatch.registerOffset
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << " setting=\"" << mismatch.name << "\" live="
+               << mismatch.currentValue
+               << " required=" << mismatch.targetValue << '\n';
+    }
+    for (const auto& step : plan.bankedApplication.steps)
+    {
+        PrintApplicationStep(output, step);
+    }
+    output << "startup_recipe_summary: compared=" << plan.valuesCompared
+           << " differences=" << plan.configurationDifferences
+           << " preparation_mismatches="
+           << snapshot.startupPreparationMismatches.size()
+           << " profile_contract_mismatches="
+           << plan.startupContractDifferences
+           << " banked_writes=" << plan.bankedApplication.steps.size()
+           << '\n'
+           << "startup_recipe_message: " << plan.message << '\n';
+}
+
+void PrintDeterministicStartupResult(
+    std::ostream& output,
+    const DeterministicStartupResult& result)
+{
+    output << "startup_summary: state="
+           << (result.state == DeterministicStartupState::Passed
+                   ? "passed"
+                   : "failed")
+           << " preparation_writes="
+           << result.preparation.writesVerified << '/'
+           << result.preparation.changedSettings
+           << " banked_writes=" << result.bankedWritesPlanned
+           << " final_values=" << result.finalComparison.valuesCompared
+           << "/141 verified="
+           << (result.finalProfileVerified ? "yes" : "no")
+           << " module_stopped="
+           << (result.moduleLeftStopped ? "yes" : "no")
+           << '\n';
+    output << "startup_message: " << result.message << '\n';
+}
+
 } // namespace
 
 const char* FidgetCliUsage() noexcept
@@ -608,6 +673,8 @@ const char* FidgetCliUsage() noexcept
         "--register OFFSET --quad N [options]\n"
         "  fidget_cli apply-all (--project FILE | --host HOST) --profile "
         "FILE [options]\n"
+        "  fidget_cli startup (--project FILE | --host HOST) --profile "
+        "FILE [options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -615,7 +682,8 @@ const char* FidgetCliUsage() noexcept
         "  --port PORT     Use or override the MVLC command port\n"
         "  --module N      Select the one-based project module (default 1)\n"
         "  --save FILE     Save a successful capture as an SCP profile\n"
-        "  --profile FILE  Load this SCP profile for compare or apply\n"
+        "  --profile FILE  Load this SCP profile for compare, apply, or "
+        "startup\n"
         "  --register OFF  Select a banked register, decimal or 0x-prefixed\n"
         "  --quad N        Select channel quad 0 through 7\n"
         "  -h, --help      Show this help\n";
@@ -666,6 +734,10 @@ CliOptionsParseResult ParseCliOptions(
     else if (command == "apply-all")
     {
         result.options.command = CliCommand::ApplyAll;
+    }
+    else if (command == "startup")
+    {
+        result.options.command = CliCommand::Startup;
     }
     else
     {
@@ -782,14 +854,17 @@ CliOptionsParseResult ParseCliOptions(
     if (!result.options.profilePath.empty()
         && result.options.command != CliCommand::Compare
         && result.options.command != CliCommand::Apply
-        && result.options.command != CliCommand::ApplyAll)
+        && result.options.command != CliCommand::ApplyAll
+        && result.options.command != CliCommand::Startup)
     {
-        result.error = "--profile is valid only for the compare command";
+        result.error =
+            "--profile is valid only for compare, apply, or startup";
         return result;
     }
     if ((result.options.command == CliCommand::Compare
          || result.options.command == CliCommand::Apply
-         || result.options.command == CliCommand::ApplyAll)
+         || result.options.command == CliCommand::ApplyAll
+         || result.options.command == CliCommand::Startup)
         && result.options.profilePath.empty()
         && !result.options.showHelp)
     {
@@ -1495,6 +1570,191 @@ int RunCliApply(
             }
             output << "stale_reminder: recapture all eight quads before "
                       "comparing or applying another value\n";
+        }
+    }
+
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
+}
+
+int RunCliStartup(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    const auto beforeLoad = tunerControl.CurrentSnapshot()->revision;
+    tunerControl.Submit(LoadProfileCommand{options.profilePath});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeLoad,
+            [](const TunerSnapshot&) { return true; }))
+    {
+        errorOutput << "error: SCP profile load timed out\n";
+        return 1;
+    }
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (!snapshot->profileLoadedForTarget)
+    {
+        errorOutput << "error: SCP profile load failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+    output << "profile_loaded: " << options.profilePath << '\n';
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
+    {
+        return openResult;
+    }
+
+    int result = 1;
+    bool recipeReady = false;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeAudit =
+            tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(RunStartupAuditCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeAudit,
+                [](const TunerSnapshot& value) {
+                    return value.startupAudit.state ==
+                            StartupAuditState::Complete ||
+                        value.startupAudit.state == StartupAuditState::Failed;
+                }))
+        {
+            errorOutput << "error: startup audit timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->startupAudit.state != StartupAuditState::Complete)
+            {
+                errorOutput << "error: startup audit failed: "
+                            << snapshot->startupAudit.message << '\n';
+            }
+        }
+    }
+
+    snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->startupAudit.state == StartupAuditState::Complete &&
+        !(interruptRequested && interruptRequested()))
+    {
+        const auto beforeCapture = snapshot->revision;
+        tunerControl.Submit(CaptureConfigurationCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeCapture,
+                [](const TunerSnapshot& value) {
+                    return value.configurationCapture.state ==
+                            ScpConfigurationState::Complete ||
+                        value.configurationCapture.state ==
+                            ScpConfigurationState::Failed;
+                }))
+        {
+            errorOutput << "error: SCP configuration capture timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->configurationCapture.state !=
+                ScpConfigurationState::Complete)
+            {
+                errorOutput << "error: SCP configuration capture failed: "
+                            << snapshot->configurationCapture.message
+                            << '\n';
+            }
+            else if (!snapshot->startupPlanAvailable ||
+                     !snapshot->standaloneStartupPlan.success)
+            {
+                errorOutput << "error: deterministic startup is blocked: "
+                            << snapshot->standaloneStartupPlan.message
+                            << '\n';
+            }
+            else
+            {
+                PrintStartupRecipe(output, *snapshot);
+                recipeReady = true;
+            }
+        }
+    }
+
+    if (recipeReady && !(interruptRequested && interruptRequested()))
+    {
+        const auto preparationCount =
+            snapshot->startupPreparationMismatches.size();
+        const auto bankedCount =
+            snapshot->standaloneStartupPlan.bankedApplication.steps.size();
+        output << "Run deterministic startup with " << preparationCount
+               << " preparation change(s) and " << bankedCount
+               << " banked write(s) [y/N]: " << std::flush;
+        std::string confirmation;
+        if (!std::getline(input, confirmation) ||
+            !TransactionConfirmedByUser(std::move(confirmation)))
+        {
+            output << "startup: not run\n";
+        }
+        else if (!(interruptRequested && interruptRequested()))
+        {
+            const auto beforeStartup =
+                tunerControl.CurrentSnapshot()->revision;
+            tunerControl.Submit(RunDeterministicStartupCommand{true});
+            if (!WaitForRevision(
+                    tunerControl,
+                    beforeStartup,
+                    [](const TunerSnapshot& value) {
+                        return value.deterministicStartupResult.state ==
+                                DeterministicStartupState::Passed ||
+                            value.deterministicStartupResult.state ==
+                                DeterministicStartupState::Failed;
+                    },
+                    StartupCompletionTimeout))
+            {
+                errorOutput << "error: deterministic startup timed out\n";
+            }
+            else
+            {
+                snapshot = tunerControl.CurrentSnapshot();
+                PrintDeterministicStartupResult(
+                    output, snapshot->deterministicStartupResult);
+                const auto& startup =
+                    snapshot->deterministicStartupResult;
+                result = startup.state == DeterministicStartupState::Passed &&
+                        startup.finalProfileVerified &&
+                        startup.finalComparison.valuesCompared ==
+                            Fw2051ScpConfigurationValueCount &&
+                        startup.finalComparison.differences.empty() &&
+                        startup.moduleLeftStopped
+                    ? 0
+                    : 1;
+            }
         }
     }
 

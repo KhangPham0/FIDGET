@@ -4,13 +4,16 @@
 #include "cli/CliApp.h"
 #include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
+#include "core/StartupPreparation.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -51,6 +54,29 @@ fidget::StartupAuditResult MakeAuditResult(bool blocked)
         }
     }
     return fidget::ClassifyFw2051StartupAudit(0x11000000U, values);
+}
+
+std::vector<fidget::Fw2051StartupPreparationMismatch>
+PreparationMismatches(const fidget::StartupAuditResult& audit)
+{
+    std::array<
+        std::uint16_t,
+        fidget::Fw2051StartupPreparationRegisterCount> values{};
+    for (std::size_t index = 0U; index < values.size(); ++index)
+    {
+        const auto registerOffset =
+            fidget::Fw2051StartupPreparationRegisterTable[index]
+                .registerOffset;
+        const auto found = std::find_if(
+            audit.rows.begin(),
+            audit.rows.end(),
+            [registerOffset](const fidget::StartupAuditRow& row) {
+                return row.registerOffset == registerOffset;
+            });
+        REQUIRE(found != audit.rows.end());
+        values[index] = found->value;
+    }
+    return fidget::FindFw2051StartupPreparationMismatches(values);
 }
 
 fidget::Fw2051ScpConfigurationSnapshot MakeConfiguration(bool differs)
@@ -198,7 +224,8 @@ public:
             ++openCommands;
             next.ownership = fidget::GuidedTunerOwnershipState::SessionOpen;
         }
-        else if (std::holds_alternative<fidget::RunStartupAuditCommand>(command))
+        else if (std::holds_alternative<
+                     fidget::RunStartupAuditCommand>(command))
         {
             ++auditCommands;
             next.startupAudit = MakeAuditResult(auditBlocked_);
@@ -227,6 +254,18 @@ public:
                     fidget::PlanFw2051ScpProfileApplication(
                         next.loadedProfile,
                         next.configurationCapture);
+                next.standaloneStartupPlan =
+                    fidget::PlanFw2051ScpStandaloneStartup(
+                        next.loadedProfile,
+                        next.configurationCapture);
+                if (next.startupAuditCompleteForTarget)
+                {
+                    next.startupPreparationMismatches =
+                        PreparationMismatches(next.startupAudit);
+                }
+                next.startupPlanAvailable =
+                    next.startupAuditCompleteForTarget &&
+                    next.standaloneStartupPlan.success;
             }
         }
         else if (const auto* save =
@@ -311,6 +350,63 @@ public:
             }
             next.configurationFresh = false;
         }
+        else if (const auto* startup = std::get_if<
+                     fidget::RunDeterministicStartupCommand>(&command))
+        {
+            ++startupCommands;
+            next.deterministicStartupResult = {};
+            auto& result = next.deterministicStartupResult;
+            result.state = startup->confirmed
+                ? fidget::DeterministicStartupState::Passed
+                : fidget::DeterministicStartupState::Failed;
+            result.message = startup->confirmed
+                ? "Deterministic tuner startup passed: the readout "
+                  "contract and all 141 saved SCP values are verified. "
+                  "Ready and stopped."
+                : "Deterministic startup requires explicit confirmation.";
+            result.baseAddress = next.activeModuleBaseAddress;
+            result.reviewedPlan = next.standaloneStartupPlan;
+            result.valuesCompared =
+                next.standaloneStartupPlan.valuesCompared;
+            result.initialDifferences =
+                next.standaloneStartupPlan.configurationDifferences;
+            result.startupContractDifferences =
+                next.standaloneStartupPlan.startupContractDifferences;
+            result.bankedDifferences =
+                next.standaloneStartupPlan.bankedDifferences;
+            result.bankedWritesPlanned =
+                next.standaloneStartupPlan.bankedApplication.steps.size();
+            result.startupPreparationPassed = startup->confirmed;
+            result.preparation.state = startup->confirmed
+                ? fidget::StartupPreparationState::Passed
+                : fidget::StartupPreparationState::Failed;
+            result.preparation.changedSettings =
+                next.startupPreparationMismatches.size();
+            result.preparation.writesAttempted =
+                result.preparation.changedSettings;
+            result.preparation.writesVerified =
+                result.preparation.changedSettings;
+            result.preparation.moduleLeftStopped = startup->confirmed;
+            result.postPreparationCapturePassed = startup->confirmed;
+            result.bankedApplicationNeeded =
+                result.bankedWritesPlanned != 0U;
+            result.bankedApplicationPassed = startup->confirmed;
+            result.finalConfiguration = next.loadedProfile.configuration;
+            result.finalComparison = fidget::CompareFw2051ScpConfiguration(
+                next.loadedProfile,
+                result.finalConfiguration);
+            result.finalProfileVerified = startup->confirmed;
+            result.moduleLeftStopped = startup->confirmed;
+            next.deterministicStartupPassed = startup->confirmed;
+            if (startup->confirmed)
+            {
+                next.configurationCapture = result.finalConfiguration;
+                next.configurationCompleteForTarget = true;
+                next.configurationFresh = true;
+                next.configurationComparison = result.finalComparison;
+                next.profileMatchesExactly = true;
+            }
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -331,6 +427,7 @@ public:
     int loadCommands = 0;
     int applyCommands = 0;
     int applyAllCommands = 0;
+    int startupCommands = 0;
     int releaseCommands = 0;
     std::string savedPath;
     std::string loadedPath;
@@ -424,6 +521,16 @@ TEST_CASE("CLI options accept project and host status forms")
         const auto parsed = fidget::ParseCliOptions(6, arguments);
         REQUIRE(parsed.success);
         CHECK(parsed.options.command == fidget::CliCommand::ApplyAll);
+    }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "startup", "--host", "mvlc-test",
+            "--profile", "expected.mwwscp",
+        };
+        const auto parsed = fidget::ParseCliOptions(6, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Startup);
+        CHECK(parsed.options.profilePath == "expected.mwwscp");
     }
 }
 
@@ -1031,6 +1138,109 @@ TEST_CASE("SIGINT during apply is reported only after session release")
 
     CHECK(exitCode == 130);
     CHECK(control.applyCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("startup prints its full recipe and ends ready and stopped")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Startup;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliStartup(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.loadCommands == 1);
+    CHECK(control.openCommands == 1);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.startupCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(CountOccurrences(output.str(), "recipe_step: ") == 5U);
+    CHECK(output.str().find(
+              "startup_recipe_summary: compared=141 differences=1 "
+              "preparation_mismatches=5 profile_contract_mismatches=0 "
+              "banked_writes=1\n") != std::string::npos);
+    CHECK(output.str().find(
+              "plan_step quad=5 register=0x611E "
+              "setting=\"Threshold ch 1\" live=4321 profile=1001\n") !=
+          std::string::npos);
+    CHECK(output.str().find(
+              "Run deterministic startup with 5 preparation change(s) "
+              "and 1 banked write(s) [y/N]: ") != std::string::npos);
+    CHECK(output.str().find(
+              "startup_summary: state=passed preparation_writes=5/5 "
+              "banked_writes=1 final_values=141/141 verified=yes "
+              "module_stopped=yes\n") != std::string::npos);
+    CHECK(output.str().find("Ready and stopped.\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("startup defaults to no and releases when confirmation is closed")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Startup;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliStartup(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.startupCommands == 0);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("startup: not run\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("SIGINT during startup is reported only after session release")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Startup;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliStartup(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.startupCommands > 0; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.startupCommands == 1);
     CHECK(control.releaseCommands == 1);
     CHECK(output.str().find("session: released\n") != std::string::npos);
 }

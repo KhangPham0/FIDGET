@@ -117,6 +117,16 @@ int main(int argc, char** argv)
             std::cerr,
             interrupted);
     }
+    if (parsed.options.command == fidget::CliCommand::Startup)
+    {
+        return fidget::RunCliStartup(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
     return fidget::RunCliApply(
         parsed.options,
         tunerControl,
