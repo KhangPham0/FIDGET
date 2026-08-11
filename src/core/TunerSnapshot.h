@@ -1,6 +1,7 @@
 #ifndef FIDGET_CORE_TUNER_SNAPSHOT_H
 #define FIDGET_CORE_TUNER_SNAPSHOT_H
 
+#include "core/Acquisition.h"
 #include "core/CrateProject.h"
 #include "core/DeterministicStartup.h"
 #include "core/GuidedWorkflow.h"
@@ -81,6 +82,7 @@ struct TunerSnapshot
     DeterministicStartupResult deterministicStartupResult;
     GuidedTunerAcquisitionState acquisition =
         GuidedTunerAcquisitionState::NotRun;
+    DiagnosticAcquisitionResult diagnosticAcquisition;
     bool cleanupVerified = false;
 
     std::vector<TunerStatusMessage> statusMessages;

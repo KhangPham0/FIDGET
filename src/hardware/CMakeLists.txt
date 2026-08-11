@@ -3,6 +3,7 @@ find_package(Threads REQUIRED)
 add_library(fidget_hardware STATIC
     CommandWorker.cpp
     DeterministicStartupOperation.cpp
+    DiagnosticAcquisitionOperation.cpp
     MvlcCommandTransport.cpp
     MvlcDataReceiver.cpp
     OwnershipService.cpp
