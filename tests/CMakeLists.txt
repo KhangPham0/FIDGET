@@ -118,6 +118,14 @@ target_link_libraries(ownership_service_tests PRIVATE
 
 add_test(NAME ownership_service_tests COMMAND ownership_service_tests)
 
+add_executable(scp_capture_operation_tests scp_capture_operation_tests.cpp)
+target_link_libraries(scp_capture_operation_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME scp_capture_operation_tests COMMAND scp_capture_operation_tests)
+
 add_executable(cli_tests cli_tests.cpp)
 target_link_libraries(cli_tests PRIVATE
     fidget_cli_support
