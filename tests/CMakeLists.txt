@@ -110,6 +110,14 @@ target_link_libraries(startup_audit_tests PRIVATE
 
 add_test(NAME startup_audit_tests COMMAND startup_audit_tests)
 
+add_executable(startup_preparation_tests startup_preparation_tests.cpp)
+target_link_libraries(startup_preparation_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME startup_preparation_tests COMMAND startup_preparation_tests)
+
 add_executable(ownership_service_tests ownership_service_tests.cpp)
 target_link_libraries(ownership_service_tests PRIVATE
     fidget_hardware
