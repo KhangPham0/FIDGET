@@ -117,7 +117,14 @@ void DrawComparisonRow(
     ImGui::PushStyleColor(ImGuiCol_Button, theme.statusWarning);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme.highlight);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme.statusWarning);
-    if (ImGui::SmallButton("Apply profile value"))
+    char applyLabel[40]{};
+    std::snprintf(
+        applyLabel,
+        sizeof(applyLabel),
+        "Apply Q%d 0x%04X",
+        quad,
+        static_cast<unsigned>(*registerOffset));
+    if (ImGui::SmallButton(applyLabel))
     {
         tunerControl.Submit(ApplyProfileRowCommand{
             *registerOffset,
