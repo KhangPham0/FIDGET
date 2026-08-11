@@ -176,8 +176,7 @@ GuidedTunerDecision PlanGuidedTunerWorkflow(
             GuidedTunerTone::Attention, 5U);
     }
 
-    if (inputs.deterministicStartupPassed
-        || (inputs.startupAuditReady && inputs.profileMatchesExactly))
+    if (inputs.deterministicStartupPassed)
     {
         return MakeDecision(
             GuidedTunerStage::Ready,

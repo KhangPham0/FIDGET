@@ -72,6 +72,10 @@ TEST_CASE("ownership commands remain explicit semantic types")
     REQUIRE(std::holds_alternative<LoadProfileCommand>(command));
     CHECK(std::get<LoadProfileCommand>(command).path == "loaded.mwwscp");
 
+    command = RunDeterministicStartupCommand{true};
+    REQUIRE(std::holds_alternative<RunDeterministicStartupCommand>(command));
+    CHECK(std::get<RunDeterministicStartupCommand>(command).confirmed);
+
     UseCrateProjectCommand useProject;
     useProject.project.mvlcHost = "mvlc-test";
     command = useProject;

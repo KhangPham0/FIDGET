@@ -313,15 +313,18 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     {
         m_startupAuditStage.Draw(m_tunerControl, snapshot, m_theme);
     }
-    else
+    else if (decision.step == 5U)
     {
         m_configurationStage.Draw(m_tunerControl, snapshot, m_theme);
-        if (decision.step > 5U)
-        {
-            ImGui::Spacing();
-            ImGui::TextDisabled(
-                "Startup planning and acquisition arrive in later phases.");
-        }
+    }
+    else if (decision.step == 6U)
+    {
+        m_startupStage.Draw(m_tunerControl, snapshot, m_theme);
+    }
+    else
+    {
+        ImGui::TextDisabled(
+            "Waveform acquisition arrives in the next phase.");
     }
     ImGui::End();
 }

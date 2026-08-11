@@ -15,6 +15,7 @@ add_executable(fidget
     ui/ProjectStage.cpp
     ui/SessionStage.cpp
     ui/StartupAuditStage.cpp
+    ui/StartupStage.cpp
     ui/Theme.cpp
     ui/WorkflowRail.cpp
 )

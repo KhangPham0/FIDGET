@@ -5,7 +5,9 @@
 #include "core/ScpRegistry.h"
 #include "core/ScpTransactionPlan.h"
 #include "core/StartupAudit.h"
+#include "core/StartupPreparation.h"
 #include "core/VmeProtocol.h"
+#include "hardware/DeterministicStartupOperation.h"
 #include "hardware/VmeTransaction.h"
 
 #include <algorithm>
@@ -160,6 +162,14 @@ void OwnershipService::Submit(TunerCommand command)
     if (std::holds_alternative<ApplyAllDifferencesCommand>(command))
     {
         (void)worker_.Post([this] { ApplyAllDifferences(); });
+        return;
+    }
+    if (const auto* startup =
+            std::get_if<RunDeterministicStartupCommand>(&command))
+    {
+        const auto request = *startup;
+        (void)worker_.Post(
+            [this, request] { RunDeterministicStartup(request); });
         return;
     }
 
@@ -338,6 +348,8 @@ void OwnershipService::OpenSession()
     snapshot.configurationCapture = {};
     snapshot.singleRepairResult = {};
     snapshot.bulkApplyResult = {};
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         snapshot,
@@ -398,6 +410,8 @@ void OwnershipService::CaptureConfiguration()
     snapshot.configurationCapture = reading;
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
     snapshot.activeOperation = GuidedTunerOperation::ConfigurationCapture;
     PublishStatus(
@@ -463,8 +477,11 @@ void OwnershipService::LoadProfile(const std::string& path)
     snapshot.loadedProfile = {};
     snapshot.singleRepairResult = {};
     snapshot.bulkApplyResult = {};
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     snapshot.configurationComparison = {};
     snapshot.profileMatchesExactly = false;
+    RefreshProfileComparison(snapshot);
 
     if (!loaded.success || !loaded.profile)
     {
@@ -581,6 +598,8 @@ void OwnershipService::ApplyProfileRow(
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.singleRepairResult = result;
     snapshot.configurationFresh = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         std::move(snapshot),
@@ -656,10 +675,115 @@ void OwnershipService::ApplyAllDifferences()
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.bulkApplyResult = result;
     snapshot.configurationFresh = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         std::move(snapshot),
         result.state == ScpBulkApplyState::Passed
+            ? TunerStatusLevel::Success
+            : TunerStatusLevel::Error,
+        result.message);
+}
+
+void OwnershipService::RunDeterministicStartup(
+    const RunDeterministicStartupCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    RefreshProfileComparison(snapshot);
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before deterministic startup.");
+        return;
+    }
+    if (!command.confirmed)
+    {
+        snapshot.deterministicStartupResult = {};
+        snapshot.deterministicStartupResult.state =
+            DeterministicStartupState::Failed;
+        snapshot.deterministicStartupResult.message =
+            "Deterministic startup requires explicit confirmation of the "
+            "reviewed recipe.";
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Deterministic startup requires explicit confirmation of the "
+            "reviewed recipe.");
+        return;
+    }
+    if (!snapshot.startupPlanAvailable ||
+        !snapshot.standaloneStartupPlan.success)
+    {
+        const auto message = snapshot.standaloneStartupPlan.message.empty()
+            ? "The deterministic startup recipe is not available."
+            : snapshot.standaloneStartupPlan.message;
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Warning, message);
+        return;
+    }
+
+    DeterministicStartupRequest request;
+    request.profileLoadedForTarget = snapshot.profileLoadedForTarget;
+    request.configurationFresh = snapshot.configurationFresh;
+    request.startupAuditCompleteForTarget =
+        snapshot.startupAuditCompleteForTarget;
+    request.confirmed = command.confirmed;
+    request.profile = snapshot.loadedProfile;
+    request.reviewedConfiguration = snapshot.configurationCapture;
+    request.startupAudit = snapshot.startupAudit;
+
+    snapshot.activeOperation = GuidedTunerOperation::StartupPreparation;
+    snapshot.configurationFresh = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
+    snapshot.deterministicStartupResult.state =
+        DeterministicStartupState::PreparingReadout;
+    snapshot.deterministicStartupResult.baseAddress =
+        snapshot.activeModuleBaseAddress;
+    snapshot.deterministicStartupResult.message =
+        "Running the strict deterministic startup sequence...";
+    RefreshProfileComparison(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Running the strict deterministic startup sequence.");
+
+    const auto result = RunFw2051DeterministicStartup(
+        *transport_,
+        request,
+        serviceStopRequested_,
+        [this](const std::string& operationName) {
+            return CheckStartupOwnershipGate(operationName);
+        });
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.deterministicStartupResult = result;
+    snapshot.deterministicStartupPassed =
+        result.state == DeterministicStartupState::Passed &&
+        result.finalProfileVerified && result.moduleLeftStopped;
+    if (snapshot.deterministicStartupPassed)
+    {
+        snapshot.configurationCapture = result.finalConfiguration;
+        snapshot.configurationCompleteForTarget =
+            result.finalConfiguration.state ==
+                ScpConfigurationState::Complete &&
+            result.finalConfiguration.baseAddress ==
+                snapshot.activeModuleBaseAddress;
+        snapshot.configurationFresh =
+            snapshot.configurationCompleteForTarget;
+    }
+    else
+    {
+        snapshot.configurationFresh = false;
+    }
+    RefreshProfileComparison(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        result.state == DeterministicStartupState::Passed
             ? TunerStatusLevel::Success
             : TunerStatusLevel::Error,
         result.message);
@@ -808,6 +932,11 @@ void OwnershipService::ReleaseSession()
     snapshot.profileMatchesExactly = false;
     snapshot.singleRepairResult = {};
     snapshot.bulkApplyResult = {};
+    snapshot.startupPlanAvailable = false;
+    snapshot.standaloneStartupPlan = {};
+    snapshot.startupPreparationMismatches.clear();
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -868,6 +997,9 @@ void OwnershipService::RunStartupAudit()
     snapshot.startupAudit = audit;
     snapshot.startupAuditCompleteForTarget = false;
     snapshot.startupAuditReady = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
+    RefreshProfileComparison(snapshot);
     snapshot.activeOperation = GuidedTunerOperation::Audit;
     PublishStatus(
         std::move(snapshot),
@@ -957,6 +1089,7 @@ void OwnershipService::RunStartupAudit()
     snapshot.startupAuditReady =
         snapshot.startupAuditCompleteForTarget &&
         audit.readyForDiagnosticStart;
+    RefreshProfileComparison(snapshot);
     PublishStatus(
         std::move(snapshot),
         audit.readyForDiagnosticStart
@@ -1180,11 +1313,103 @@ ScpCaptureGateResult OwnershipService::CheckApplyOwnershipGate(
     return {ScpCaptureGateStatus::Allowed, {}};
 }
 
+ScpCaptureGateResult OwnershipService::CheckStartupOwnershipGate(
+    const std::string& operationName)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (serviceStopRequested_.load())
+    {
+        return {
+            ScpCaptureGateStatus::Cancelled,
+            "Deterministic startup was cancelled.",
+        };
+    }
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        return {
+            snapshot.ownership == GuidedTunerOwnershipState::OwnershipLost
+                ? ScpCaptureGateStatus::OwnershipLost
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            "No open tuner session is available.",
+        };
+    }
+
+    const auto daq = ReadLocalRegister(
+        DaqModeRegister, nextReadReference_++, serviceStopRequested_);
+    if (!daq.success)
+    {
+        const std::string message =
+            "Deterministic startup stopped because MVLC command "
+            "communication is temporarily uncertain before " +
+            operationName + ". No further hardware write was sent. The "
+            "session remains open and the watchdog will retry: " +
+            daq.error;
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Warning, message);
+        return {
+            serviceStopRequested_.load()
+                ? ScpCaptureGateStatus::Cancelled
+                : ScpCaptureGateStatus::CommunicationUnavailable,
+            message,
+        };
+    }
+
+    if (daq.value != 0U)
+    {
+        const std::string message =
+            "A DAQ became active before " + operationName +
+            ". The tuner passively detached and sent no further MDPP or "
+            "readout-stack write.";
+        DetachForForeignDaq(daq.value, message);
+        return {ScpCaptureGateStatus::OwnershipLost, message};
+    }
+
+    snapshot.mvlcDaqMode = daq.value;
+    Publish(std::move(snapshot));
+    return {ScpCaptureGateStatus::Allowed, {}};
+}
+
 void OwnershipService::RefreshProfileComparison(TunerSnapshot& snapshot)
 {
     snapshot.configurationComparison = {};
     snapshot.profileApplicationPlan = {};
+    snapshot.standaloneStartupPlan = {};
+    snapshot.startupPlanAvailable = false;
+    snapshot.startupPreparationMismatches.clear();
     snapshot.profileMatchesExactly = false;
+
+    if (snapshot.startupAuditCompleteForTarget)
+    {
+        std::array<
+            std::uint16_t,
+            Fw2051StartupPreparationRegisterCount> values{};
+        bool foundEveryValue = true;
+        for (std::size_t index = 0U;
+             index < Fw2051StartupPreparationRegisterTable.size();
+             ++index)
+        {
+            const auto registerOffset =
+                Fw2051StartupPreparationRegisterTable[index]
+                    .registerOffset;
+            const auto found = std::find_if(
+                snapshot.startupAudit.rows.begin(),
+                snapshot.startupAudit.rows.end(),
+                [registerOffset](const StartupAuditRow& row) {
+                    return row.registerOffset == registerOffset;
+                });
+            if (found == snapshot.startupAudit.rows.end())
+            {
+                foundEveryValue = false;
+                break;
+            }
+            values[index] = found->value;
+        }
+        if (foundEveryValue)
+        {
+            snapshot.startupPreparationMismatches =
+                FindFw2051StartupPreparationMismatches(values);
+        }
+    }
     if (!snapshot.profileLoadedForTarget)
     {
         snapshot.configurationComparison.message = snapshot.profileLoaded
@@ -1212,6 +1437,16 @@ void OwnershipService::RefreshProfileComparison(TunerSnapshot& snapshot)
             PlanFw2051ScpProfileApplication(
                 snapshot.loadedProfile,
                 snapshot.configurationCapture);
+        snapshot.standaloneStartupPlan =
+            PlanFw2051ScpStandaloneStartup(
+                snapshot.loadedProfile,
+                snapshot.configurationCapture);
+        snapshot.startupPlanAvailable =
+            snapshot.standaloneStartupPlan.success &&
+            snapshot.startupAuditCompleteForTarget &&
+            snapshot.startupAudit.hardwareId == Mdpp32HardwareId &&
+            snapshot.startupAudit.firmwareRevision ==
+                Mdpp32ScpFirmwareRevisionFw2051;
     }
 }
 
@@ -1332,6 +1567,8 @@ void OwnershipService::DetachForForeignDaq(
     snapshot.startupAudit = {};
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
+    snapshot.deterministicStartupPassed = false;
+    snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         std::move(snapshot),

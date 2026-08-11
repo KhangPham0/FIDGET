@@ -2,12 +2,14 @@
 #define FIDGET_CORE_TUNER_SNAPSHOT_H
 
 #include "core/CrateProject.h"
+#include "core/DeterministicStartup.h"
 #include "core/GuidedWorkflow.h"
 #include "core/ScpConfiguration.h"
 #include "core/ScpProfile.h"
 #include "core/ScpTransactionPlan.h"
 #include "core/ScpTransactionResult.h"
 #include "core/StartupAudit.h"
+#include "core/StartupPreparation.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -72,7 +74,11 @@ struct TunerSnapshot
     ScpSingleRepairResult singleRepairResult;
     ScpBulkApplyResult bulkApplyResult;
     bool startupPlanAvailable = false;
+    ScpStandaloneStartupPlan standaloneStartupPlan;
+    std::vector<Fw2051StartupPreparationMismatch>
+        startupPreparationMismatches;
     bool deterministicStartupPassed = false;
+    DeterministicStartupResult deterministicStartupResult;
     GuidedTunerAcquisitionState acquisition =
         GuidedTunerAcquisitionState::NotRun;
     bool cleanupVerified = false;

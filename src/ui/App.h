@@ -8,6 +8,7 @@
 #include "ui/ProjectStage.h"
 #include "ui/SessionStage.h"
 #include "ui/StartupAuditStage.h"
+#include "ui/StartupStage.h"
 #include "ui/Theme.h"
 
 #include <string>
@@ -55,6 +56,7 @@ private:
     ProfileStage m_profileStage;
     StartupAuditStage m_startupAuditStage;
     ConfigurationStage m_configurationStage;
+    StartupStage m_startupStage;
 
     long m_frameLimit = -1;
 

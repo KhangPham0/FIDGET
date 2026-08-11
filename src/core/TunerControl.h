@@ -68,6 +68,11 @@ struct ApplyAllDifferencesCommand
 {
 };
 
+struct RunDeterministicStartupCommand
+{
+    bool confirmed = false;
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -80,6 +85,7 @@ using TunerCommand = std::variant<
     LoadProfileCommand,
     ApplyProfileRowCommand,
     ApplyAllDifferencesCommand,
+    RunDeterministicStartupCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl

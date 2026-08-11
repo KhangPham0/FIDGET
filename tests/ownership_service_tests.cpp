@@ -1564,3 +1564,61 @@ TEST_CASE("the service exposes the planner reason for a global mismatch")
           std::string::npos);
     CHECK(transport->SentRequests().size() == requestCount);
 }
+
+TEST_CASE("the service publishes the startup recipe and requires confirmation")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    QueueStartupAudit(*transport, MakeReadyAuditValues());
+    service.Submit(RunStartupAuditCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.startupAudit.state == StartupAuditState::Complete;
+    }));
+
+    const auto live = MakeValidConfiguration();
+    QueueValidConfigurationCapture(*transport, live, 5U);
+    service.Submit(CaptureConfigurationCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.configurationCapture.state ==
+            ScpConfigurationState::Complete;
+    }));
+
+    auto profileConfiguration = live;
+    profileConfiguration.quads[7].gain = 200U;
+    const auto profile = SaveTestProfile(profileConfiguration);
+    LoadTestProfile(service, profile.path, 1U);
+
+    const auto reviewed = service.CurrentSnapshot();
+    CHECK(reviewed->startupPlanAvailable);
+    CHECK(reviewed->standaloneStartupPlan.success);
+    CHECK(reviewed->standaloneStartupPlan.valuesCompared == 141U);
+    CHECK(reviewed->standaloneStartupPlan.bankedDifferences == 1U);
+    CHECK(reviewed->standaloneStartupPlan.bankedApplication.steps.size() ==
+          1U);
+    CHECK(reviewed->startupPreparationMismatches.size() == 3U);
+
+    const auto requestCount = transport->SentRequests().size();
+    const auto beforeRefusal = reviewed->revision;
+    service.Submit(RunDeterministicStartupCommand{false});
+    REQUIRE(WaitFor(service, [beforeRefusal](const TunerSnapshot& snapshot) {
+        return snapshot.revision > beforeRefusal &&
+            snapshot.deterministicStartupResult.state ==
+                DeterministicStartupState::Failed;
+    }));
+
+    const auto refused = service.CurrentSnapshot();
+    CHECK(refused->configurationFresh);
+    CHECK(refused->startupPlanAvailable);
+    CHECK_FALSE(refused->deterministicStartupPassed);
+    CHECK(refused->deterministicStartupResult.message.find(
+              "explicit confirmation") != std::string::npos);
+    CHECK(transport->SentRequests().size() == requestCount);
+}

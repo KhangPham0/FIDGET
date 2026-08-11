@@ -111,10 +111,19 @@ TEST_CASE("the guided workflow preserves the readiness path")
     inputs.configurationCompleteForTarget = true;
     inputs.configurationFresh = true;
     inputs.profileMatchesExactly = true;
+    inputs.startupPlanAvailable = true;
     CheckDecision(
-        inputs, GuidedTunerStage::Ready,
+        inputs, GuidedTunerStage::ReviewStartup,
+        GuidedTunerAction::ReviewStartup,
+        GuidedTunerTone::Attention, 6U);
+
+    inputs.deterministicStartupPassed = true;
+    CheckDecision(
+        inputs,
+        GuidedTunerStage::Ready,
         GuidedTunerAction::StartAcquisition,
-        GuidedTunerTone::Ready, 7U);
+        GuidedTunerTone::Ready,
+        7U);
 }
 
 TEST_CASE("the guided workflow preserves preparation and busy states")
