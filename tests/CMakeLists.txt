@@ -132,6 +132,20 @@ add_test(
     COMMAND startup_preparation_operation_tests
 )
 
+add_executable(
+    deterministic_startup_operation_tests
+    deterministic_startup_operation_tests.cpp
+)
+target_link_libraries(deterministic_startup_operation_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(
+    NAME deterministic_startup_operation_tests
+    COMMAND deterministic_startup_operation_tests
+)
+
 add_executable(ownership_service_tests ownership_service_tests.cpp)
 target_link_libraries(ownership_service_tests PRIVATE
     fidget_hardware
