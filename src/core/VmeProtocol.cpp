@@ -149,6 +149,30 @@ std::array<std::uint32_t, 4> BuildMvlcLocalRegisterReadRequest(
     };
 }
 
+MvlcRequestBuildResult BuildMvlcLocalRegisterBatchReadRequest(
+    std::uint16_t reference,
+    const std::uint16_t* addresses,
+    std::size_t addressCount)
+{
+    MvlcRequestBuildResult result;
+    if (addressCount == 0U)
+    {
+        result.error = "No MVLC local registers were requested";
+        return result;
+    }
+
+    result.words.reserve(addressCount + 3U);
+    result.words.push_back(MvlcCommandBufferStart);
+    result.words.push_back(MvlcReferenceWordCommand | reference);
+    for (std::size_t index = 0U; index < addressCount; ++index)
+    {
+        result.words.push_back(MvlcReadLocalCommand | addresses[index]);
+    }
+    result.words.push_back(MvlcCommandBufferEnd);
+    result.success = true;
+    return result;
+}
+
 MvlcRequestBuildResult BuildMvlcLocalRegisterWriteRequest(
     std::uint16_t superReference,
     const MvlcLocalRegisterWrite* writes,
@@ -303,6 +327,99 @@ MvlcLocalReadReply ParseMvlcLocalRegisterReadReply(
         result.value = LoadLittleEndian32(
             payload + (offset + 3U) * sizeof(std::uint32_t));
         return result;
+    }
+
+    result.status = MvlcLocalReadReplyStatus::NoMatch;
+    return result;
+}
+
+MvlcLocalBatchReadReply ParseMvlcLocalRegisterBatchReadReply(
+    const std::byte* packet,
+    std::size_t packetSize,
+    std::uint16_t reference,
+    const std::uint16_t* addresses,
+    std::size_t addressCount)
+{
+    MvlcLocalBatchReadReply result;
+    if (packetSize < (EthernetHeaderWords + 2U) * sizeof(std::uint32_t)
+        || packetSize % sizeof(std::uint32_t) != 0U)
+    {
+        return result;
+    }
+
+    const std::uint32_t header0 = LoadLittleEndian32(packet);
+    const std::uint32_t magic = (header0 >> 30U) & 0x3U;
+    const std::uint32_t packetChannel = (header0 >> 28U) & 0x3U;
+    const std::size_t payloadWords = header0 & 0x1FFFU;
+    const std::size_t availableWords =
+        packetSize / sizeof(std::uint32_t) - EthernetHeaderWords;
+    if (magic != 0U
+        || packetChannel > MaximumCommandPipePacketChannel
+        || payloadWords > availableWords)
+    {
+        return result;
+    }
+
+    // Immediate-stack replies can remain queued after a VME transaction.
+    // They are unrelated to a local-register batch, not malformed.
+    if (packetChannel != 0U)
+    {
+        result.status = MvlcLocalReadReplyStatus::NoMatch;
+        return result;
+    }
+
+    const std::byte* payload =
+        packet + EthernetHeaderWords * sizeof(std::uint32_t);
+    const std::uint32_t expectedReference =
+        MvlcReferenceWordCommand | reference;
+    const std::size_t expectedFrameContents = 1U + addressCount * 2U;
+
+    for (std::size_t offset = 0U; offset < payloadWords;)
+    {
+        const std::uint32_t frameHeader = LoadLittleEndian32(
+            payload + offset * sizeof(std::uint32_t));
+        const std::size_t frameContents = frameHeader & 0x1FFFU;
+        if (offset + 1U + frameContents > payloadWords)
+        {
+            return result;
+        }
+
+        if ((frameHeader >> 24U) == MvlcSuperFrameType
+            && frameContents >= 1U)
+        {
+            const std::uint32_t mirroredReference = LoadLittleEndian32(
+                payload + (offset + 1U) * sizeof(std::uint32_t));
+            if (mirroredReference == expectedReference)
+            {
+                if (frameContents != expectedFrameContents)
+                {
+                    return result;
+                }
+
+                result.values.reserve(addressCount);
+                for (std::size_t index = 0U; index < addressCount; ++index)
+                {
+                    const std::size_t commandOffset =
+                        offset + 2U + index * 2U;
+                    const std::uint32_t mirroredRead = LoadLittleEndian32(
+                        payload + commandOffset * sizeof(std::uint32_t));
+                    if (mirroredRead
+                        != (MvlcReadLocalCommand | addresses[index]))
+                    {
+                        result.values.clear();
+                        return result;
+                    }
+                    result.values.push_back(LoadLittleEndian32(
+                        payload
+                        + (commandOffset + 1U) * sizeof(std::uint32_t)));
+                }
+
+                result.status = MvlcLocalReadReplyStatus::Match;
+                return result;
+            }
+        }
+
+        offset += frameContents + 1U;
     }
 
     result.status = MvlcLocalReadReplyStatus::NoMatch;

@@ -103,6 +103,13 @@ struct MvlcLocalReadReply
     std::uint32_t value = 0U;
 };
 
+struct MvlcLocalBatchReadReply
+{
+    MvlcLocalReadReplyStatus status =
+        MvlcLocalReadReplyStatus::Malformed;
+    std::vector<std::uint32_t> values;
+};
+
 // A frame can be unrelated to the active transaction, accepted, or rejected.
 // matches distinguishes an unrelated frame from a rejected matching frame.
 struct MvlcFrameValidationResult
@@ -136,6 +143,10 @@ void StoreLittleEndian32(std::byte* destination, std::uint32_t value);
     BuildMvlcLocalRegisterReadRequest(
         std::uint16_t reference,
         std::uint16_t address);
+[[nodiscard]] MvlcRequestBuildResult BuildMvlcLocalRegisterBatchReadRequest(
+    std::uint16_t reference,
+    const std::uint16_t* addresses,
+    std::size_t addressCount);
 [[nodiscard]] MvlcRequestBuildResult BuildMvlcLocalRegisterWriteRequest(
     std::uint16_t superReference,
     const MvlcLocalRegisterWrite* writes,
@@ -149,6 +160,12 @@ void StoreLittleEndian32(std::byte* destination, std::uint32_t value);
     std::size_t packetSize,
     std::uint16_t reference,
     std::uint16_t address);
+[[nodiscard]] MvlcLocalBatchReadReply ParseMvlcLocalRegisterBatchReadReply(
+    const std::byte* packet,
+    std::size_t packetSize,
+    std::uint16_t reference,
+    const std::uint16_t* addresses,
+    std::size_t addressCount);
 [[nodiscard]] bool IsMatchingMvlcSuperFrame(
     const MvlcFrame& frame,
     std::uint16_t reference);

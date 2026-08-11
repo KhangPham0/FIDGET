@@ -8,6 +8,11 @@ target_link_libraries(readout_protocol_tests PRIVATE fidget_core doctest::doctes
 
 add_test(NAME readout_protocol_tests COMMAND readout_protocol_tests)
 
+add_executable(vme_protocol_tests vme_protocol_tests.cpp)
+target_link_libraries(vme_protocol_tests PRIVATE fidget_core doctest::doctest)
+
+add_test(NAME vme_protocol_tests COMMAND vme_protocol_tests)
+
 add_executable(scp_registry_tests scp_registry_tests.cpp)
 target_link_libraries(scp_registry_tests PRIVATE fidget_core doctest::doctest)
 
