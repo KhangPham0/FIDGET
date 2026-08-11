@@ -62,7 +62,8 @@ TEST_CASE("startup preparation reports only mismatched contract values")
 
     for (std::size_t index = 0U; index < values.size(); ++index)
     {
-        values[index] = Fw2051StartupPreparationRegisterTable[index].targetValue;
+        values[index] =
+            Fw2051StartupPreparationRegisterTable[index].targetValue;
     }
     CHECK(FindFw2051StartupPreparationMismatches(values).empty());
 }
