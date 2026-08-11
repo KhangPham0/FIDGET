@@ -4,6 +4,7 @@
 #include "core/CrateProject.h"
 #include "core/GuidedWorkflow.h"
 #include "core/ScpConfiguration.h"
+#include "core/ScpProfile.h"
 #include "core/StartupAudit.h"
 
 #include <cstddef>
@@ -52,13 +53,17 @@ struct TunerSnapshot
 
     bool recoveryRecordAvailable = false;
     GuidedTunerOperation activeOperation = GuidedTunerOperation::None;
+    bool profileLoaded = false;
     bool profileLoadedForTarget = false;
+    std::string loadedProfilePath;
+    ScpProfile loadedProfile;
     bool startupAuditCompleteForTarget = false;
     bool startupAuditReady = false;
     StartupAuditResult startupAudit;
     bool configurationCompleteForTarget = false;
     bool configurationFresh = false;
     Fw2051ScpConfigurationSnapshot configurationCapture;
+    ScpConfigurationComparison configurationComparison;
     bool profileMatchesExactly = false;
     bool startupPlanAvailable = false;
     bool deterministicStartupPassed = false;

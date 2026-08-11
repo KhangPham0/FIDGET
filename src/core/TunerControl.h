@@ -47,6 +47,16 @@ struct CaptureConfigurationCommand
 {
 };
 
+struct SaveProfileCommand
+{
+    std::string path;
+};
+
+struct LoadProfileCommand
+{
+    std::string path;
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -55,6 +65,8 @@ using TunerCommand = std::variant<
     OpenSessionCommand,
     RunStartupAuditCommand,
     CaptureConfigurationCommand,
+    SaveProfileCommand,
+    LoadProfileCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl

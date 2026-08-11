@@ -64,6 +64,14 @@ TEST_CASE("ownership commands remain explicit semantic types")
     command = CaptureConfigurationCommand{};
     CHECK(std::holds_alternative<CaptureConfigurationCommand>(command));
 
+    command = SaveProfileCommand{"saved.mwwscp"};
+    REQUIRE(std::holds_alternative<SaveProfileCommand>(command));
+    CHECK(std::get<SaveProfileCommand>(command).path == "saved.mwwscp");
+
+    command = LoadProfileCommand{"loaded.mwwscp"};
+    REQUIRE(std::holds_alternative<LoadProfileCommand>(command));
+    CHECK(std::get<LoadProfileCommand>(command).path == "loaded.mwwscp");
+
     UseCrateProjectCommand useProject;
     useProject.project.mvlcHost = "mvlc-test";
     command = useProject;

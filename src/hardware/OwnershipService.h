@@ -63,6 +63,8 @@ private:
     void OpenSession();
     void RunStartupAudit();
     void CaptureConfiguration();
+    void SaveProfile(const std::string& path);
+    void LoadProfile(const std::string& path);
     void ReleaseSession();
     void ProbeController(TunerSnapshot snapshot, bool retainSession);
 
@@ -74,6 +76,7 @@ private:
         const std::string& operationName);
     [[nodiscard]] ScpCaptureGateResult CheckCaptureOwnershipGate(
         const std::string& operationName);
+    static void RefreshProfileComparison(TunerSnapshot& snapshot);
 
     void StartWatchdog();
     void StopWatchdog();

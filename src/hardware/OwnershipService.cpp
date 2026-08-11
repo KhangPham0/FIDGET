@@ -1,6 +1,7 @@
 #include "hardware/OwnershipService.h"
 
 #include "core/CrateProject.h"
+#include "core/ScpProfile.h"
 #include "core/StartupAudit.h"
 #include "core/VmeProtocol.h"
 #include "hardware/VmeTransaction.h"
@@ -133,6 +134,18 @@ void OwnershipService::Submit(TunerCommand command)
     if (std::holds_alternative<CaptureConfigurationCommand>(command))
     {
         (void)worker_.Post([this] { CaptureConfiguration(); });
+        return;
+    }
+    if (const auto* save = std::get_if<SaveProfileCommand>(&command))
+    {
+        const std::string path = save->path;
+        (void)worker_.Post([this, path] { SaveProfile(path); });
+        return;
+    }
+    if (const auto* load = std::get_if<LoadProfileCommand>(&command))
+    {
+        const std::string path = load->path;
+        (void)worker_.Post([this, path] { LoadProfile(path); });
         return;
     }
 
@@ -308,7 +321,7 @@ void OwnershipService::OpenSession()
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
     snapshot.configurationCapture = {};
-    snapshot.profileMatchesExactly = false;
+    RefreshProfileComparison(snapshot);
     PublishStatus(
         snapshot,
         TunerStatusLevel::Information,
@@ -331,6 +344,7 @@ void OwnershipService::CaptureConfiguration()
         snapshot.configurationCapture = std::move(capture);
         snapshot.configurationCompleteForTarget = false;
         snapshot.configurationFresh = false;
+        RefreshProfileComparison(snapshot);
         snapshot.activeOperation = GuidedTunerOperation::None;
         PublishStatus(
             std::move(snapshot),
@@ -349,6 +363,7 @@ void OwnershipService::CaptureConfiguration()
         snapshot.configurationCapture = std::move(capture);
         snapshot.configurationCompleteForTarget = false;
         snapshot.configurationFresh = false;
+        RefreshProfileComparison(snapshot);
         snapshot.activeOperation = GuidedTunerOperation::None;
         PublishStatus(
             std::move(snapshot),
@@ -366,7 +381,7 @@ void OwnershipService::CaptureConfiguration()
     snapshot.configurationCapture = reading;
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
-    snapshot.profileMatchesExactly = false;
+    RefreshProfileComparison(snapshot);
     snapshot.activeOperation = GuidedTunerOperation::ConfigurationCapture;
     PublishStatus(
         std::move(snapshot),
@@ -390,12 +405,79 @@ void OwnershipService::CaptureConfiguration()
             snapshot.activeModuleBaseAddress;
     snapshot.configurationFresh =
         snapshot.configurationCompleteForTarget;
-    snapshot.profileMatchesExactly = false;
+    RefreshProfileComparison(snapshot);
     const auto level = snapshot.configurationCompleteForTarget
         ? TunerStatusLevel::Success
         : TunerStatusLevel::Error;
     const std::string message = operation.configuration.message;
     PublishStatus(std::move(snapshot), level, message);
+}
+
+void OwnershipService::SaveProfile(const std::string& path)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (!snapshot.configurationCompleteForTarget ||
+        !snapshot.configurationFresh)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Capture a fresh SCP configuration for the active module "
+            "before saving a profile.");
+        return;
+    }
+
+    const auto saved = SaveFw2051ScpProfile(
+        snapshot.configurationCapture, path);
+    PublishStatus(
+        std::move(snapshot),
+        saved.success ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+        saved.message);
+}
+
+void OwnershipService::LoadProfile(const std::string& path)
+{
+    auto snapshot = *CurrentSnapshot();
+    const auto loaded = LoadFw2051ScpProfile(path);
+
+    snapshot.profileLoaded = false;
+    snapshot.profileLoadedForTarget = false;
+    snapshot.loadedProfilePath.clear();
+    snapshot.loadedProfile = {};
+    snapshot.configurationComparison = {};
+    snapshot.profileMatchesExactly = false;
+
+    if (!loaded.success || !loaded.profile)
+    {
+        PublishStatus(
+            std::move(snapshot), TunerStatusLevel::Error, loaded.message);
+        return;
+    }
+
+    snapshot.profileLoaded = true;
+    snapshot.loadedProfilePath = path;
+    snapshot.loadedProfile = *loaded.profile;
+    snapshot.profileLoadedForTarget = snapshot.projectActive &&
+        snapshot.targetSupported &&
+        snapshot.loadedProfile.configuration.baseAddress ==
+            snapshot.activeModuleBaseAddress;
+    RefreshProfileComparison(snapshot);
+
+    if (!snapshot.profileLoadedForTarget)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The SCP profile loaded, but its VME base does not match the "
+            "active module.",
+            loaded.message);
+        return;
+    }
+
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Success,
+        loaded.message);
 }
 
 void OwnershipService::ProbeController(
@@ -529,9 +611,14 @@ void OwnershipService::ReleaseSession()
     snapshot.startupAuditCompleteForTarget = false;
     snapshot.startupAuditReady = false;
     snapshot.startupAudit = {};
+    snapshot.profileLoaded = false;
+    snapshot.profileLoadedForTarget = false;
+    snapshot.loadedProfilePath.clear();
+    snapshot.loadedProfile = {};
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
     snapshot.configurationCapture = {};
+    snapshot.configurationComparison = {};
     snapshot.profileMatchesExactly = false;
     PublishStatus(
         std::move(snapshot),
@@ -849,6 +936,33 @@ ScpCaptureGateResult OwnershipService::CheckCaptureOwnershipGate(
     return {ScpCaptureGateStatus::Allowed, {}};
 }
 
+void OwnershipService::RefreshProfileComparison(TunerSnapshot& snapshot)
+{
+    snapshot.configurationComparison = {};
+    snapshot.profileMatchesExactly = false;
+    if (!snapshot.profileLoadedForTarget)
+    {
+        snapshot.configurationComparison.message = snapshot.profileLoaded
+            ? "The loaded SCP profile is for a different VME base."
+            : "No SCP profile is loaded for the active module.";
+        return;
+    }
+    if (!snapshot.configurationCompleteForTarget ||
+        !snapshot.configurationFresh)
+    {
+        snapshot.configurationComparison.message =
+            "Capture a fresh SCP configuration before comparing it with "
+            "the loaded profile.";
+        return;
+    }
+
+    snapshot.configurationComparison = CompareFw2051ScpConfiguration(
+        snapshot.loadedProfile, snapshot.configurationCapture);
+    snapshot.profileMatchesExactly =
+        snapshot.configurationComparison.comparable &&
+        snapshot.configurationComparison.differences.empty();
+}
+
 void OwnershipService::StartWatchdog()
 {
     watchdogStopRequested_.store(false);
@@ -966,7 +1080,7 @@ void OwnershipService::DetachForForeignDaq(
     snapshot.startupAudit = {};
     snapshot.configurationCompleteForTarget = false;
     snapshot.configurationFresh = false;
-    snapshot.profileMatchesExactly = false;
+    RefreshProfileComparison(snapshot);
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,

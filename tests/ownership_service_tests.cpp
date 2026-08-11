@@ -12,6 +12,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,6 +24,34 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+struct TemporaryProfile
+{
+    std::string path;
+
+    ~TemporaryProfile()
+    {
+        if (!path.empty())
+        {
+            std::remove(path.c_str());
+        }
+    }
+};
+
+TemporaryProfile MakeTemporaryProfile()
+{
+    const char* directory = std::getenv("TMPDIR");
+    if (directory == nullptr || directory[0] == '\0')
+    {
+        directory = "/tmp";
+    }
+    const auto unique = std::chrono::steady_clock::now()
+        .time_since_epoch().count();
+    return {
+        std::string(directory) + "/fidget_service_profile_" +
+            std::to_string(unique) + ".mwwscp",
+    };
+}
 
 std::vector<std::byte> EncodeWords(
     const std::vector<std::uint32_t>& words)
@@ -979,6 +1009,26 @@ TEST_CASE("the service captures eight distinct banks and clears on release")
           std::vector<std::uint16_t>{0U, 1U, 2U, 3U, 4U,
                                      5U, 6U, 7U, 0U});
 
+    const auto profile = MakeTemporaryProfile();
+    const auto beforeSave = snapshot->revision;
+    service.Submit(SaveProfileCommand{profile.path});
+    REQUIRE(WaitFor(service, [beforeSave](const TunerSnapshot& value) {
+        return value.revision > beforeSave;
+    }));
+    CHECK(service.CurrentSnapshot()->statusMessages.back().level ==
+          TunerStatusLevel::Success);
+
+    service.Submit(LoadProfileCommand{profile.path});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& value) {
+        return value.profileLoaded && value.profileMatchesExactly;
+    }));
+    const auto compared = service.CurrentSnapshot();
+    CHECK(compared->profileLoadedForTarget);
+    CHECK(compared->loadedProfilePath == profile.path);
+    CHECK(compared->configurationComparison.comparable);
+    CHECK(compared->configurationComparison.valuesCompared == 141U);
+    CHECK(compared->configurationComparison.differences.empty());
+
     service.Submit(ReleaseSessionCommand{});
     REQUIRE(WaitFor(service, [](const TunerSnapshot& value) {
         return value.ownership == GuidedTunerOwnershipState::Disconnected;
@@ -988,6 +1038,11 @@ TEST_CASE("the service captures eight distinct banks and clears on release")
     CHECK_FALSE(released->configurationFresh);
     CHECK(released->configurationCapture.state ==
           ScpConfigurationState::NotRun);
+    CHECK_FALSE(released->profileLoaded);
+    CHECK_FALSE(released->profileLoadedForTarget);
+    CHECK(released->loadedProfilePath.empty());
+    CHECK_FALSE(released->configurationComparison.comparable);
+    CHECK_FALSE(released->profileMatchesExactly);
 }
 
 TEST_CASE("foreign DAQ activity mid-capture detaches without parking")
