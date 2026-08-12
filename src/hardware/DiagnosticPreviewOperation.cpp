@@ -103,6 +103,12 @@ DiagnosticParameterPreviewResult ExecutePreviewTransaction(
     result.originalValue = request.originalValue;
     result.automaticallyRestoredOnStop =
         request.automaticallyRestoredOnStop;
+    if (!applying)
+    {
+        result.originalCaptured = true;
+        result.appliedReadback = request.requestedValue;
+        result.previewActive = true;
+    }
 
     const auto* definition = FindFw2051ScpSetting(request.registerOffset);
     result.settingName = definition == nullptr
@@ -601,7 +607,7 @@ DiagnosticParameterPreviewResult RestoreDiagnosticParameterPreview(
         result.message = "There is no active parameter preview to restore.";
         return result;
     }
-    return ExecutePreviewTransaction(
+    auto result = ExecutePreviewTransaction(
         transport,
         acquisitionSession,
         {
@@ -615,6 +621,13 @@ DiagnosticParameterPreviewResult RestoreDiagnosticParameterPreview(
         },
         recoveryJournalPath,
         cancellationRequested);
+    result.applyDurationMicroseconds =
+        activePreview.applyDurationMicroseconds;
+    result.appliedReadback = activePreview.appliedReadback;
+    result.originalCaptured = activePreview.originalCaptured;
+    result.writeAttempted = activePreview.writeAttempted;
+    result.writeVerified = activePreview.writeVerified;
+    return result;
 }
 
 } // namespace fidget

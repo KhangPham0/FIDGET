@@ -49,6 +49,17 @@ struct DiagnosticAcquisitionPreparationResult
     std::uint32_t nextStackReference = 0x9E000001U;
 };
 
+enum class DiagnosticStopOwnershipCheck
+{
+    Required,
+
+    // Automatic preview restoration verifies the complete fingerprint,
+    // then deliberately leaves DAQ mode paused for cleanup. Rechecking the
+    // running fingerprint after that pause would classify our own pause as
+    // foreign ownership.
+    VerifiedImmediatelyBeforePreviewRestore,
+};
+
 [[nodiscard]] DiagnosticAcquisitionPreparationResult
 PrepareDiagnosticAcquisition(
     ICommandTransport& transport,
@@ -77,7 +88,9 @@ StopDiagnosticAcquisition(
     IDataReceiver& dataReceiver,
     DiagnosticAcquisitionPreparationResult prepared,
     const DiagnosticAcquisitionPreparationRequest& request,
-    const std::atomic<bool>& cancellationRequested);
+    const std::atomic<bool>& cancellationRequested,
+    DiagnosticStopOwnershipCheck ownershipCheck =
+        DiagnosticStopOwnershipCheck::Required);
 
 } // namespace fidget
 

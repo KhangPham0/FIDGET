@@ -6,6 +6,8 @@
 #include "hardware/CommandWorker.h"
 #include "hardware/DeterministicStartupOperation.h"
 #include "hardware/DiagnosticAcquisitionOperation.h"
+#include "hardware/DiagnosticPreviewOperation.h"
+#include "hardware/DiagnosticSourceOperation.h"
 #include "hardware/ScpCaptureOperation.h"
 #include "hardware/ScpBulkApplyOperation.h"
 #include "hardware/ScpSingleRepairOperation.h"
@@ -83,6 +85,13 @@ private:
         const RunDeterministicStartupCommand& command);
     void StartDiagnosticAcquisition(
         const StartDiagnosticAcquisitionCommand& command);
+    void ChangeDiagnosticSource(
+        const ChangeDiagnosticSourceCommand& command);
+    void ApplyDiagnosticPreview(
+        const ApplyDiagnosticPreviewCommand& command);
+    [[nodiscard]] bool RestoreDiagnosticPreview(
+        bool resumeAfterTransaction,
+        bool automaticallyRestoredOnStop);
     [[nodiscard]] bool StopDiagnosticAcquisition();
     void PublishDiagnosticStream(DiagnosticStreamSnapshot stream);
     void ReleaseSession();
@@ -108,6 +117,9 @@ private:
     void WatchdogLoop();
     void PollWatchdog();
     void DetachForForeignDaq(std::uint32_t daqMode, std::string message);
+    void DetachForForeignDiagnosticFingerprint(
+        TunerSnapshot snapshot,
+        std::string message);
 
     void Publish(TunerSnapshot snapshot);
     void PublishStatus(

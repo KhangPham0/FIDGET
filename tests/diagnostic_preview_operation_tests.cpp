@@ -266,6 +266,81 @@ TEST_CASE("preview readback mismatch rolls back and clears the journal")
     CHECK_FALSE(loaded.record->previewRestoreRequired);
 }
 
+TEST_CASE("automatic stop restore leaves acquisition paused for cleanup")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    auto session = MakeRunningDiagnosticSession();
+    TransactionReferences references{
+        static_cast<std::uint16_t>(session.nextSuperReference + 1U),
+        session.nextStackReference,
+    };
+    QueuePreviewApply(
+        transport, session, references, 0x611AU, 200U, 250U, 250U, false);
+    const std::atomic<bool> cancelled{false};
+    const auto applied = ApplyDiagnosticParameterPreview(
+        transport,
+        session,
+        {7U, 0x611AU, 250U},
+        journal.Get(),
+        cancelled);
+    REQUIRE(applied.previewActive);
+
+    QueueDiagnosticFingerprint(
+        transport, session, session.nextSuperReference);
+    TransactionReferences restoreReferences{
+        static_cast<std::uint16_t>(session.nextSuperReference + 1U),
+        session.nextStackReference,
+    };
+    QueueDiagnosticPause(transport, restoreReferences);
+    QueueWrite(
+        transport,
+        restoreReferences,
+        DiagnosticTestBase + Fw2051ScpSelectorRegister,
+        7U);
+    QueueRead(
+        transport,
+        restoreReferences,
+        DiagnosticTestBase + 0x611AU,
+        250U);
+    QueueWrite(
+        transport,
+        restoreReferences,
+        DiagnosticTestBase + 0x611AU,
+        200U);
+    QueueRead(
+        transport,
+        restoreReferences,
+        DiagnosticTestBase + 0x611AU,
+        200U);
+    QueueWrite(
+        transport,
+        restoreReferences,
+        DiagnosticTestBase + Fw2051ScpSelectorRegister,
+        0U);
+
+    const auto requestsBeforeRestore = transport.SentRequests().size();
+    const auto restored = RestoreDiagnosticParameterPreview(
+        transport,
+        session,
+        applied,
+        journal.Get(),
+        false,
+        true,
+        cancelled);
+
+    CHECK(restored.state == DiagnosticParameterPreviewState::Restored);
+    CHECK(restored.automaticallyRestoredOnStop);
+    CHECK(restored.restoreVerified);
+    CHECK_FALSE(restored.acquisitionResumed);
+    CHECK_FALSE(restored.daqModeResumed);
+    CHECK(transport.SentRequests().size() - requestsBeforeRestore == 15U);
+}
+
 TEST_CASE("live dependency violation sends no parameter write")
 {
     using namespace fidget;

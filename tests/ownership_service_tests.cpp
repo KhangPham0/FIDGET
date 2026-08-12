@@ -1652,3 +1652,38 @@ TEST_CASE("direct acquisition refuses to bypass deterministic startup")
           == "Complete deterministic startup before direct acquisition.");
     CHECK(transport->SentRequests().size() == requestCount);
 }
+
+TEST_CASE("diagnostic tune commands refuse to run outside acquisition")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    auto revision = service.CurrentSnapshot()->revision;
+    const auto requestCount = transport->SentRequests().size();
+    service.Submit(ChangeDiagnosticSourceCommand{2U});
+    REQUIRE(WaitFor(service, [revision](const TunerSnapshot& snapshot) {
+        return snapshot.revision > revision;
+    }));
+    auto refused = service.CurrentSnapshot();
+    CHECK(refused->diagnosticSourceChange.state
+          == DiagnosticSourceChangeState::Failed);
+    CHECK(transport->SentRequests().size() == requestCount);
+
+    revision = refused->revision;
+    service.Submit(ApplyDiagnosticPreviewCommand{0x611AU, 250U});
+    REQUIRE(WaitFor(service, [revision](const TunerSnapshot& snapshot) {
+        return snapshot.revision > revision;
+    }));
+    refused = service.CurrentSnapshot();
+    CHECK(refused->diagnosticParameterPreview.state
+          == DiagnosticParameterPreviewState::Failed);
+    CHECK(transport->SentRequests().size() == requestCount);
+}

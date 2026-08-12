@@ -786,7 +786,8 @@ DiagnosticAcquisitionPreparationResult StopDiagnosticAcquisition(
     IDataReceiver& dataReceiver,
     DiagnosticAcquisitionPreparationResult prepared,
     const DiagnosticAcquisitionPreparationRequest& request,
-    const std::atomic<bool>& cancellationRequested)
+    const std::atomic<bool>& cancellationRequested,
+    const DiagnosticStopOwnershipCheck ownershipCheck)
 {
     auto& result = prepared.acquisition;
     result.state = DiagnosticAcquisitionState::Stopping;
@@ -837,42 +838,45 @@ DiagnosticAcquisitionPreparationResult StopDiagnosticAcquisition(
         return true;
     };
 
-    const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
-        commandTransport,
-        prepared,
-        prepared.nextSuperReference,
-        cancellationRequested);
-    ++result.ownershipHeartbeatChecks;
-    if (fingerprint.outcome
-        == DiagnosticFingerprintOutcome::ForeignFingerprint)
+    if (ownershipCheck == DiagnosticStopOwnershipCheck::Required)
     {
-        result.foreignControllerDetected = true;
-        result.cleanupSkippedToProtectForeignRun = true;
-        result.state = DiagnosticAcquisitionState::Failed;
-        result.message =
-            "Tuner ownership was lost: " + fingerprint.message
-            + " The tuner detached passively. No MDPP stop, DAQ-mode "
-              "write, or readout-stack cleanup was sent, so a possible "
-              "MVME run was left untouched.";
-        dataReceiver.Close();
-        commandTransport.Close();
-        return prepared;
-    }
-    if (fingerprint.outcome
-        == DiagnosticFingerprintOutcome::CommunicationUnavailable)
-    {
-        result.communicationUncertain = true;
-        ++result.commandPathFailures;
-        result.orphanRecoveryRequired = true;
-        result.state = DiagnosticAcquisitionState::Failed;
-        result.message =
-            "The command path remained unavailable, so ownership could not "
-            "be proven before cleanup. No blind hardware write was sent. "
-            "The unique tuner fingerprint is journaled for recovery. Last "
-            "error: " + fingerprint.message;
-        dataReceiver.Close();
-        commandTransport.Close();
-        return prepared;
+        const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+            commandTransport,
+            prepared,
+            prepared.nextSuperReference,
+            cancellationRequested);
+        ++result.ownershipHeartbeatChecks;
+        if (fingerprint.outcome
+            == DiagnosticFingerprintOutcome::ForeignFingerprint)
+        {
+            result.foreignControllerDetected = true;
+            result.cleanupSkippedToProtectForeignRun = true;
+            result.state = DiagnosticAcquisitionState::Failed;
+            result.message =
+                "Tuner ownership was lost: " + fingerprint.message
+                + " The tuner detached passively. No MDPP stop, DAQ-mode "
+                  "write, or readout-stack cleanup was sent, so a possible "
+                  "MVME run was left untouched.";
+            dataReceiver.Close();
+            commandTransport.Close();
+            return prepared;
+        }
+        if (fingerprint.outcome
+            == DiagnosticFingerprintOutcome::CommunicationUnavailable)
+        {
+            result.communicationUncertain = true;
+            ++result.commandPathFailures;
+            result.orphanRecoveryRequired = true;
+            result.state = DiagnosticAcquisitionState::Failed;
+            result.message =
+                "The command path remained unavailable, so ownership could not "
+                "be proven before cleanup. No blind hardware write was sent. "
+                "The unique tuner fingerprint is journaled for recovery. Last "
+                "error: " + fingerprint.message;
+            dataReceiver.Close();
+            commandTransport.Close();
+            return prepared;
+        }
     }
 
     if (writeVme(

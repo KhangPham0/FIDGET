@@ -206,6 +206,29 @@ void OwnershipService::Submit(TunerCommand command)
         });
         return;
     }
+    if (const auto* source =
+            std::get_if<ChangeDiagnosticSourceCommand>(&command))
+    {
+        const auto request = *source;
+        (void)worker_.Post(
+            [this, request] { ChangeDiagnosticSource(request); });
+        return;
+    }
+    if (const auto* preview =
+            std::get_if<ApplyDiagnosticPreviewCommand>(&command))
+    {
+        const auto request = *preview;
+        (void)worker_.Post(
+            [this, request] { ApplyDiagnosticPreview(request); });
+        return;
+    }
+    if (std::holds_alternative<RestoreDiagnosticPreviewCommand>(command))
+    {
+        (void)worker_.Post([this] {
+            static_cast<void>(RestoreDiagnosticPreview(true, false));
+        });
+        return;
+    }
 
     StopWatchdog();
     (void)worker_.Post([this] { ReleaseSession(); });
@@ -392,6 +415,8 @@ void OwnershipService::OpenSession()
     snapshot.bulkApplyResult = {};
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
+    snapshot.diagnosticSourceChange = {};
+    snapshot.diagnosticParameterPreview = {};
     RefreshProfileComparison(snapshot);
     PublishStatus(
         snapshot,
@@ -902,6 +927,8 @@ void OwnershipService::StartDiagnosticAcquisition(
     snapshot.diagnosticAcquisition.message =
         "Preparing isolation and crash recovery before acquisition...";
     snapshot.diagnosticStream = {};
+    snapshot.diagnosticSourceChange = {};
+    snapshot.diagnosticParameterPreview = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -979,6 +1006,246 @@ void OwnershipService::StartDiagnosticAcquisition(
         acquisitionSession_->acquisition.message);
 }
 
+void OwnershipService::ChangeDiagnosticSource(
+    const ChangeDiagnosticSourceCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.acquisition != GuidedTunerAcquisitionState::Running
+        || !acquisitionSession_ || !acquisitionReceiver_)
+    {
+        snapshot.diagnosticSourceChange = {};
+        snapshot.diagnosticSourceChange.state =
+            DiagnosticSourceChangeState::Failed;
+        snapshot.diagnosticSourceChange.message =
+            "Start direct acquisition before changing the waveform source.";
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Start direct acquisition before changing the waveform source.");
+        return;
+    }
+    if (snapshot.diagnosticParameterPreview.previewActive)
+    {
+        snapshot.diagnosticSourceChange = {};
+        snapshot.diagnosticSourceChange.state =
+            DiagnosticSourceChangeState::Failed;
+        snapshot.diagnosticSourceChange.message =
+            "Restore the active parameter preview before changing the waveform source.";
+        const auto message = snapshot.diagnosticSourceChange.message;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            message);
+        return;
+    }
+
+    const auto selectedQuad = static_cast<std::uint16_t>(
+        acquisitionSession_->acquisition.requestedChannel / 4U);
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.diagnosticSourceChange = {};
+    snapshot.diagnosticSourceChange.state =
+        DiagnosticSourceChangeState::Applying;
+    snapshot.diagnosticSourceChange.selectedQuad = selectedQuad;
+    snapshot.diagnosticSourceChange.requestedSource = command.source;
+    snapshot.diagnosticSourceChange.message =
+        "Pausing direct acquisition and applying the waveform source...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Changing the diagnostic waveform source.");
+
+    const auto result = ChangeDiagnosticWaveformSource(
+        *transport_,
+        *acquisitionSession_,
+        {selectedQuad, command.source},
+        serviceStopRequested_);
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticSourceChange = result;
+    if (result.foreignFingerprint)
+    {
+        DetachForForeignDiagnosticFingerprint(
+            std::move(snapshot),
+            "Tuner ownership was lost before the waveform-source change: "
+                + result.message
+                + " The tuner detached passively and sent no cleanup write.");
+        return;
+    }
+    if (result.state == DiagnosticSourceChangeState::Passed)
+    {
+        acquisitionReceiver_->ClearWaveformHistoriesForQuad(selectedQuad);
+        snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
+    }
+    PublishStatus(
+        std::move(snapshot),
+        result.state == DiagnosticSourceChangeState::Passed
+            ? TunerStatusLevel::Success
+            : result.communicationUnavailable
+                ? TunerStatusLevel::Warning
+                : TunerStatusLevel::Error,
+        result.message);
+}
+
+void OwnershipService::ApplyDiagnosticPreview(
+    const ApplyDiagnosticPreviewCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.acquisition != GuidedTunerAcquisitionState::Running
+        || !acquisitionSession_ || !acquisitionReceiver_)
+    {
+        snapshot.diagnosticParameterPreview = {};
+        snapshot.diagnosticParameterPreview.state =
+            DiagnosticParameterPreviewState::Failed;
+        snapshot.diagnosticParameterPreview.message =
+            "Start direct acquisition before previewing a parameter.";
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Start direct acquisition before previewing a parameter.");
+        return;
+    }
+    if (snapshot.diagnosticParameterPreview.previewActive)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Restore the active parameter preview before applying another one.");
+        return;
+    }
+
+    const auto selectedQuad = static_cast<std::uint16_t>(
+        acquisitionSession_->acquisition.requestedChannel / 4U);
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.diagnosticParameterPreview = {};
+    snapshot.diagnosticParameterPreview.state =
+        DiagnosticParameterPreviewState::Applying;
+    snapshot.diagnosticParameterPreview.selectedQuad = selectedQuad;
+    snapshot.diagnosticParameterPreview.registerOffset =
+        command.registerOffset;
+    snapshot.diagnosticParameterPreview.requestedValue = command.value;
+    snapshot.diagnosticParameterPreview.message =
+        "Pausing acquisition and applying a temporary parameter preview...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Applying a temporary parameter preview.");
+
+    const auto result = ApplyDiagnosticParameterPreview(
+        *transport_,
+        *acquisitionSession_,
+        {selectedQuad, command.registerOffset, command.value},
+        recoveryJournalPath_,
+        serviceStopRequested_);
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticParameterPreview = result;
+    snapshot.recoveryRecordAvailable =
+        acquisitionSession_->acquisition.recoveryJournalPrepared;
+    if (result.foreignFingerprint)
+    {
+        DetachForForeignDiagnosticFingerprint(
+            std::move(snapshot),
+            "Tuner ownership was lost before the parameter preview: "
+                + result.message
+                + " The tuner detached passively and sent no cleanup write.");
+        return;
+    }
+    if (result.writeVerified || result.rollbackVerified)
+    {
+        acquisitionReceiver_->ClearWaveformHistoriesForQuad(selectedQuad);
+        snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
+    }
+    PublishStatus(
+        std::move(snapshot),
+        result.state == DiagnosticParameterPreviewState::PreviewActive
+            ? TunerStatusLevel::Success
+            : result.communicationUnavailable
+                ? TunerStatusLevel::Warning
+                : TunerStatusLevel::Error,
+        result.message);
+}
+
+bool OwnershipService::RestoreDiagnosticPreview(
+    const bool resumeAfterTransaction,
+    const bool automaticallyRestoredOnStop)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (!snapshot.diagnosticParameterPreview.previewActive)
+    {
+        if (!automaticallyRestoredOnStop)
+        {
+            PublishStatus(
+                std::move(snapshot),
+                TunerStatusLevel::Warning,
+                "There is no active parameter preview to restore.");
+        }
+        return true;
+    }
+    if (!acquisitionSession_ || !acquisitionReceiver_)
+    {
+        snapshot.diagnosticParameterPreview.state =
+            DiagnosticParameterPreviewState::Failed;
+        snapshot.diagnosticParameterPreview.message =
+            "The active preview cannot be restored without its acquisition session.";
+        const auto message = snapshot.diagnosticParameterPreview.message;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            message);
+        return false;
+    }
+
+    const auto activePreview = snapshot.diagnosticParameterPreview;
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.diagnosticParameterPreview.state =
+        DiagnosticParameterPreviewState::Restoring;
+    snapshot.diagnosticParameterPreview.message =
+        automaticallyRestoredOnStop
+        ? "Stop requested: restoring the active preview before cleanup..."
+        : "Restoring the active parameter preview...";
+    const auto restoringMessage =
+        snapshot.diagnosticParameterPreview.message;
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        restoringMessage);
+
+    const auto result = RestoreDiagnosticParameterPreview(
+        *transport_,
+        *acquisitionSession_,
+        activePreview,
+        recoveryJournalPath_,
+        resumeAfterTransaction,
+        automaticallyRestoredOnStop,
+        serviceStopRequested_);
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticParameterPreview = result;
+    if (result.foreignFingerprint)
+    {
+        DetachForForeignDiagnosticFingerprint(
+            std::move(snapshot),
+            "Tuner ownership was lost before preview restoration: "
+                + result.message
+                + " The tuner detached passively and sent no cleanup write.");
+        return false;
+    }
+    if (result.restoreVerified)
+    {
+        acquisitionReceiver_->ClearWaveformHistoriesForQuad(
+            result.selectedQuad);
+        snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
+    }
+    const bool restored =
+        result.state == DiagnosticParameterPreviewState::Restored
+        && result.restoreVerified && !result.previewActive;
+    PublishStatus(
+        std::move(snapshot),
+        restored ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+        result.message);
+    return restored;
+}
+
 bool OwnershipService::StopDiagnosticAcquisition()
 {
     if (!acquisitionSession_)
@@ -987,6 +1254,13 @@ bool OwnershipService::StopDiagnosticAcquisition()
     }
     if (acquisitionSession_->acquisition.foreignControllerDetected
         || acquisitionSession_->acquisition.orphanRecoveryRequired)
+    {
+        return false;
+    }
+
+    const bool previewWasActive =
+        CurrentSnapshot()->diagnosticParameterPreview.previewActive;
+    if (!RestoreDiagnosticPreview(false, true))
     {
         return false;
     }
@@ -1005,7 +1279,11 @@ bool OwnershipService::StopDiagnosticAcquisition()
         *dataReceiver_,
         std::move(*acquisitionSession_),
         acquisitionRequest_,
-        serviceStopRequested_);
+        serviceStopRequested_,
+        previewWasActive
+            ? DiagnosticStopOwnershipCheck::
+                VerifiedImmediatelyBeforePreviewRestore
+            : DiagnosticStopOwnershipCheck::Required);
 
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
@@ -1258,6 +1536,8 @@ void OwnershipService::ReleaseSession()
     snapshot.cleanupVerified = false;
     snapshot.diagnosticAcquisition = {};
     snapshot.diagnosticStream = {};
+    snapshot.diagnosticSourceChange = {};
+    snapshot.diagnosticParameterPreview = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -1860,29 +2140,14 @@ void OwnershipService::PollWatchdog()
         if (fingerprint.outcome
             == DiagnosticFingerprintOutcome::ForeignFingerprint)
         {
-            if (acquisitionReceiver_)
-            {
-                acquisitionReceiver_->StopAndJoin();
-            }
-            dataReceiver_->Close();
-            transport_->Close();
-            acquisition.foreignControllerDetected = true;
-            acquisition.cleanupSkippedToProtectForeignRun = true;
-            acquisition.state = DiagnosticAcquisitionState::Failed;
-            acquisition.message =
+            const std::string message =
                 "Tuner ownership was lost: " + fingerprint.message
                 + " The tuner detached passively. No MDPP stop, DAQ-mode "
                   "write, or readout-stack cleanup was sent, so a possible "
                   "MVME run was left untouched.";
-            snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
-            snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
-            snapshot.recoveryRecordAvailable = true;
             snapshot.diagnosticAcquisition = acquisition;
-            RequestWatchdogStop();
-            PublishStatus(
-                std::move(snapshot),
-                TunerStatusLevel::Error,
-                acquisition.message);
+            DetachForForeignDiagnosticFingerprint(
+                std::move(snapshot), message);
             return;
         }
 
@@ -1968,6 +2233,52 @@ void OwnershipService::DetachForForeignDaq(
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Error,
+        std::move(message));
+}
+
+void OwnershipService::DetachForForeignDiagnosticFingerprint(
+    TunerSnapshot snapshot,
+    std::string message)
+{
+    RequestWatchdogStop();
+    if (acquisitionReceiver_)
+    {
+        acquisitionReceiver_->StopAndJoin();
+    }
+    if (dataReceiver_)
+    {
+        dataReceiver_->Close();
+    }
+    if (transport_)
+    {
+        transport_->Close();
+    }
+
+    if (acquisitionSession_)
+    {
+        auto& acquisition = acquisitionSession_->acquisition;
+        acquisition.foreignControllerDetected = true;
+        acquisition.cleanupSkippedToProtectForeignRun = true;
+        acquisition.state = DiagnosticAcquisitionState::Failed;
+        acquisition.message = message;
+        snapshot.diagnosticAcquisition = acquisition;
+    }
+    if (snapshot.diagnosticParameterPreview.previewActive)
+    {
+        const std::string warning =
+            " The temporary parameter value may remain live until MVME reinitializes the module.";
+        message += warning;
+        snapshot.diagnosticParameterPreview.state =
+            DiagnosticParameterPreviewState::Failed;
+        snapshot.diagnosticParameterPreview.message += warning;
+    }
+    snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
+    snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.recoveryRecordAvailable = true;
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,

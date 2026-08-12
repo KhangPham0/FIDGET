@@ -82,6 +82,21 @@ struct StopDiagnosticAcquisitionCommand
 {
 };
 
+struct ChangeDiagnosticSourceCommand
+{
+    std::uint8_t source = 0U;
+};
+
+struct ApplyDiagnosticPreviewCommand
+{
+    std::uint16_t registerOffset = 0U;
+    std::uint16_t value = 0U;
+};
+
+struct RestoreDiagnosticPreviewCommand
+{
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -97,6 +112,9 @@ using TunerCommand = std::variant<
     RunDeterministicStartupCommand,
     StartDiagnosticAcquisitionCommand,
     StopDiagnosticAcquisitionCommand,
+    ChangeDiagnosticSourceCommand,
+    ApplyDiagnosticPreviewCommand,
+    RestoreDiagnosticPreviewCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl
