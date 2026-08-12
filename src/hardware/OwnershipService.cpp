@@ -1266,7 +1266,14 @@ bool OwnershipService::StopDiagnosticAcquisition()
         CurrentSnapshot()->diagnosticParameterPreview.previewActive;
     if (!RestoreDiagnosticPreview(false, true))
     {
-        return false;
+        const auto afterRestore = CurrentSnapshot();
+        if (!acquisitionSession_
+            || afterRestore->diagnosticParameterPreview.foreignFingerprint
+            || afterRestore->diagnosticParameterPreview
+                   .communicationUnavailable)
+        {
+            return false;
+        }
     }
 
     if (acquisitionReceiver_)
