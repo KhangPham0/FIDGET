@@ -133,8 +133,7 @@ void DrawWaveformPlot(
             std::snprintf(
                 label,
                 sizeof(label),
-                "trail %llu##trail_%llu",
-                static_cast<unsigned long long>(waveform.sequence),
+                "##trail_%llu",
                 static_cast<unsigned long long>(waveform.sequence));
             ImPlot::PlotLine(
                 label,
