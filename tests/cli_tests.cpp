@@ -8,14 +8,40 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace {
+
+struct TemporaryCsv
+{
+    std::string path;
+
+    TemporaryCsv()
+    {
+        const auto unique = std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count();
+        path = "/tmp/fidget_cli_waveform_" + std::to_string(unique)
+            + ".csv";
+    }
+
+    ~TemporaryCsv()
+    {
+        std::remove(path.c_str());
+    }
+
+    TemporaryCsv(const TemporaryCsv&) = delete;
+    TemporaryCsv& operator=(const TemporaryCsv&) = delete;
+};
 
 fidget::StartupAuditResult MakeAuditResult(bool blocked)
 {
@@ -407,6 +433,59 @@ public:
                 next.profileMatchesExactly = true;
             }
         }
+        else if (const auto* start = std::get_if<
+                     fidget::StartDiagnosticAcquisitionCommand>(&command))
+        {
+            ++startAcquisitionCommands;
+            next.acquisition = fidget::GuidedTunerAcquisitionState::Running;
+            next.diagnosticAcquisition.state =
+                fidget::DiagnosticAcquisitionState::Running;
+            next.diagnosticAcquisition.requestedChannel = start->channel;
+            next.diagnosticAcquisition.message =
+                "Direct diagnostic acquisition is running.";
+            next.diagnosticStream.receiverRunning = true;
+            next.diagnosticStream.requestedChannel = start->channel;
+            next.diagnosticStream.requestedTarget = {
+                0x11,
+                static_cast<int>(start->channel),
+                true,
+                true,
+            };
+            next.diagnosticStream.datagramsReceived = 12U;
+            next.diagnosticStream.bytesReceived = 480U;
+            next.diagnosticStream.decoderStats.ethernetPackets = 12U;
+            next.diagnosticStream.decoderStats.decodedWaveforms = 4U;
+            fidget::MdppWaveform waveform;
+            waveform.sequence = 4U;
+            waveform.moduleId = 0x11U;
+            waveform.channel = start->channel;
+            waveform.samples = {-2, 10, 100, -100};
+            fidget::MdppChannelHistorySnapshot history;
+            history.totalCaptured = 4U;
+            history.waveforms.push_back(std::move(waveform));
+            next.diagnosticStream.histories.emplace(
+                fidget::MdppChannelAddress{
+                    0x11U,
+                    static_cast<int>(start->channel),
+                },
+                std::move(history));
+        }
+        else if (std::holds_alternative<
+                     fidget::StopDiagnosticAcquisitionCommand>(command))
+        {
+            ++stopAcquisitionCommands;
+            next.acquisition = fidget::GuidedTunerAcquisitionState::Stopped;
+            next.cleanupVerified = true;
+            next.diagnosticAcquisition.state =
+                fidget::DiagnosticAcquisitionState::Stopped;
+            next.diagnosticAcquisition.message =
+                "Direct acquisition stopped cleanly.";
+            next.diagnosticAcquisition.moduleStopSent = true;
+            next.diagnosticAcquisition.daqModeDisabled = true;
+            next.diagnosticAcquisition.readoutStackDisabled = true;
+            next.diagnosticAcquisition.recoveryJournalRemoved = true;
+            next.diagnosticStream.receiverRunning = false;
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -428,6 +507,8 @@ public:
     int applyCommands = 0;
     int applyAllCommands = 0;
     int startupCommands = 0;
+    int startAcquisitionCommands = 0;
+    int stopAcquisitionCommands = 0;
     int releaseCommands = 0;
     std::string savedPath;
     std::string loadedPath;
@@ -532,6 +613,21 @@ TEST_CASE("CLI options accept project and host status forms")
         CHECK(parsed.options.command == fidget::CliCommand::Startup);
         CHECK(parsed.options.profilePath == "expected.mwwscp");
     }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "acquire", "--host", "mvlc-test",
+            "--profile", "expected.mwwscp", "--channel", "29",
+            "--seconds", "30", "--dump-csv", "waveform.csv",
+        };
+        const auto parsed = fidget::ParseCliOptions(12, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Acquire);
+        REQUIRE(parsed.options.channel);
+        CHECK(*parsed.options.channel == 29U);
+        REQUIRE(parsed.options.seconds);
+        CHECK(*parsed.options.seconds == 30U);
+        CHECK(parsed.options.dumpCsvPath == "waveform.csv");
+    }
 }
 
 TEST_CASE("CLI options reject unsafe or incomplete status arguments")
@@ -574,6 +670,18 @@ TEST_CASE("CLI options reject unsafe or incomplete status arguments")
         "--quad", "8",
     };
     CHECK_FALSE(fidget::ParseCliOptions(10, invalidQuad).success);
+
+    const char* acquireWithoutChannel[] = {
+        "fidget_cli", "acquire", "--host", "mvlc-test",
+    };
+    CHECK_FALSE(
+        fidget::ParseCliOptions(4, acquireWithoutChannel).success);
+
+    const char* invalidChannel[] = {
+        "fidget_cli", "acquire", "--host", "mvlc-test",
+        "--channel", "32",
+    };
+    CHECK_FALSE(fidget::ParseCliOptions(6, invalidChannel).success);
 }
 
 TEST_CASE("status prints idle readings and exits successfully")
@@ -1241,6 +1349,148 @@ TEST_CASE("SIGINT during startup is reported only after session release")
 
     CHECK(exitCode == 130);
     CHECK(control.startupCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("acquire runs startup streams status and verifies cleanup")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    options.seconds = 1U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::OneSecondElapsed; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.auditCommands == 1);
+    CHECK(control.captureCommands == 1);
+    CHECK(control.startupCommands == 1);
+    CHECK(control.startAcquisitionCommands == 1);
+    CHECK(control.stopAcquisitionCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find("acquisition: running channel=29\n")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "packets=12 datagrams=12 waveforms=4 loss=0 "
+              "decode_errors=0 channel=29 channel_count=4 "
+              "fingerprint=matching")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "cleanup_selected: stopped=yes\n") != std::string::npos);
+    CHECK(output.str().find(
+              "cleanup_mvlc: daq_mode_zero=yes stack_zero=yes "
+              "journal_removed=yes\n") != std::string::npos);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("acquire dumps the latest requested-channel waveform as CSV")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    options.seconds = 1U;
+    const TemporaryCsv csv;
+    options.dumpCsvPath = csv.path;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::OneSecondElapsed; });
+
+    REQUIRE(exitCode == 0);
+    std::ifstream saved(csv.path);
+    REQUIRE(saved.good());
+    std::ostringstream contents;
+    contents << saved.rdbuf();
+    CHECK(contents.str()
+          == "sample_index,value\n0,-2\n1,10\n2,100\n3,-100\n");
+    CHECK(output.str().find("waveform_csv: " + csv.path + '\n')
+          != std::string::npos);
+}
+
+TEST_CASE("acquire defaults to no before startup and releases")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.startupCommands == 0);
+    CHECK(control.startAcquisitionCommands == 0);
+    CHECK(control.stopAcquisitionCommands == 0);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("acquisition: not started\n")
+          != std::string::npos);
+}
+
+TEST_CASE("SIGINT during acquire stops and releases before exit 130")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.startAcquisitionCommands > 0; },
+        [] { return fidget::CliSessionWaitResult::Interrupted; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.startAcquisitionCommands == 1);
+    CHECK(control.stopAcquisitionCommands == 1);
     CHECK(control.releaseCommands == 1);
     CHECK(output.str().find("session: released\n") != std::string::npos);
 }

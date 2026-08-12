@@ -22,6 +22,7 @@ enum class CliCommand
     Apply,
     ApplyAll,
     Startup,
+    Acquire,
 };
 
 enum class CliSessionWaitResult
@@ -43,6 +44,9 @@ struct CliOptions
     std::string profilePath;
     std::optional<std::uint16_t> registerOffset;
     std::optional<std::uint16_t> quad;
+    std::optional<std::uint16_t> channel;
+    std::optional<std::uint32_t> seconds;
+    std::string dumpCsvPath;
     bool showHelp = false;
 };
 
@@ -116,6 +120,15 @@ using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
     std::ostream& output,
     std::ostream& errorOutput,
     const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliAcquire(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested,
+    const CliWaitForSessionInput& waitForInput);
 
 } // namespace fidget
 

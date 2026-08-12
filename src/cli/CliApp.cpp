@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <iomanip>
+#include <fstream>
 #include <istream>
 #include <limits>
 #include <ostream>
@@ -29,6 +30,7 @@ using namespace std::chrono_literals;
 
 constexpr auto CommandCompletionTimeout = std::chrono::seconds(15);
 constexpr auto StartupCompletionTimeout = std::chrono::minutes(2);
+constexpr auto AcquisitionCompletionTimeout = std::chrono::minutes(2);
 
 bool ParseUnsigned(
     std::string_view text,
@@ -657,6 +659,101 @@ void PrintDeterministicStartupResult(
     output << "startup_message: " << result.message << '\n';
 }
 
+void PrintAcquisitionStatus(
+    std::ostream& output,
+    const TunerSnapshot& snapshot)
+{
+    const auto& stream = snapshot.diagnosticStream;
+    std::uint64_t requestedCount = 0U;
+    if (stream.requestedTarget.moduleObserved)
+    {
+        const auto found = stream.histories.find({
+            static_cast<std::uint8_t>(stream.requestedTarget.moduleId),
+            stream.requestedTarget.requestedChannel,
+        });
+        if (found != stream.histories.end())
+        {
+            requestedCount = found->second.totalCaptured;
+        }
+    }
+    output << "acquisition_status: packets="
+           << stream.decoderStats.ethernetPackets
+           << " datagrams=" << stream.datagramsReceived
+           << " waveforms=" << stream.decoderStats.decodedWaveforms
+           << " loss=" << stream.decoderStats.lostEthernetPackets
+           << " decode_errors=" << stream.decoderStats.malformedWords
+           << " channel=" << stream.requestedChannel
+           << " channel_count=" << requestedCount
+           << " fingerprint="
+           << (snapshot.diagnosticAcquisition.communicationUncertain
+                   ? "uncertain"
+                   : snapshot.diagnosticAcquisition
+                         .foreignControllerDetected
+                       ? "foreign"
+                       : "matching")
+           << '\n';
+}
+
+void PrintCleanupResult(
+    std::ostream& output,
+    const DiagnosticAcquisitionResult& result)
+{
+    output << "cleanup_selected: stopped="
+           << (result.moduleStopSent ? "yes" : "no") << '\n'
+           << "cleanup_isolation: verified="
+           << result.nonTargetModulesVerifiedStoppedOnCleanup << '/'
+           << result.nonTargetModulesQuiesced << '\n'
+           << "cleanup_mvlc: daq_mode_zero="
+           << (result.daqModeDisabled ? "yes" : "no")
+           << " stack_zero="
+           << (result.readoutStackDisabled ? "yes" : "no")
+           << " journal_removed="
+           << (result.recoveryJournalRemoved ? "yes" : "no") << '\n'
+           << "cleanup_message: " << result.message << '\n';
+}
+
+bool DumpRequestedWaveformCsv(
+    const std::string& path,
+    const DiagnosticStreamSnapshot& stream,
+    std::string& error)
+{
+    if (!stream.requestedTarget.moduleObserved)
+    {
+        error = "No waveform module ID was observed.";
+        return false;
+    }
+    const auto found = stream.histories.find({
+        static_cast<std::uint8_t>(stream.requestedTarget.moduleId),
+        stream.requestedTarget.requestedChannel,
+    });
+    if (found == stream.histories.end()
+        || found->second.waveforms.empty())
+    {
+        error = "No waveform was captured for the requested channel.";
+        return false;
+    }
+
+    std::ofstream csv(path, std::ios::trunc);
+    if (!csv)
+    {
+        error = "Could not open the CSV output file.";
+        return false;
+    }
+    csv << "sample_index,value\n";
+    const auto& waveform = found->second.waveforms.back();
+    for (std::size_t index = 0U; index < waveform.samples.size(); ++index)
+    {
+        csv << index << ',' << waveform.samples[index] << '\n';
+    }
+    csv.flush();
+    if (!csv)
+    {
+        error = "Writing the CSV output file failed.";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 const char* FidgetCliUsage() noexcept
@@ -675,6 +772,7 @@ const char* FidgetCliUsage() noexcept
         "FILE [options]\n"
         "  fidget_cli startup (--project FILE | --host HOST) --profile "
         "FILE [options]\n"
+        "  fidget_cli acquire --project FILE --channel N [options]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -683,9 +781,12 @@ const char* FidgetCliUsage() noexcept
         "  --module N      Select the one-based project module (default 1)\n"
         "  --save FILE     Save a successful capture as an SCP profile\n"
         "  --profile FILE  Load this SCP profile for compare, apply, or "
-        "startup\n"
+        "startup; override the project profile for acquire\n"
         "  --register OFF  Select a banked register, decimal or 0x-prefixed\n"
         "  --quad N        Select channel quad 0 through 7\n"
+        "  --channel N     Select physical channel 0 through 31\n"
+        "  --seconds N     Stop acquisition after N status intervals\n"
+        "  --dump-csv FILE Write the latest requested-channel waveform\n"
         "  -h, --help      Show this help\n";
 }
 
@@ -739,6 +840,10 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.options.command = CliCommand::Startup;
     }
+    else if (command == "acquire")
+    {
+        result.options.command = CliCommand::Acquire;
+    }
     else
     {
         result.error = "unknown command '" + std::string(command) + "'";
@@ -760,7 +865,10 @@ CliOptionsParseResult ParseCliOptions(
             && option != "--save"
             && option != "--profile"
             && option != "--register"
-            && option != "--quad")
+            && option != "--quad"
+            && option != "--channel"
+            && option != "--seconds"
+            && option != "--dump-csv")
         {
             result.error = "unknown option '" + std::string(option) + "'";
             return result;
@@ -826,7 +934,7 @@ CliOptionsParseResult ParseCliOptions(
             }
             result.options.registerOffset = registerOffset;
         }
-        else
+        else if (option == "--quad")
         {
             std::uint64_t quad = 0U;
             if (!ParseUnsigned(value, 7U, quad))
@@ -835,6 +943,34 @@ CliOptionsParseResult ParseCliOptions(
                 return result;
             }
             result.options.quad = static_cast<std::uint16_t>(quad);
+        }
+        else if (option == "--channel")
+        {
+            std::uint64_t channel = 0U;
+            if (!ParseUnsigned(value, 31U, channel))
+            {
+                result.error = "invalid physical channel '" + value + "'";
+                return result;
+            }
+            result.options.channel = static_cast<std::uint16_t>(channel);
+        }
+        else if (option == "--seconds")
+        {
+            std::uint64_t seconds = 0U;
+            if (!ParseUnsigned(
+                    value,
+                    std::numeric_limits<std::uint32_t>::max(),
+                    seconds)
+                || seconds == 0U)
+            {
+                result.error = "invalid acquisition duration '" + value + "'";
+                return result;
+            }
+            result.options.seconds = static_cast<std::uint32_t>(seconds);
+        }
+        else
+        {
+            result.options.dumpCsvPath = value;
         }
     }
 
@@ -855,10 +991,11 @@ CliOptionsParseResult ParseCliOptions(
         && result.options.command != CliCommand::Compare
         && result.options.command != CliCommand::Apply
         && result.options.command != CliCommand::ApplyAll
-        && result.options.command != CliCommand::Startup)
+        && result.options.command != CliCommand::Startup
+        && result.options.command != CliCommand::Acquire)
     {
         result.error =
-            "--profile is valid only for compare, apply, or startup";
+            "--profile is valid only for compare, apply, startup, or acquire";
         return result;
     }
     if ((result.options.command == CliCommand::Compare
@@ -882,6 +1019,20 @@ CliOptionsParseResult ParseCliOptions(
         !result.options.showHelp)
     {
         result.error = "apply requires --register OFFSET and --quad N";
+        return result;
+    }
+    if ((result.options.channel || result.options.seconds
+         || !result.options.dumpCsvPath.empty())
+        && result.options.command != CliCommand::Acquire)
+    {
+        result.error =
+            "--channel, --seconds, and --dump-csv are valid only for acquire";
+        return result;
+    }
+    if (result.options.command == CliCommand::Acquire
+        && !result.options.channel && !result.options.showHelp)
+    {
+        result.error = "acquire requires --channel N";
         return result;
     }
 
@@ -1755,6 +1906,290 @@ int RunCliStartup(
                     ? 0
                     : 1;
             }
+        }
+    }
+
+    return ReleaseOperationSession(
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested,
+        result);
+}
+
+int RunCliAcquire(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested,
+    const CliWaitForSessionInput& waitForInput)
+{
+    const int statusResult = RunCliStatus(
+        options,
+        tunerControl,
+        output,
+        errorOutput,
+        interruptRequested);
+    if (statusResult != 0)
+    {
+        return statusResult;
+    }
+
+    auto snapshot = tunerControl.CurrentSnapshot();
+    const std::string profilePath = !options.profilePath.empty()
+        ? options.profilePath
+        : snapshot->activeModuleProfilePath;
+    if (profilePath.empty())
+    {
+        errorOutput << "error: the selected module has no profile path\n";
+        return 1;
+    }
+    const auto beforeLoad = snapshot->revision;
+    tunerControl.Submit(LoadProfileCommand{profilePath});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeLoad,
+            [](const TunerSnapshot&) { return true; }))
+    {
+        errorOutput << "error: SCP profile load timed out\n";
+        return 1;
+    }
+    snapshot = tunerControl.CurrentSnapshot();
+    if (!snapshot->profileLoadedForTarget)
+    {
+        errorOutput << "error: SCP profile load failed\n";
+        return 1;
+    }
+    output << "profile_loaded: " << profilePath << '\n';
+
+    const int openResult = ConfirmAndOpenSession(
+        tunerControl, input, output, errorOutput, interruptRequested);
+    if (openResult != 0)
+    {
+        return openResult;
+    }
+
+    int result = 1;
+    bool startupReady = false;
+    if (!(interruptRequested && interruptRequested()))
+    {
+        const auto beforeAudit = tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(RunStartupAuditCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeAudit,
+                [](const TunerSnapshot& value) {
+                    return value.startupAudit.state
+                            == StartupAuditState::Complete
+                        || value.startupAudit.state
+                            == StartupAuditState::Failed;
+                }))
+        {
+            errorOutput << "error: startup audit timed out\n";
+        }
+    }
+    snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->startupAudit.state == StartupAuditState::Complete
+        && !(interruptRequested && interruptRequested()))
+    {
+        const auto beforeCapture = snapshot->revision;
+        tunerControl.Submit(CaptureConfigurationCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                beforeCapture,
+                [](const TunerSnapshot& value) {
+                    return value.configurationCapture.state
+                            == ScpConfigurationState::Complete
+                        || value.configurationCapture.state
+                            == ScpConfigurationState::Failed;
+                }))
+        {
+            errorOutput << "error: SCP configuration capture timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (!snapshot->startupPlanAvailable
+                || !snapshot->standaloneStartupPlan.success)
+            {
+                errorOutput << "error: deterministic startup is blocked: "
+                            << snapshot->standaloneStartupPlan.message
+                            << '\n';
+            }
+            else
+            {
+                PrintStartupRecipe(output, *snapshot);
+                startupReady = true;
+            }
+        }
+    }
+
+    if (startupReady && !(interruptRequested && interruptRequested()))
+    {
+        const auto preparationCount =
+            snapshot->startupPreparationMismatches.size();
+        const auto bankedCount =
+            snapshot->standaloneStartupPlan.bankedApplication.steps.size();
+        output << "Run deterministic startup with " << preparationCount
+               << " preparation change(s) and " << bankedCount
+               << " banked write(s) before acquisition [y/N]: "
+               << std::flush;
+        std::string confirmation;
+        if (!std::getline(input, confirmation)
+            || !TransactionConfirmedByUser(std::move(confirmation)))
+        {
+            output << "acquisition: not started\n";
+        }
+        else
+        {
+            const auto beforeStartup =
+                tunerControl.CurrentSnapshot()->revision;
+            tunerControl.Submit(RunDeterministicStartupCommand{true});
+            if (!WaitForRevision(
+                    tunerControl,
+                    beforeStartup,
+                    [](const TunerSnapshot& value) {
+                        return value.deterministicStartupResult.state
+                                == DeterministicStartupState::Passed
+                            || value.deterministicStartupResult.state
+                                == DeterministicStartupState::Failed;
+                    },
+                    StartupCompletionTimeout))
+            {
+                errorOutput << "error: deterministic startup timed out\n";
+            }
+            else
+            {
+                snapshot = tunerControl.CurrentSnapshot();
+                PrintDeterministicStartupResult(
+                    output, snapshot->deterministicStartupResult);
+            }
+        }
+    }
+
+    snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->deterministicStartupPassed
+        && !(interruptRequested && interruptRequested()))
+    {
+        const auto beforeStart = snapshot->revision;
+        tunerControl.Submit(StartDiagnosticAcquisitionCommand{
+            *options.channel,
+        });
+        if (!WaitForRevision(
+                tunerControl,
+                beforeStart,
+                [](const TunerSnapshot& value) {
+                    return value.acquisition
+                            == GuidedTunerAcquisitionState::Running
+                        || value.acquisition
+                            == GuidedTunerAcquisitionState::Failed;
+                },
+                AcquisitionCompletionTimeout))
+        {
+            errorOutput << "error: acquisition start timed out\n";
+        }
+        else
+        {
+            snapshot = tunerControl.CurrentSnapshot();
+            if (snapshot->acquisition == GuidedTunerAcquisitionState::Running)
+            {
+                result = 0;
+                output << "acquisition: running channel="
+                       << *options.channel << '\n';
+                std::uint32_t elapsedIntervals = 0U;
+                while (!(interruptRequested && interruptRequested()))
+                {
+                    snapshot = tunerControl.CurrentSnapshot();
+                    PrintAcquisitionStatus(output, *snapshot);
+                    if (snapshot->acquisition
+                        != GuidedTunerAcquisitionState::Running)
+                    {
+                        result = 1;
+                        break;
+                    }
+                    if (options.seconds
+                        && elapsedIntervals >= *options.seconds)
+                    {
+                        break;
+                    }
+
+                    const auto waited = waitForInput();
+                    if (waited == CliSessionWaitResult::OneSecondElapsed)
+                    {
+                        ++elapsedIntervals;
+                        continue;
+                    }
+                    if (waited == CliSessionWaitResult::Interrupted)
+                    {
+                        continue;
+                    }
+                    if (waited == CliSessionWaitResult::InputReady)
+                    {
+                        std::string ignored;
+                        static_cast<void>(std::getline(input, ignored));
+                        break;
+                    }
+                    errorOutput << "error: acquisition input wait failed\n";
+                    result = 1;
+                    break;
+                }
+
+                snapshot = tunerControl.CurrentSnapshot();
+                if (snapshot->acquisition
+                    == GuidedTunerAcquisitionState::Running)
+                {
+                    const auto beforeStop = snapshot->revision;
+                    tunerControl.Submit(StopDiagnosticAcquisitionCommand{});
+                    if (!WaitForRevision(
+                            tunerControl,
+                            beforeStop,
+                            [](const TunerSnapshot& value) {
+                                return value.acquisition
+                                        == GuidedTunerAcquisitionState::Stopped
+                                    || value.acquisition
+                                        == GuidedTunerAcquisitionState::Failed;
+                            },
+                            AcquisitionCompletionTimeout))
+                    {
+                        errorOutput << "error: verified acquisition cleanup "
+                                       "timed out\n";
+                        result = 1;
+                    }
+                    snapshot = tunerControl.CurrentSnapshot();
+                }
+                PrintCleanupResult(
+                    output, snapshot->diagnosticAcquisition);
+                if (!snapshot->cleanupVerified)
+                {
+                    result = 1;
+                }
+            }
+            else
+            {
+                errorOutput << "error: acquisition start failed: "
+                            << snapshot->diagnosticAcquisition.message
+                            << '\n';
+            }
+        }
+    }
+
+    snapshot = tunerControl.CurrentSnapshot();
+    if (result == 0 && !options.dumpCsvPath.empty())
+    {
+        std::string csvError;
+        if (!DumpRequestedWaveformCsv(
+                options.dumpCsvPath,
+                snapshot->diagnosticStream,
+                csvError))
+        {
+            errorOutput << "error: CSV dump failed: " << csvError << '\n';
+            result = 1;
+        }
+        else
+        {
+            output << "waveform_csv: " << options.dumpCsvPath << '\n';
         }
     }
 

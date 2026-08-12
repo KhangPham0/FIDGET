@@ -1185,6 +1185,39 @@ void OwnershipService::ReleaseSession()
 {
     if (!StopDiagnosticAcquisition())
     {
+        if (!acquisitionSession_
+            || (!acquisitionSession_->acquisition.foreignControllerDetected
+                && !acquisitionSession_->acquisition
+                        .orphanRecoveryRequired))
+        {
+            return;
+        }
+        if (acquisitionReceiver_)
+        {
+            acquisitionReceiver_->StopAndJoin();
+        }
+        if (dataReceiver_)
+        {
+            dataReceiver_->Close();
+        }
+        if (transport_)
+        {
+            transport_->Close();
+        }
+        acquisitionReceiver_.reset();
+        acquisitionSession_.reset();
+        acquisitionRequest_ = {};
+
+        auto detached = *CurrentSnapshot();
+        detached.ownership = GuidedTunerOwnershipState::Disconnected;
+        detached.controllerReadingsValid = false;
+        detached.mvmeHandoffConfirmed = false;
+        detached.activeOperation = GuidedTunerOperation::None;
+        PublishStatus(
+            std::move(detached),
+            TunerStatusLevel::Warning,
+            "The local tuner session was released. The recovery journal "
+            "was retained because verified hardware cleanup was not safe.");
         return;
     }
     if (transport_)

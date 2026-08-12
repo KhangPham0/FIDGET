@@ -1,5 +1,6 @@
 #include "cli/CliApp.h"
 
+#include "core/RecoveryJournal.h"
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"
@@ -131,6 +132,17 @@ int main(int argc, char** argv)
             std::cout,
             std::cerr,
             interrupted);
+    }
+    if (parsed.options.command == fidget::CliCommand::Acquire)
+    {
+        return fidget::RunCliAcquire(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted,
+            WaitForSessionInput);
     }
     return fidget::RunCliApply(
         parsed.options,
