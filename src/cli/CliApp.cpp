@@ -700,6 +700,36 @@ void PrintAcquisitionStatus(
     output << '\n';
 }
 
+void PrintAcquisitionIsolation(
+    std::ostream& output,
+    const DiagnosticAcquisitionResult& result)
+{
+    output << "acquisition_isolation: checked="
+           << result.moduleIsolation.size()
+           << " quiesced=" << result.nonTargetModulesQuiesced << '\n';
+    for (const auto& module : result.moduleIsolation)
+    {
+        output << "isolation_start: base=0x"
+               << std::uppercase << std::hex << std::setw(8)
+               << std::setfill('0') << module.baseAddress
+               << " hardware=0x" << std::setw(4) << module.hardwareId
+               << std::dec << std::nouppercase << std::setfill(' ')
+               << " irq=" << module.irqLevel
+               << " state_before=" << module.acquisitionStateBefore
+               << " quiesced="
+               << (module.stopVerified && module.fifoResetSent
+                       && module.readoutResetSent
+                       ? "yes"
+                       : "no")
+               << " stop=" << (module.stopVerified ? "verified" : "failed")
+               << " fifo_reset="
+               << (module.fifoResetSent ? "yes" : "no")
+               << " readout_reset="
+               << (module.readoutResetSent ? "yes" : "no")
+               << '\n';
+    }
+}
+
 void PrintCleanupResult(
     std::ostream& output,
     const DiagnosticAcquisitionResult& result)
@@ -2104,6 +2134,8 @@ int RunCliAcquire(
                 result = 0;
                 output << "acquisition: running channel="
                        << *options.channel << '\n';
+                PrintAcquisitionIsolation(
+                    output, snapshot->diagnosticAcquisition);
                 std::uint32_t elapsedIntervals = 0U;
                 while (!(interruptRequested && interruptRequested()))
                 {

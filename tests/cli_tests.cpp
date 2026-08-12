@@ -443,6 +443,17 @@ public:
             next.diagnosticAcquisition.requestedChannel = start->channel;
             next.diagnosticAcquisition.message =
                 "Direct diagnostic acquisition is running.";
+            next.diagnosticAcquisition.nonTargetModuleCount = 1U;
+            next.diagnosticAcquisition.nonTargetModulesQuiesced = 1U;
+            fidget::DiagnosticModuleIsolation isolation;
+            isolation.baseAddress = 0x22000000U;
+            isolation.hardwareId = 0x5007U;
+            isolation.irqLevel = 0U;
+            isolation.acquisitionStateBefore = 1U;
+            isolation.stopVerified = true;
+            isolation.fifoResetSent = true;
+            isolation.readoutResetSent = true;
+            next.diagnosticAcquisition.moduleIsolation = {isolation};
             next.diagnosticStream.receiverRunning = true;
             next.diagnosticStream.requestedChannel = start->channel;
             next.diagnosticStream.requestedTarget = {
@@ -1390,6 +1401,14 @@ TEST_CASE("acquire runs startup streams status and verifies cleanup")
     CHECK(control.releaseCommands == 1);
     CHECK(errors.str().empty());
     CHECK(output.str().find("acquisition: running channel=29\n")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "acquisition_isolation: checked=1 quiesced=1\n")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "isolation_start: base=0x22000000 hardware=0x5007 "
+              "irq=0 state_before=1 quiesced=yes stop=verified "
+              "fifo_reset=yes readout_reset=yes\n")
           != std::string::npos);
     CHECK(output.str().find(
               "packets=12 datagrams=12 waveforms=4 loss=0 "
