@@ -33,6 +33,7 @@ public:
         std::uint16_t requestedChannel,
         DiagnosticStreamPublisher publisher);
     void StopAndJoin();
+    void ClearWaveformHistoriesForQuad(std::uint16_t selectedQuad);
 
     [[nodiscard]] DiagnosticStreamSnapshot CurrentSnapshot() const;
     [[nodiscard]] bool IsRunning() const noexcept;

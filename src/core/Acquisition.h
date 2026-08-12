@@ -27,6 +27,43 @@ enum class DiagnosticFingerprintOutcome
     ForeignFingerprint,
 };
 
+enum class DiagnosticSourceChangeState
+{
+    NotRun,
+    Applying,
+    Passed,
+    Failed,
+};
+
+struct DiagnosticSourceChangeResult
+{
+    DiagnosticSourceChangeState state = DiagnosticSourceChangeState::NotRun;
+    std::string message = "No waveform-source change has been requested";
+    std::uint16_t selectedQuad = 0U;
+    std::uint8_t requestedSource = 0U;
+    std::uint16_t originalConfiguration = 0U;
+    std::uint16_t requestedConfiguration = 0U;
+    std::uint16_t appliedReadback = 0U;
+    std::uint16_t restoredReadback = 0U;
+    std::uint32_t daqModeReadback = 0U;
+    bool fingerprintVerified = false;
+    bool foreignFingerprint = false;
+    bool communicationUnavailable = false;
+    bool originalCaptured = false;
+    bool modulePaused = false;
+    bool daqModePaused = false;
+    bool writeAttempted = false;
+    bool writeVerified = false;
+    bool rollbackAttempted = false;
+    bool rollbackVerified = false;
+    bool selectorParkedAtQuadZero = false;
+    bool fifoResetSent = false;
+    bool readoutResetSent = false;
+    bool acquisitionResumed = false;
+    bool daqModeReadbackValid = false;
+    bool daqModeResumed = false;
+};
+
 struct DiagnosticFingerprintResult
 {
     DiagnosticFingerprintOutcome outcome =

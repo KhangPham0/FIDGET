@@ -59,6 +59,12 @@ void AcquisitionReceiver::StopAndJoin()
     }
 }
 
+void AcquisitionReceiver::ClearWaveformHistoriesForQuad(
+    const std::uint16_t selectedQuad)
+{
+    decoder_.ClearWaveformHistoriesForQuad(selectedQuad);
+}
+
 DiagnosticStreamSnapshot AcquisitionReceiver::CurrentSnapshot() const
 {
     const std::lock_guard<std::mutex> lock(snapshotMutex_);
