@@ -64,6 +64,13 @@ StartPreparedDiagnosticAcquisition(
     const DiagnosticAcquisitionPreparationRequest& request,
     const std::atomic<bool>& cancellationRequested);
 
+[[nodiscard]] DiagnosticFingerprintResult
+VerifyDiagnosticOwnershipFingerprint(
+    ICommandTransport& commandTransport,
+    const DiagnosticAcquisitionPreparationResult& prepared,
+    std::uint16_t& nextReference,
+    const std::atomic<bool>& cancellationRequested);
+
 } // namespace fidget
 
 #endif

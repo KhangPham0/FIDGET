@@ -681,4 +681,104 @@ DiagnosticAcquisitionPreparationResult StartPreparedDiagnosticAcquisition(
     return prepared;
 }
 
+DiagnosticFingerprintResult VerifyDiagnosticOwnershipFingerprint(
+    ICommandTransport& commandTransport,
+    const DiagnosticAcquisitionPreparationResult& prepared,
+    std::uint16_t& nextReference,
+    const std::atomic<bool>& cancellationRequested)
+{
+    DiagnosticFingerprintResult result;
+    std::vector<std::uint16_t> addresses{
+        DiagnosticDaqModeRegister,
+        prepared.readoutPlan.stackTriggerRegister,
+        prepared.readoutPlan.stackOffsetRegister,
+    };
+    addresses.reserve(4U + prepared.readoutPlan.stackUploadWrites.size());
+    for (const auto& stackWord : prepared.readoutPlan.stackUploadWrites)
+    {
+        addresses.push_back(stackWord.address);
+    }
+    addresses.push_back(prepared.recoveryRecord.ownershipTokenRegister);
+
+    const auto read = ReadLocalRegisters(
+        commandTransport,
+        addresses.data(),
+        addresses.size(),
+        nextReference,
+        cancellationRequested);
+    if (!read.success)
+    {
+        result.message =
+            "Could not read the complete tuner fingerprint in one MVLC "
+            "transaction: " + read.error;
+        return result;
+    }
+
+    result.daqMode = read.values[0];
+    if ((result.daqMode & 0x1U) == 0U)
+    {
+        result.outcome = DiagnosticFingerprintOutcome::ForeignFingerprint;
+        result.message =
+            "MVLC DAQ mode no longer has autonomous-stack bit 0 enabled "
+            "(readback " + Hexadecimal32(result.daqMode) + ").";
+        return result;
+    }
+
+    const auto verifyLocal = [&](const std::size_t index,
+                                 const std::uint16_t address,
+                                 const std::uint32_t expected,
+                                 const char* name) {
+        const std::uint32_t actual = read.values[index];
+        if (actual == expected)
+        {
+            return true;
+        }
+        result.outcome = DiagnosticFingerprintOutcome::ForeignFingerprint;
+        result.message = std::string(name) + " changed at "
+            + Hexadecimal32(address) + ": expected "
+            + Hexadecimal32(expected) + ", read "
+            + Hexadecimal32(actual) + ".";
+        return false;
+    };
+
+    if (!verifyLocal(
+            1U,
+            prepared.readoutPlan.stackTriggerRegister,
+            prepared.readoutPlan.triggerValue,
+            "Diagnostic stack trigger")
+        || !verifyLocal(
+            2U,
+            prepared.readoutPlan.stackOffsetRegister,
+            prepared.readoutPlan.stackMemoryOffset,
+            "Diagnostic stack offset"))
+    {
+        return result;
+    }
+
+    std::size_t valueIndex = 3U;
+    for (const auto& stackWord : prepared.readoutPlan.stackUploadWrites)
+    {
+        if (!verifyLocal(
+                valueIndex++,
+                stackWord.address,
+                stackWord.value,
+                "Diagnostic stack word"))
+        {
+            return result;
+        }
+    }
+    if (!verifyLocal(
+            valueIndex,
+            prepared.recoveryRecord.ownershipTokenRegister,
+            prepared.recoveryRecord.ownershipTokenValue,
+            "Unique tuner ownership token"))
+    {
+        return result;
+    }
+
+    result.outcome = DiagnosticFingerprintOutcome::Verified;
+    result.message = "The complete unique tuner fingerprint matches.";
+    return result;
+}
+
 } // namespace fidget

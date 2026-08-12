@@ -20,6 +20,21 @@ enum class DiagnosticAcquisitionState
     Failed,
 };
 
+enum class DiagnosticFingerprintOutcome
+{
+    Verified,
+    CommunicationUnavailable,
+    ForeignFingerprint,
+};
+
+struct DiagnosticFingerprintResult
+{
+    DiagnosticFingerprintOutcome outcome =
+        DiagnosticFingerprintOutcome::CommunicationUnavailable;
+    std::uint32_t daqMode = 0U;
+    std::string message;
+};
+
 struct DiagnosticModuleIsolation
 {
     std::uint32_t baseAddress = 0U;

@@ -3,6 +3,7 @@
 
 #include "core/RecoveryJournal.h"
 #include "hardware/DiagnosticAcquisitionOperation.h"
+#include "hardware/VmeTransaction.h"
 #include "vme_test_support.h"
 
 #include <atomic>
@@ -263,6 +264,65 @@ void QueueLocalRead(
             fidget::test::MakeCommandPacket({frame}))},
     });
     ++references.super;
+}
+
+std::vector<std::uint16_t> FingerprintAddresses(
+    const fidget::DiagnosticAcquisitionPreparationResult& prepared)
+{
+    std::vector<std::uint16_t> addresses{
+        fidget::DiagnosticDaqModeRegister,
+        prepared.readoutPlan.stackTriggerRegister,
+        prepared.readoutPlan.stackOffsetRegister,
+    };
+    for (const auto& write : prepared.readoutPlan.stackUploadWrites)
+    {
+        addresses.push_back(write.address);
+    }
+    addresses.push_back(prepared.recoveryRecord.ownershipTokenRegister);
+    return addresses;
+}
+
+std::vector<std::uint32_t> FingerprintValues(
+    const fidget::DiagnosticAcquisitionPreparationResult& prepared)
+{
+    std::vector<std::uint32_t> values{
+        fidget::DiagnosticDaqEnableValue,
+        prepared.readoutPlan.triggerValue,
+        prepared.readoutPlan.stackMemoryOffset,
+    };
+    for (const auto& write : prepared.readoutPlan.stackUploadWrites)
+    {
+        values.push_back(write.value);
+    }
+    values.push_back(prepared.recoveryRecord.ownershipTokenValue);
+    return values;
+}
+
+void QueueFingerprintRead(
+    fidget::test::FakeCommandTransport& transport,
+    const std::uint16_t reference,
+    const std::vector<std::uint16_t>& addresses,
+    const std::vector<std::uint32_t>& values)
+{
+    REQUIRE(addresses.size() == values.size());
+    const auto request = fidget::BuildMvlcLocalRegisterBatchReadRequest(
+        reference, addresses.data(), addresses.size());
+    REQUIRE(request.success);
+    std::vector<std::uint32_t> frame{
+        (static_cast<std::uint32_t>(fidget::MvlcSuperFrameType) << 24U)
+            | static_cast<std::uint32_t>(1U + addresses.size() * 2U),
+        fidget::MvlcReferenceWordCommand | reference,
+    };
+    for (std::size_t index = 0U; index < addresses.size(); ++index)
+    {
+        frame.push_back(fidget::MvlcReadLocalCommand | addresses[index]);
+        frame.push_back(values[index]);
+    }
+    transport.QueueExchange({
+        fidget::test::EncodeWords(request.words),
+        {fidget::test::FakeReceiveAction::Datagram(
+            fidget::test::MakeCommandPacket({frame}))},
+    });
 }
 
 } // namespace
@@ -587,4 +647,127 @@ TEST_CASE("command port 65535 refuses acquisition before opening data")
           == "The MVLC command port has no adjacent data port.");
     CHECK_FALSE(dataReceiver.IsOpen());
     CHECK(dataReceiver.Sent().empty());
+}
+
+TEST_CASE("the complete ownership fingerprint is read in one transaction")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+
+    const auto addresses = FingerprintAddresses(prepared);
+    const auto values = FingerprintValues(prepared);
+    REQUIRE(addresses.size() == 11U);
+    constexpr std::uint16_t Reference = 0x6200U;
+    QueueFingerprintRead(transport, Reference, addresses, values);
+    std::uint16_t nextReference = Reference;
+    const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+        transport, prepared, nextReference, cancelled);
+
+    CHECK(fingerprint.outcome == DiagnosticFingerprintOutcome::Verified);
+    CHECK(fingerprint.daqMode == DiagnosticDaqEnableValue);
+    CHECK(fingerprint.message
+          == "The complete unique tuner fingerprint matches.");
+    CHECK(nextReference == Reference + 1U);
+
+    const auto requests = transport.SentRequests();
+    REQUIRE_FALSE(requests.empty());
+    const auto words = DecodeWords(requests.back());
+    REQUIRE(words.size() == 14U);
+    CHECK(words.front() == MvlcCommandBufferStart);
+    CHECK(words[1] == (MvlcReferenceWordCommand | Reference));
+    for (std::size_t index = 0U; index < addresses.size(); ++index)
+    {
+        CHECK(words[index + 2U]
+              == (MvlcReadLocalCommand | addresses[index]));
+    }
+    CHECK(words.back() == MvlcCommandBufferEnd);
+}
+
+TEST_CASE("six missing fingerprint replies become communication uncertainty")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+
+    const auto addresses = FingerprintAddresses(prepared);
+    const auto batch = BuildMvlcLocalRegisterBatchReadRequest(
+        0x6300U, addresses.data(), addresses.size());
+    REQUIRE(batch.success);
+    for (int attempt = 0; attempt < MvlcFingerprintReadAttemptCount;
+         ++attempt)
+    {
+        transport.QueueExchange({
+            EncodeWords(batch.words),
+            {FakeReceiveAction::Timeout()},
+        });
+    }
+
+    const auto sendsBefore = transport.SentRequests().size();
+    std::uint16_t nextReference = 0x6300U;
+    const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+        transport, prepared, nextReference, cancelled);
+
+    CHECK(fingerprint.outcome
+          == DiagnosticFingerprintOutcome::CommunicationUnavailable);
+    CHECK(fingerprint.message
+          == "Could not read the complete tuner fingerprint in one MVLC "
+             "transaction: No matching MVLC response after six "
+             "register-batch attempts");
+    CHECK(transport.SentRequests().size() - sendsBefore == 6U);
+    CHECK(nextReference == 0x6301U);
+}
+
+TEST_CASE("a changed token is classified as a foreign fingerprint")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+
+    const auto addresses = FingerprintAddresses(prepared);
+    auto values = FingerprintValues(prepared);
+    values.back() = 0x11112222U;
+    QueueFingerprintRead(transport, 0x6400U, addresses, values);
+    std::uint16_t nextReference = 0x6400U;
+    const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+        transport, prepared, nextReference, cancelled);
+
+    CHECK(fingerprint.outcome
+          == DiagnosticFingerprintOutcome::ForeignFingerprint);
+    CHECK(fingerprint.message
+          == "Unique tuner ownership token changed at 0x0000221C: expected "
+             "0xA55A1234, read 0x11112222.");
 }
