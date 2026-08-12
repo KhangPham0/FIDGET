@@ -8,6 +8,7 @@ endif()
 
 add_executable(fidget
     main.cpp
+    ui/AcquisitionStage.cpp
     ui/App.cpp
     ui/ConfigurationStage.cpp
     ui/Fonts.cpp

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 
+#include "core/RecoveryJournal.h"
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"

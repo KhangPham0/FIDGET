@@ -323,8 +323,7 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     }
     else
     {
-        ImGui::TextDisabled(
-            "Waveform acquisition arrives in the next phase.");
+        m_acquisitionStage.Draw(m_tunerControl, snapshot, m_theme);
     }
     ImGui::End();
 }
