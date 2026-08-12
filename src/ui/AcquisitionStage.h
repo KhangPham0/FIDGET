@@ -20,6 +20,9 @@ public:
 private:
     int m_selectedChannel = 0;
     int m_referenceChannel = -1;
+    int m_parameterDefinitionIndex = 5;
+    int m_proposedParameterValue = 200;
+    bool m_parameterValueEdited = false;
     std::vector<std::int16_t> m_referenceSamples;
 };
 

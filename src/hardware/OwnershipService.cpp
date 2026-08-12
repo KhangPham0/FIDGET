@@ -1042,6 +1042,8 @@ void OwnershipService::ChangeDiagnosticSource(
     const auto selectedQuad = static_cast<std::uint16_t>(
         acquisitionSession_->acquisition.requestedChannel / 4U);
     snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.configurationFresh = false;
+    RefreshProfileComparison(snapshot);
     snapshot.diagnosticSourceChange = {};
     snapshot.diagnosticSourceChange.state =
         DiagnosticSourceChangeState::Applying;
@@ -1116,6 +1118,8 @@ void OwnershipService::ApplyDiagnosticPreview(
     const auto selectedQuad = static_cast<std::uint16_t>(
         acquisitionSession_->acquisition.requestedChannel / 4U);
     snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.configurationFresh = false;
+    RefreshProfileComparison(snapshot);
     snapshot.diagnosticParameterPreview = {};
     snapshot.diagnosticParameterPreview.state =
         DiagnosticParameterPreviewState::Applying;
