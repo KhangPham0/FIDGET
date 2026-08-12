@@ -200,6 +200,20 @@ add_test(
     COMMAND diagnostic_source_operation_tests
 )
 
+add_executable(
+    diagnostic_preview_operation_tests
+    diagnostic_preview_operation_tests.cpp
+)
+target_link_libraries(diagnostic_preview_operation_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(
+    NAME diagnostic_preview_operation_tests
+    COMMAND diagnostic_preview_operation_tests
+)
+
 add_executable(ownership_service_tests ownership_service_tests.cpp)
 target_link_libraries(ownership_service_tests PRIVATE
     fidget_hardware

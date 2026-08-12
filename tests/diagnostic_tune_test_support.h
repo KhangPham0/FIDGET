@@ -29,6 +29,23 @@ inline DiagnosticAcquisitionPreparationResult MakeRunningDiagnosticSession()
     session.recoveryRecord.ownershipTokenRegister = static_cast<std::uint16_t>(
         session.readoutPlan.stackUploadWrites.back().address + 4U);
     session.recoveryRecord.ownershipTokenValue = DiagnosticTestToken;
+    session.recoveryRecord.phase = TunerRecoveryPhase::Active;
+    session.recoveryRecord.host = "mvlc-test";
+    session.recoveryRecord.commandPort = 32768U;
+    session.recoveryRecord.mvlcHardwareId = 0x5008U;
+    session.recoveryRecord.mvlcFirmwareRevision = 0x0046U;
+    session.recoveryRecord.mdppBaseAddress = DiagnosticTestBase;
+    session.recoveryRecord.mdppHardwareId = 0x5007U;
+    session.recoveryRecord.mdppIrqLevel = 3U;
+    session.recoveryRecord.mdppOutputFormat = 0x0018U;
+    session.recoveryRecord.stackTriggerRegister =
+        session.readoutPlan.stackTriggerRegister;
+    session.recoveryRecord.stackTriggerValue =
+        session.readoutPlan.triggerValue;
+    session.recoveryRecord.stackOffsetRegister =
+        session.readoutPlan.stackOffsetRegister;
+    session.recoveryRecord.stackOffsetValue =
+        session.readoutPlan.stackMemoryOffset;
     session.nextSuperReference = 0x7000U;
     session.nextStackReference = 0x9F000001U;
     return session;

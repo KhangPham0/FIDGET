@@ -73,6 +73,13 @@ public:
         receiveHook_ = std::move(hook);
     }
 
+    void SetSendHook(
+        std::function<void(const std::vector<std::byte>&)> hook)
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        sendHook_ = std::move(hook);
+    }
+
     [[nodiscard]] std::vector<std::vector<std::byte>> SentRequests() const
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -141,6 +148,11 @@ public:
         if (request != exchange.expectedRequest)
         {
             return {false, "fake send: request mismatch"};
+        }
+
+        if (sendHook_)
+        {
+            sendHook_(request);
         }
 
         for (auto& action : exchange.receiveActions)
@@ -230,6 +242,7 @@ private:
     std::vector<std::size_t> receiveCapacities_;
     std::vector<int> receiveTimeouts_;
     std::function<void(std::size_t)> receiveHook_;
+    std::function<void(const std::vector<std::byte>&)> sendHook_;
 };
 
 } // namespace fidget::test

@@ -64,6 +64,57 @@ struct DiagnosticSourceChangeResult
     bool daqModeResumed = false;
 };
 
+enum class DiagnosticParameterPreviewState
+{
+    NotRun,
+    Applying,
+    PreviewActive,
+    Restoring,
+    Restored,
+    Failed,
+};
+
+struct DiagnosticParameterPreviewResult
+{
+    DiagnosticParameterPreviewState state =
+        DiagnosticParameterPreviewState::NotRun;
+    std::string message = "No parameter preview has been requested";
+    std::uint16_t selectedQuad = 0U;
+    std::uint16_t registerOffset = 0U;
+    std::string settingName;
+    std::uint16_t originalValue = 0U;
+    std::uint16_t requestedValue = 0U;
+    std::uint16_t appliedReadback = 0U;
+    std::uint16_t restoredReadback = 0U;
+    std::uint16_t dependencyRegister = 0U;
+    std::string dependencyName;
+    std::uint16_t dependencyValue = 0U;
+    std::uint32_t daqModeReadback = 0U;
+    std::uint64_t applyDurationMicroseconds = 0U;
+    std::uint64_t restoreDurationMicroseconds = 0U;
+    bool fingerprintVerified = false;
+    bool foreignFingerprint = false;
+    bool communicationUnavailable = false;
+    bool originalCaptured = false;
+    bool modulePaused = false;
+    bool daqModePaused = false;
+    bool writeAttempted = false;
+    bool writeVerified = false;
+    bool rollbackAttempted = false;
+    bool rollbackVerified = false;
+    bool selectorParkedAtQuadZero = false;
+    bool fifoResetSent = false;
+    bool readoutResetSent = false;
+    bool acquisitionResumed = false;
+    bool daqModeReadbackValid = false;
+    bool daqModeResumed = false;
+    bool previewActive = false;
+    bool restoreAttempted = false;
+    bool restoreVerified = false;
+    bool automaticallyRestoredOnStop = false;
+    bool dependencyChecked = false;
+};
+
 struct DiagnosticFingerprintResult
 {
     DiagnosticFingerprintOutcome outcome =

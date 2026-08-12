@@ -6,6 +6,7 @@ add_library(fidget_hardware STATIC
     DeterministicStartupOperation.cpp
     DiagnosticAcquisitionOperation.cpp
     DiagnosticPauseResume.cpp
+    DiagnosticPreviewOperation.cpp
     DiagnosticSourceOperation.cpp
     MvlcCommandTransport.cpp
     MvlcDataReceiver.cpp
