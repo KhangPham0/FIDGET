@@ -143,6 +143,30 @@ void AcquisitionReceiver::Publish(
     next.receiverError = std::move(receiverError);
     next.histories = decoder_.AllHistories();
     next.decoderStats = decoder_.Stats();
+    std::array<std::uint64_t, 32> totalsByPhysicalChannel{};
+    for (const auto& entry : next.histories)
+    {
+        const int channel = entry.first.channel;
+        if (channel >= 0 && channel < 32)
+        {
+            totalsByPhysicalChannel[static_cast<std::size_t>(channel)]
+                += entry.second.totalCaptured;
+        }
+    }
+    next.channelWaveformTotals.clear();
+    for (std::size_t channel = 0U;
+         channel < totalsByPhysicalChannel.size();
+         ++channel)
+    {
+        if (totalsByPhysicalChannel[channel] == 0U)
+        {
+            continue;
+        }
+        next.channelWaveformTotals.push_back({
+            static_cast<std::uint16_t>(channel),
+            totalsByPhysicalChannel[channel],
+        });
+    }
     next.datagramsReceived = datagramsReceived_;
     next.bytesReceived = bytesReceived_;
     next.requestedTarget = ResolveMdppRequestedChannelTarget(

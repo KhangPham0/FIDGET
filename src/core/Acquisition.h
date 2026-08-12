@@ -98,6 +98,12 @@ struct DiagnosticStreamSnapshot
     MdppRequestedChannelTarget requestedTarget;
     MdppChannelHistorySnapshots histories;
     StreamDecoderStats decoderStats;
+    struct ChannelWaveformTotal
+    {
+        std::uint16_t channel = 0U;
+        std::uint64_t total = 0U;
+    };
+    std::vector<ChannelWaveformTotal> channelWaveformTotals;
     std::uint64_t datagramsReceived = 0U;
     std::uint64_t bytesReceived = 0U;
     double datagramsPerSecond = 0.0;

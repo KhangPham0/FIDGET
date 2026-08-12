@@ -174,6 +174,11 @@ TEST_CASE("the receiver drains data and preserves the requested channel")
     CHECK(snapshot.decoderStats.decodedWaveforms == 2U);
     CHECK(snapshot.decoderStats.lostEthernetPackets == 0U);
     CHECK(snapshot.decoderStats.malformedWords == 0U);
+    REQUIRE(snapshot.channelWaveformTotals.size() == 2U);
+    CHECK(snapshot.channelWaveformTotals[0].channel == 0U);
+    CHECK(snapshot.channelWaveformTotals[0].total == 1U);
+    CHECK(snapshot.channelWaveformTotals[1].channel == 29U);
+    CHECK(snapshot.channelWaveformTotals[1].total == 1U);
     CHECK(snapshot.requestedChannel == 29U);
     CHECK(snapshot.requestedTarget.moduleId == 0x11);
     CHECK(snapshot.requestedTarget.requestedChannel == 29);

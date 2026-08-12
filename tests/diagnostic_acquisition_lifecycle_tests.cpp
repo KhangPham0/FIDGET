@@ -75,6 +75,7 @@ std::uint32_t PackSamples(const int even, const int odd)
 
 std::vector<std::byte> MakeWaveformPacket(
     const std::uint16_t packetNumber,
+    const int channel,
     const int sampleValue)
 {
     const std::array<std::uint32_t, 10> words{{
@@ -84,7 +85,8 @@ std::vector<std::byte> MakeWaveformPacket(
         0xF3010007U,
         0xF5200006U,
         0x41110005U,
-        0x10000000U | (29U << 16U),
+        0x10000000U
+            | (static_cast<std::uint32_t>(channel) << 16U),
         0x30080001U,
         PackSamples(sampleValue, -sampleValue),
         0x20000000U,
@@ -546,10 +548,13 @@ private:
             SetError("localhost emulator received a malformed redirect");
             return;
         }
-        for (std::uint16_t packet = 1U; packet <= 3U; ++packet)
+        constexpr std::array<int, 3> Channels{{0, 3, 29}};
+        for (std::uint16_t packet = 1U; packet <= Channels.size(); ++packet)
         {
             const auto waveform = MakeWaveformPacket(
-                packet, static_cast<int>(packet) * 10);
+                packet,
+                Channels[packet - 1U],
+                static_cast<int>(packet) * 10);
             const ssize_t sent = ::sendto(
                 dataSocket_,
                 waveform.data(),
@@ -666,6 +671,13 @@ TEST_CASE("localhost MVLC command and data pipes complete a safe lifecycle")
     CHECK(published.decoderStats.lostEthernetPackets == 0U);
     CHECK(published.decoderStats.malformedWords == 0U);
     CHECK(published.requestedTarget.channelObserved);
+    REQUIRE(published.channelWaveformTotals.size() == 3U);
+    CHECK(published.channelWaveformTotals[0].channel == 0U);
+    CHECK(published.channelWaveformTotals[0].total == 1U);
+    CHECK(published.channelWaveformTotals[1].channel == 3U);
+    CHECK(published.channelWaveformTotals[1].total == 1U);
+    CHECK(published.channelWaveformTotals[2].channel == 29U);
+    CHECK(published.channelWaveformTotals[2].total == 1U);
 
     std::uint16_t heartbeatReference = prepared.nextSuperReference;
     const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(

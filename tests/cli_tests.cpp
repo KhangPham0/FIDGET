@@ -455,6 +455,11 @@ public:
             next.diagnosticStream.bytesReceived = 480U;
             next.diagnosticStream.decoderStats.ethernetPackets = 12U;
             next.diagnosticStream.decoderStats.decodedWaveforms = 4U;
+            next.diagnosticStream.channelWaveformTotals = {
+                {0U, 2U},
+                {3U, 1U},
+                {start->channel, 4U},
+            };
             fidget::MdppWaveform waveform;
             waveform.sequence = 4U;
             waveform.moduleId = 0x11U;
@@ -1390,6 +1395,9 @@ TEST_CASE("acquire runs startup streams status and verifies cleanup")
               "packets=12 datagrams=12 waveforms=4 loss=0 "
               "decode_errors=0 channel=29 channel_count=4 "
               "fingerprint=matching")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "acquisition_channels: 0=2 3=1 29=4\n")
           != std::string::npos);
     CHECK(output.str().find(
               "cleanup_selected: stopped=yes\n") != std::string::npos);

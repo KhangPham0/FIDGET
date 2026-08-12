@@ -692,6 +692,12 @@ void PrintAcquisitionStatus(
                        ? "foreign"
                        : "matching")
            << '\n';
+    output << "acquisition_channels:";
+    for (const auto& channel : stream.channelWaveformTotals)
+    {
+        output << ' ' << channel.channel << '=' << channel.total;
+    }
+    output << '\n';
 }
 
 void PrintCleanupResult(

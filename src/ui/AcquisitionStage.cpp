@@ -284,6 +284,29 @@ void AcquisitionStage::Draw(
         static_cast<unsigned long long>(
             stream.decoderStats.lostEthernetPackets),
         static_cast<unsigned long long>(stream.decoderStats.malformedWords));
+    if (stream.channelWaveformTotals.empty())
+    {
+        ImGui::TextDisabled("Channel hit totals: no waveform hits yet");
+    }
+    else
+    {
+        ImGui::TextUnformatted("Channel hit totals:");
+        ImGui::SameLine();
+        for (std::size_t index = 0U;
+             index < stream.channelWaveformTotals.size();
+             ++index)
+        {
+            if (index != 0U)
+            {
+                ImGui::SameLine(0.0f, 12.0f);
+            }
+            const auto& channel = stream.channelWaveformTotals[index];
+            ImGui::Text(
+                "%u=%llu",
+                static_cast<unsigned>(channel.channel),
+                static_cast<unsigned long long>(channel.total));
+        }
+    }
     if (acquisition.communicationUncertain)
     {
         ImGui::TextColored(
