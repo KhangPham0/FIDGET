@@ -2,8 +2,10 @@
 #define FIDGET_HARDWARE_OWNERSHIP_SERVICE_H
 
 #include "core/TunerControl.h"
+#include "hardware/AcquisitionReceiver.h"
 #include "hardware/CommandWorker.h"
 #include "hardware/DeterministicStartupOperation.h"
+#include "hardware/DiagnosticAcquisitionOperation.h"
 #include "hardware/ScpCaptureOperation.h"
 #include "hardware/ScpBulkApplyOperation.h"
 #include "hardware/ScpSingleRepairOperation.h"
@@ -16,6 +18,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -37,6 +40,12 @@ class OwnershipService final : public ITunerControl
 public:
     explicit OwnershipService(
         std::unique_ptr<ICommandTransport> transport,
+        std::chrono::milliseconds watchdogInterval =
+            std::chrono::seconds(1));
+    OwnershipService(
+        std::unique_ptr<ICommandTransport> transport,
+        std::unique_ptr<IDataReceiver> dataReceiver,
+        std::string recoveryJournalPath,
         std::chrono::milliseconds watchdogInterval =
             std::chrono::seconds(1));
     ~OwnershipService() override;
@@ -72,6 +81,10 @@ private:
     void ApplyAllDifferences();
     void RunDeterministicStartup(
         const RunDeterministicStartupCommand& command);
+    void StartDiagnosticAcquisition(
+        const StartDiagnosticAcquisitionCommand& command);
+    [[nodiscard]] bool StopDiagnosticAcquisition();
+    void PublishDiagnosticStream(DiagnosticStreamSnapshot stream);
     void ReleaseSession();
     void ProbeController(TunerSnapshot snapshot, bool retainSession);
 
@@ -104,6 +117,12 @@ private:
         std::string detail = {});
 
     std::unique_ptr<ICommandTransport> transport_;
+    std::unique_ptr<IDataReceiver> dataReceiver_;
+    std::unique_ptr<AcquisitionReceiver> acquisitionReceiver_;
+    std::optional<DiagnosticAcquisitionPreparationResult>
+        acquisitionSession_;
+    DiagnosticAcquisitionPreparationRequest acquisitionRequest_;
+    std::string recoveryJournalPath_;
     CommandWorker worker_;
     std::shared_ptr<const TunerSnapshot> snapshot_;
     CrateProject project_;

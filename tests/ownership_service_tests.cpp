@@ -1622,3 +1622,33 @@ TEST_CASE("the service publishes the startup recipe and requires confirmation")
               "explicit confirmation") != std::string::npos);
     CHECK(transport->SentRequests().size() == requestCount);
 }
+
+TEST_CASE("direct acquisition refuses to bypass deterministic startup")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    const auto before = service.CurrentSnapshot();
+    const auto requestCount = transport->SentRequests().size();
+    service.Submit(StartDiagnosticAcquisitionCommand{29U});
+    REQUIRE(WaitFor(service, [revision = before->revision](
+        const TunerSnapshot& snapshot) {
+        return snapshot.revision > revision;
+    }));
+
+    const auto refused = service.CurrentSnapshot();
+    CHECK(refused->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(refused->acquisition == GuidedTunerAcquisitionState::NotRun);
+    CHECK_FALSE(refused->deterministicStartupPassed);
+    CHECK(refused->statusMessages.back().summary
+          == "Complete deterministic startup before direct acquisition.");
+    CHECK(transport->SentRequests().size() == requestCount);
+}

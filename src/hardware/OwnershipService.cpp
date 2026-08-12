@@ -1,6 +1,7 @@
 #include "hardware/OwnershipService.h"
 
 #include "core/CrateProject.h"
+#include "core/RecoveryJournal.h"
 #include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
 #include "core/ScpTransactionPlan.h"
@@ -44,7 +45,22 @@ const char* DisconnectedMessage = "No tuner session";
 OwnershipService::OwnershipService(
     std::unique_ptr<ICommandTransport> transport,
     std::chrono::milliseconds watchdogInterval)
+    : OwnershipService(
+        std::move(transport),
+        nullptr,
+        DefaultTunerRecoveryJournalPath(),
+        watchdogInterval)
+{
+}
+
+OwnershipService::OwnershipService(
+    std::unique_ptr<ICommandTransport> transport,
+    std::unique_ptr<IDataReceiver> dataReceiver,
+    std::string recoveryJournalPath,
+    std::chrono::milliseconds watchdogInterval)
     : transport_(std::move(transport))
+    , dataReceiver_(std::move(dataReceiver))
+    , recoveryJournalPath_(std::move(recoveryJournalPath))
     , snapshot_(std::make_shared<const TunerSnapshot>())
     , watchdogInterval_(watchdogInterval)
 {
@@ -61,12 +77,14 @@ OwnershipService::OwnershipService(
 
 OwnershipService::~OwnershipService()
 {
-    serviceStopRequested_.store(true);
     StopWatchdog();
 
     if (transport_ && worker_.IsAcceptingTasks())
     {
-        auto close = worker_.Post([this] { transport_->Close(); });
+        auto close = worker_.Post([this] {
+            static_cast<void>(StopDiagnosticAcquisition());
+            transport_->Close();
+        });
         try
         {
             close.get();
@@ -75,6 +93,7 @@ OwnershipService::~OwnershipService()
         {
         }
     }
+    serviceStopRequested_.store(true);
     worker_.StopAndJoin();
 }
 
@@ -172,6 +191,21 @@ void OwnershipService::Submit(TunerCommand command)
             [this, request] { RunDeterministicStartup(request); });
         return;
     }
+    if (const auto* start =
+            std::get_if<StartDiagnosticAcquisitionCommand>(&command))
+    {
+        const auto request = *start;
+        (void)worker_.Post(
+            [this, request] { StartDiagnosticAcquisition(request); });
+        return;
+    }
+    if (std::holds_alternative<StopDiagnosticAcquisitionCommand>(command))
+    {
+        (void)worker_.Post([this] {
+            static_cast<void>(StopDiagnosticAcquisition());
+        });
+        return;
+    }
 
     StopWatchdog();
     (void)worker_.Post([this] { ReleaseSession(); });
@@ -188,6 +222,10 @@ std::future<PreWriteGateResult> OwnershipService::VerifyPreWriteGate(
 
 void OwnershipService::UseProject(UseCrateProjectCommand command)
 {
+    if (!StopDiagnosticAcquisition())
+    {
+        return;
+    }
     if (transport_)
     {
         transport_->Close();
@@ -243,6 +281,10 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
 
 void OwnershipService::ClearProject()
 {
+    if (!StopDiagnosticAcquisition())
+    {
+        return;
+    }
     if (transport_)
     {
         transport_->Close();
@@ -789,6 +831,244 @@ void OwnershipService::RunDeterministicStartup(
         result.message);
 }
 
+void OwnershipService::StartDiagnosticAcquisition(
+    const StartDiagnosticAcquisitionCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Open a tuner session before direct acquisition.");
+        return;
+    }
+    if (!snapshot.deterministicStartupPassed)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Complete deterministic startup before direct acquisition.");
+        return;
+    }
+    if (command.channel > 31U)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The requested physical channel must be 0 through 31.");
+        return;
+    }
+    if (!dataReceiver_)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "The ownership service has no MVLC data receiver.");
+        return;
+    }
+    if (acquisitionSession_)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "A diagnostic acquisition session is already active.");
+        return;
+    }
+
+    DiagnosticAcquisitionPreparationRequest request;
+    request.host = snapshot.mvlcHost;
+    request.commandPort = snapshot.mvlcCommandPort;
+    request.mvlcHardwareId = snapshot.mvlcHardwareId;
+    request.mvlcFirmwareRevision = snapshot.mvlcFirmwareRevision;
+    request.targetBaseAddress = snapshot.activeModuleBaseAddress;
+    request.requestedChannel = command.channel;
+    request.recoveryJournalPath = recoveryJournalPath_;
+    request.configuredModuleBaseAddresses.reserve(project_.modules.size());
+    for (const auto& module : project_.modules)
+    {
+        request.configuredModuleBaseAddresses.push_back(module.baseAddress);
+    }
+
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.acquisition = GuidedTunerAcquisitionState::Starting;
+    snapshot.cleanupVerified = false;
+    snapshot.diagnosticAcquisition = {};
+    snapshot.diagnosticAcquisition.state =
+        DiagnosticAcquisitionState::Starting;
+    snapshot.diagnosticAcquisition.baseAddress =
+        snapshot.activeModuleBaseAddress;
+    snapshot.diagnosticAcquisition.requestedChannel = command.channel;
+    snapshot.diagnosticAcquisition.message =
+        "Preparing isolation and crash recovery before acquisition...";
+    snapshot.diagnosticStream = {};
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Preparing direct diagnostic acquisition.");
+
+    auto prepared = PrepareDiagnosticAcquisition(
+        *transport_,
+        request,
+        serviceStopRequested_,
+        [this](const std::string& operationName) {
+            return CheckStartupOwnershipGate(operationName);
+        });
+    if (prepared.acquisition.state == DiagnosticAcquisitionState::Starting)
+    {
+        prepared = StartPreparedDiagnosticAcquisition(
+            *transport_,
+            *dataReceiver_,
+            std::move(prepared),
+            request,
+            serviceStopRequested_);
+    }
+
+    acquisitionRequest_ = request;
+    acquisitionSession_ = std::move(prepared);
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
+    snapshot.recoveryRecordAvailable =
+        acquisitionSession_->acquisition.recoveryJournalPrepared;
+    if (acquisitionSession_->acquisition.state
+        != DiagnosticAcquisitionState::Running)
+    {
+        snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            acquisitionSession_->acquisition.message);
+        return;
+    }
+
+    acquisitionReceiver_ = std::make_unique<AcquisitionReceiver>(
+        *dataReceiver_);
+    const bool receiverStarted = acquisitionReceiver_->Start(
+        command.channel,
+        [this](const DiagnosticStreamSnapshot& stream) {
+            if (!worker_.IsAcceptingTasks())
+            {
+                return;
+            }
+            (void)worker_.Post([this, stream] {
+                PublishDiagnosticStream(stream);
+            });
+        });
+    if (!receiverStarted)
+    {
+        acquisitionSession_->acquisition.state =
+            DiagnosticAcquisitionState::Failed;
+        acquisitionSession_->acquisition.message =
+            "The independent MVLC data receiver could not start.";
+        snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
+        snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            acquisitionSession_->acquisition.message);
+        return;
+    }
+
+    snapshot.acquisition = GuidedTunerAcquisitionState::Running;
+    snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
+    snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Success,
+        acquisitionSession_->acquisition.message);
+}
+
+bool OwnershipService::StopDiagnosticAcquisition()
+{
+    if (!acquisitionSession_)
+    {
+        return true;
+    }
+    if (acquisitionSession_->acquisition.foreignControllerDetected
+        || acquisitionSession_->acquisition.orphanRecoveryRequired)
+    {
+        return false;
+    }
+
+    if (acquisitionReceiver_)
+    {
+        acquisitionReceiver_->StopAndJoin();
+    }
+    auto snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.acquisition = GuidedTunerAcquisitionState::Stopping;
+    Publish(std::move(snapshot));
+
+    *acquisitionSession_ = fidget::StopDiagnosticAcquisition(
+        *transport_,
+        *dataReceiver_,
+        std::move(*acquisitionSession_),
+        acquisitionRequest_,
+        serviceStopRequested_);
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
+    snapshot.recoveryRecordAvailable =
+        acquisitionSession_->acquisition.recoveryJournalPrepared;
+    const bool stoppedCleanly = acquisitionSession_->acquisition.state
+        == DiagnosticAcquisitionState::Stopped;
+    snapshot.acquisition = stoppedCleanly
+        ? GuidedTunerAcquisitionState::Stopped
+        : GuidedTunerAcquisitionState::Failed;
+    snapshot.cleanupVerified = stoppedCleanly;
+    if (acquisitionSession_->acquisition.foreignControllerDetected)
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
+        RequestWatchdogStop();
+    }
+    else if (acquisitionSession_->acquisition.orphanRecoveryRequired)
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        RequestWatchdogStop();
+    }
+
+    const std::string message = acquisitionSession_->acquisition.message;
+    PublishStatus(
+        std::move(snapshot),
+        stoppedCleanly ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+        message);
+    acquisitionReceiver_.reset();
+    if (stoppedCleanly)
+    {
+        acquisitionSession_.reset();
+        acquisitionRequest_ = {};
+    }
+    return stoppedCleanly;
+}
+
+void OwnershipService::PublishDiagnosticStream(
+    DiagnosticStreamSnapshot stream)
+{
+    if (!acquisitionSession_)
+    {
+        return;
+    }
+    auto snapshot = *CurrentSnapshot();
+    if (snapshot.acquisition != GuidedTunerAcquisitionState::Running)
+    {
+        return;
+    }
+    snapshot.diagnosticStream = std::move(stream);
+    snapshot.diagnosticAcquisition.datagramsReceived =
+        snapshot.diagnosticStream.datagramsReceived;
+    snapshot.diagnosticAcquisition.bytesReceived =
+        snapshot.diagnosticStream.bytesReceived;
+    const bool receiverFailed =
+        !snapshot.diagnosticStream.receiverError.empty();
+    Publish(std::move(snapshot));
+    if (receiverFailed)
+    {
+        static_cast<void>(StopDiagnosticAcquisition());
+    }
+}
+
 void OwnershipService::ProbeController(
     TunerSnapshot snapshot,
     bool retainSession)
@@ -903,6 +1183,10 @@ void OwnershipService::ProbeController(
 
 void OwnershipService::ReleaseSession()
 {
+    if (!StopDiagnosticAcquisition())
+    {
+        return;
+    }
     if (transport_)
     {
         transport_->Close();
@@ -937,6 +1221,10 @@ void OwnershipService::ReleaseSession()
     snapshot.startupPreparationMismatches.clear();
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
+    snapshot.acquisition = GuidedTunerAcquisitionState::NotRun;
+    snapshot.cleanupVerified = false;
+    snapshot.diagnosticAcquisition = {};
+    snapshot.diagnosticStream = {};
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -1505,6 +1793,83 @@ void OwnershipService::PollWatchdog()
         || snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
     {
         RequestWatchdogStop();
+        return;
+    }
+
+    if (snapshot.acquisition == GuidedTunerAcquisitionState::Running
+        && acquisitionSession_)
+    {
+        auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+            *transport_,
+            *acquisitionSession_,
+            acquisitionSession_->nextSuperReference,
+            watchdogStopRequested_);
+        auto& acquisition = acquisitionSession_->acquisition;
+        ++acquisition.ownershipHeartbeatChecks;
+        snapshot.diagnosticAcquisition = acquisition;
+        if (fingerprint.outcome
+            == DiagnosticFingerprintOutcome::CommunicationUnavailable)
+        {
+            acquisition.communicationUncertain = true;
+            ++acquisition.commandPathFailures;
+            acquisition.message =
+                "MVLC command communication is temporarily uncertain. "
+                "Parameter writes are frozen while waveform reception "
+                "continues; the tuner will retry without declaring a "
+                "foreign takeover. Last error: " + fingerprint.message;
+            snapshot.diagnosticAcquisition = acquisition;
+            PublishStatus(
+                std::move(snapshot),
+                TunerStatusLevel::Warning,
+                acquisition.message);
+            return;
+        }
+        if (fingerprint.outcome
+            == DiagnosticFingerprintOutcome::ForeignFingerprint)
+        {
+            if (acquisitionReceiver_)
+            {
+                acquisitionReceiver_->StopAndJoin();
+            }
+            dataReceiver_->Close();
+            transport_->Close();
+            acquisition.foreignControllerDetected = true;
+            acquisition.cleanupSkippedToProtectForeignRun = true;
+            acquisition.state = DiagnosticAcquisitionState::Failed;
+            acquisition.message =
+                "Tuner ownership was lost: " + fingerprint.message
+                + " The tuner detached passively. No MDPP stop, DAQ-mode "
+                  "write, or readout-stack cleanup was sent, so a possible "
+                  "MVME run was left untouched.";
+            snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
+            snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
+            snapshot.recoveryRecordAvailable = true;
+            snapshot.diagnosticAcquisition = acquisition;
+            RequestWatchdogStop();
+            PublishStatus(
+                std::move(snapshot),
+                TunerStatusLevel::Error,
+                acquisition.message);
+            return;
+        }
+
+        if (acquisition.communicationUncertain)
+        {
+            acquisition.communicationUncertain = false;
+            ++acquisition.commandPathRecoveries;
+            acquisition.message =
+                "MVLC command communication recovered and the complete "
+                "unique tuner fingerprint still matches.";
+            snapshot.diagnosticAcquisition = acquisition;
+            PublishStatus(
+                std::move(snapshot),
+                TunerStatusLevel::Success,
+                acquisition.message);
+            return;
+        }
+        snapshot.mvlcDaqMode = fingerprint.daqMode;
+        snapshot.diagnosticAcquisition = acquisition;
+        Publish(std::move(snapshot));
         return;
     }
 

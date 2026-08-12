@@ -34,6 +34,7 @@ enum class GuidedTunerOperation
     ConfigurationCapture,
     ProfileApplication,
     StartupPreparation,
+    Acquisition,
     Other,
 };
 

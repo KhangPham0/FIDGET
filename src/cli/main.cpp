@@ -1,6 +1,7 @@
 #include "cli/CliApp.h"
 
 #include "hardware/MvlcCommandTransport.h"
+#include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"
 
 #include <cerrno>
@@ -65,7 +66,11 @@ int main(int argc, char** argv)
     interruptAction.sa_flags = 0;
     (void)sigaction(SIGINT, &interruptAction, nullptr);
     auto transport = std::make_unique<fidget::MvlcCommandTransport>();
-    fidget::OwnershipService tunerControl(std::move(transport));
+    auto dataReceiver = std::make_unique<fidget::MvlcDataReceiver>();
+    fidget::OwnershipService tunerControl(
+        std::move(transport),
+        std::move(dataReceiver),
+        fidget::DefaultTunerRecoveryJournalPath());
     const auto interrupted = [] { return InterruptRequested != 0; };
     if (parsed.options.command == fidget::CliCommand::Status)
     {

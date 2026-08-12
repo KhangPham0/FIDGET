@@ -6,13 +6,18 @@
 #include <memory>
 
 #include "hardware/MvlcCommandTransport.h"
+#include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"
 #include "ui/App.h"
 
 int main(int argc, char** argv)
 {
     auto transport = std::make_unique<fidget::MvlcCommandTransport>();
-    fidget::OwnershipService tunerControl(std::move(transport));
+    auto dataReceiver = std::make_unique<fidget::MvlcDataReceiver>();
+    fidget::OwnershipService tunerControl(
+        std::move(transport),
+        std::move(dataReceiver),
+        fidget::DefaultTunerRecoveryJournalPath());
     fidget::App app(tunerControl);
 
     // Smoke test mode: "fidget --frames N" renders N frames and exits, so a

@@ -73,6 +73,15 @@ struct RunDeterministicStartupCommand
     bool confirmed = false;
 };
 
+struct StartDiagnosticAcquisitionCommand
+{
+    std::uint16_t channel = 0U;
+};
+
+struct StopDiagnosticAcquisitionCommand
+{
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -86,6 +95,8 @@ using TunerCommand = std::variant<
     ApplyProfileRowCommand,
     ApplyAllDifferencesCommand,
     RunDeterministicStartupCommand,
+    StartDiagnosticAcquisitionCommand,
+    StopDiagnosticAcquisitionCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl
