@@ -71,6 +71,14 @@ VerifyDiagnosticOwnershipFingerprint(
     std::uint16_t& nextReference,
     const std::atomic<bool>& cancellationRequested);
 
+[[nodiscard]] DiagnosticAcquisitionPreparationResult
+StopDiagnosticAcquisition(
+    ICommandTransport& commandTransport,
+    IDataReceiver& dataReceiver,
+    DiagnosticAcquisitionPreparationResult prepared,
+    const DiagnosticAcquisitionPreparationRequest& request,
+    const std::atomic<bool>& cancellationRequested);
+
 } // namespace fidget
 
 #endif

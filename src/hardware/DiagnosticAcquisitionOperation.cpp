@@ -781,4 +781,266 @@ DiagnosticFingerprintResult VerifyDiagnosticOwnershipFingerprint(
     return result;
 }
 
+DiagnosticAcquisitionPreparationResult StopDiagnosticAcquisition(
+    ICommandTransport& commandTransport,
+    IDataReceiver& dataReceiver,
+    DiagnosticAcquisitionPreparationResult prepared,
+    const DiagnosticAcquisitionPreparationRequest& request,
+    const std::atomic<bool>& cancellationRequested)
+{
+    auto& result = prepared.acquisition;
+    result.state = DiagnosticAcquisitionState::Stopping;
+    std::string failure;
+    const auto fail = [&failure](std::string message) {
+        if (!failure.empty())
+        {
+            failure += ' ';
+        }
+        failure += std::move(message);
+    };
+    const auto writeVme = [&](const std::uint32_t baseAddress,
+                              const std::uint16_t registerOffset,
+                              const std::uint16_t value,
+                              const char* name) {
+        const auto written = WriteVmeD16(
+            commandTransport,
+            baseAddress + registerOffset,
+            value,
+            prepared.nextSuperReference,
+            prepared.nextStackReference,
+            cancellationRequested);
+        if (!written.success)
+        {
+            fail(RegisterOperationError(
+                "write", name, registerOffset, written.error));
+            return false;
+        }
+        return true;
+    };
+    const auto readVme = [&](const std::uint32_t baseAddress,
+                             const std::uint16_t registerOffset,
+                             std::uint16_t& value,
+                             const char* name) {
+        const auto read = ReadVmeD16(
+            commandTransport,
+            baseAddress + registerOffset,
+            prepared.nextSuperReference,
+            prepared.nextStackReference,
+            cancellationRequested);
+        if (!read.success)
+        {
+            fail(RegisterOperationError(
+                "read", name, registerOffset, read.error));
+            return false;
+        }
+        value = read.value;
+        return true;
+    };
+
+    const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+        commandTransport,
+        prepared,
+        prepared.nextSuperReference,
+        cancellationRequested);
+    ++result.ownershipHeartbeatChecks;
+    if (fingerprint.outcome
+        == DiagnosticFingerprintOutcome::ForeignFingerprint)
+    {
+        result.foreignControllerDetected = true;
+        result.cleanupSkippedToProtectForeignRun = true;
+        result.state = DiagnosticAcquisitionState::Failed;
+        result.message =
+            "Tuner ownership was lost: " + fingerprint.message
+            + " The tuner detached passively. No MDPP stop, DAQ-mode "
+              "write, or readout-stack cleanup was sent, so a possible "
+              "MVME run was left untouched.";
+        dataReceiver.Close();
+        commandTransport.Close();
+        return prepared;
+    }
+    if (fingerprint.outcome
+        == DiagnosticFingerprintOutcome::CommunicationUnavailable)
+    {
+        result.communicationUncertain = true;
+        ++result.commandPathFailures;
+        result.orphanRecoveryRequired = true;
+        result.state = DiagnosticAcquisitionState::Failed;
+        result.message =
+            "The command path remained unavailable, so ownership could not "
+            "be proven before cleanup. No blind hardware write was sent. "
+            "The unique tuner fingerprint is journaled for recovery. Last "
+            "error: " + fingerprint.message;
+        dataReceiver.Close();
+        commandTransport.Close();
+        return prepared;
+    }
+
+    if (writeVme(
+            result.baseAddress,
+            DiagnosticAcquisitionControlRegister,
+            0U,
+            "stop acquisition"))
+    {
+        result.moduleStopSent = true;
+        std::uint16_t stoppedReadback = 0xFFFFU;
+        if (readVme(
+                result.baseAddress,
+                DiagnosticAcquisitionControlRegister,
+                stoppedReadback,
+                "stopped acquisition")
+            && stoppedReadback != 0U)
+        {
+            fail("Selected-module acquisition-control readback was not "
+                 "zero after Stop.");
+        }
+    }
+
+    result.nonTargetModulesVerifiedStoppedOnCleanup = 0U;
+    for (auto& isolation : result.moduleIsolation)
+    {
+        if (!isolation.quiescenceAttempted)
+        {
+            continue;
+        }
+        std::uint16_t acquisitionReadback = 0xFFFFU;
+        const std::size_t failureLengthBefore = failure.size();
+        if (!readVme(
+                isolation.baseAddress,
+                DiagnosticAcquisitionControlRegister,
+                acquisitionReadback,
+                "non-target acquisition state during cleanup"))
+        {
+            isolation.message = failure.substr(failureLengthBefore);
+            continue;
+        }
+
+        const bool restarted = acquisitionReadback != 0U;
+        if (restarted)
+        {
+            isolation.stopRequired = true;
+            isolation.stopSent = writeVme(
+                isolation.baseAddress,
+                DiagnosticAcquisitionControlRegister,
+                0U,
+                "non-target stop during cleanup");
+            if (isolation.stopSent)
+            {
+                static_cast<void>(readVme(
+                    isolation.baseAddress,
+                    DiagnosticAcquisitionControlRegister,
+                    acquisitionReadback,
+                    "non-target stopped state during cleanup"));
+            }
+        }
+        isolation.acquisitionStateAfter = acquisitionReadback;
+        isolation.stopVerified = acquisitionReadback == 0U;
+        if (isolation.stopVerified && restarted)
+        {
+            isolation.fifoResetSent = writeVme(
+                isolation.baseAddress,
+                DiagnosticFifoResetRegister,
+                1U,
+                "non-target FIFO reset during cleanup");
+            isolation.readoutResetSent = writeVme(
+                isolation.baseAddress,
+                DiagnosticReadoutResetRegister,
+                1U,
+                "non-target readout reset during cleanup");
+        }
+        isolation.cleanupVerified = isolation.stopVerified
+            && isolation.fifoResetSent && isolation.readoutResetSent;
+        if (isolation.cleanupVerified)
+        {
+            ++result.nonTargetModulesVerifiedStoppedOnCleanup;
+            isolation.message = restarted
+                ? "Unexpectedly restarted, then stopped, reset, and "
+                  "verified during cleanup."
+                : "Verified stopped during cleanup.";
+        }
+        else
+        {
+            fail("Non-target cleanup failed at "
+                 + Hexadecimal32(isolation.baseAddress) + ".");
+        }
+    }
+
+    const std::array<MvlcLocalRegisterWrite, 4> cleanupWrites{{
+        {DiagnosticDaqModeRegister, 0U},
+        {prepared.readoutPlan.stackTriggerRegister, 0U},
+        {prepared.readoutPlan.stackOffsetRegister, 0U},
+        {prepared.recoveryRecord.ownershipTokenRegister, 0U},
+    }};
+    const auto cleaned = WriteLocalRegisters(
+        commandTransport,
+        cleanupWrites.data(),
+        cleanupWrites.size(),
+        prepared.nextSuperReference,
+        cancellationRequested);
+    if (!cleaned.success)
+    {
+        fail("Could not disable MVLC DAQ mode and the diagnostic stack: "
+             + cleaned.error);
+    }
+    else
+    {
+        bool allZero = true;
+        for (const auto& cleanup : cleanupWrites)
+        {
+            const auto readback = ReadLocalRegisters(
+                commandTransport,
+                &cleanup.address,
+                1U,
+                prepared.nextSuperReference,
+                cancellationRequested);
+            if (!readback.success || readback.values.empty()
+                || readback.values.front() != 0U)
+            {
+                allZero = false;
+                fail(readback.success
+                    ? "MVLC cleanup readback was not zero."
+                    : "Could not verify MVLC cleanup: " + readback.error);
+                break;
+            }
+        }
+        result.daqModeDisabled = allZero;
+        result.readoutStackDisabled = allZero;
+    }
+
+    dataReceiver.Close();
+    const bool stoppedCleanly = failure.empty()
+        && result.moduleStopSent
+        && result.daqModeDisabled
+        && result.readoutStackDisabled
+        && result.nonTargetModulesVerifiedStoppedOnCleanup
+            == result.nonTargetModulesQuiesced;
+    if (stoppedCleanly)
+    {
+        std::string journalError;
+        if (!RemoveTunerRecoveryJournal(
+                request.recoveryJournalPath, journalError))
+        {
+            fail("Hardware stopped cleanly, but the recovery journal could "
+                 "not be removed: " + journalError);
+        }
+        else
+        {
+            result.recoveryJournalRemoved = true;
+            result.recoveryJournalPrepared = false;
+            result.recoveryJournalActive = false;
+        }
+    }
+
+    result.state = failure.empty() && stoppedCleanly
+        ? DiagnosticAcquisitionState::Stopped
+        : DiagnosticAcquisitionState::Failed;
+    result.message = result.state == DiagnosticAcquisitionState::Stopped
+        ? "Direct acquisition stopped cleanly. The selected MDPP and all "
+          "isolated non-target modules are stopped, MVLC DAQ mode is zero, "
+          "and the diagnostic stack is disabled."
+        : failure.empty()
+            ? "Direct acquisition cleanup did not pass every readback check."
+            : failure;
+    return prepared;
+}
+
 } // namespace fidget

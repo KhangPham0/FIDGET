@@ -771,3 +771,237 @@ TEST_CASE("a changed token is classified as a foreign fingerprint")
           == "Unique tuner ownership token changed at 0x0000221C: expected "
              "0xA55A1234, read 0x11112222.");
 }
+
+TEST_CASE("normal stop verifies zeros before removing the recovery journal")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences queued{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, queued);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+    prepared.acquisition.state = DiagnosticAcquisitionState::Running;
+    prepared.acquisition.recoveryJournalActive = true;
+    prepared.recoveryRecord.phase = TunerRecoveryPhase::Active;
+    REQUIRE(SaveTunerRecoveryJournal(
+        prepared.recoveryRecord, journal.Get()).success);
+
+    const auto addresses = FingerprintAddresses(prepared);
+    const auto values = FingerprintValues(prepared);
+    QueueFingerprintRead(
+        transport, prepared.nextSuperReference, addresses, values);
+    ++queued.super;
+    CHECK(prepared.nextSuperReference == queued.super - 1U);
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueRead(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueLocalWrite(
+        transport,
+        queued,
+        {
+            {DiagnosticDaqModeRegister, 0U},
+            {0x1104U, 0U},
+            {0x1204U, 0U},
+            {0x221CU, 0U},
+        });
+    QueueLocalRead(transport, queued, DiagnosticDaqModeRegister, 0U);
+    QueueLocalRead(transport, queued, 0x1104U, 0U);
+    QueueLocalRead(transport, queued, 0x1204U, 0U);
+    QueueLocalRead(transport, queued, 0x221CU, 0U);
+
+    FakeDataReceiver dataReceiver;
+    REQUIRE(dataReceiver.Open("mvlc-test", 32769U).success);
+    prepared = StopDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Stopped);
+    CHECK(prepared.acquisition.moduleStopSent);
+    CHECK(prepared.acquisition.daqModeDisabled);
+    CHECK(prepared.acquisition.readoutStackDisabled);
+    CHECK(prepared.acquisition.recoveryJournalRemoved);
+    CHECK_FALSE(prepared.acquisition.recoveryJournalPrepared);
+    CHECK_FALSE(prepared.acquisition.recoveryJournalActive);
+    CHECK_FALSE(dataReceiver.IsOpen());
+    CHECK_FALSE(std::filesystem::exists(journal.Get()));
+    CHECK(prepared.nextSuperReference == queued.super);
+    CHECK(prepared.nextStackReference == queued.stack);
+}
+
+TEST_CASE("takeover at stop detaches without cleanup and retains the journal")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+    prepared.acquisition.state = DiagnosticAcquisitionState::Running;
+    prepared.acquisition.recoveryJournalActive = true;
+    prepared.recoveryRecord.phase = TunerRecoveryPhase::Active;
+    REQUIRE(SaveTunerRecoveryJournal(
+        prepared.recoveryRecord, journal.Get()).success);
+
+    const auto addresses = FingerprintAddresses(prepared);
+    auto values = FingerprintValues(prepared);
+    values[1] = 0U;
+    QueueFingerprintRead(
+        transport, prepared.nextSuperReference, addresses, values);
+    const auto sendsBeforeStop = transport.SentRequests().size();
+
+    FakeDataReceiver dataReceiver;
+    REQUIRE(dataReceiver.Open("mvlc-test", 32769U).success);
+    prepared = StopDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.foreignControllerDetected);
+    CHECK(prepared.acquisition.cleanupSkippedToProtectForeignRun);
+    CHECK_FALSE(prepared.acquisition.moduleStopSent);
+    CHECK_FALSE(prepared.acquisition.recoveryJournalRemoved);
+    CHECK(std::filesystem::exists(journal.Get()));
+    CHECK_FALSE(dataReceiver.IsOpen());
+    CHECK_FALSE(transport.IsOpen());
+    CHECK(transport.SentRequests().size() == sendsBeforeStop + 1U);
+
+    const auto operations = DecodeWireOperations(transport);
+    for (const auto& operation : operations)
+    {
+        if (operation.write)
+        {
+            CHECK(operation.address
+                  != TargetBase + DiagnosticAcquisitionControlRegister);
+        }
+    }
+}
+
+TEST_CASE("a restarted isolated module is stopped and reset during cleanup")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences queued{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, queued);
+    QueueIsolationCapture(transport, queued, 0U, 0U);
+    QueueIsolationWrites(transport, queued, false);
+    auto request = MakeRequest(journal.Get());
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    REQUIRE(prepared.acquisition.recoveryJournalPrepared);
+    prepared.acquisition.state = DiagnosticAcquisitionState::Running;
+    prepared.acquisition.recoveryJournalActive = true;
+    prepared.recoveryRecord.phase = TunerRecoveryPhase::Active;
+    REQUIRE(SaveTunerRecoveryJournal(
+        prepared.recoveryRecord, journal.Get()).success);
+
+    QueueFingerprintRead(
+        transport,
+        prepared.nextSuperReference,
+        FingerprintAddresses(prepared),
+        FingerprintValues(prepared));
+    ++queued.super;
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueRead(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueRead(
+        transport,
+        queued,
+        OtherBase + DiagnosticAcquisitionControlRegister,
+        1U);
+    QueueWrite(
+        transport,
+        queued,
+        OtherBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueRead(
+        transport,
+        queued,
+        OtherBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueWrite(
+        transport,
+        queued,
+        OtherBase + DiagnosticFifoResetRegister,
+        1U);
+    QueueWrite(
+        transport,
+        queued,
+        OtherBase + DiagnosticReadoutResetRegister,
+        1U);
+    QueueLocalWrite(
+        transport,
+        queued,
+        {
+            {DiagnosticDaqModeRegister, 0U},
+            {0x1104U, 0U},
+            {0x1204U, 0U},
+            {0x221CU, 0U},
+        });
+    QueueLocalRead(transport, queued, DiagnosticDaqModeRegister, 0U);
+    QueueLocalRead(transport, queued, 0x1104U, 0U);
+    QueueLocalRead(transport, queued, 0x1204U, 0U);
+    QueueLocalRead(transport, queued, 0x221CU, 0U);
+
+    FakeDataReceiver dataReceiver;
+    REQUIRE(dataReceiver.Open("mvlc-test", 32769U).success);
+    prepared = StopDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Stopped);
+    CHECK(prepared.acquisition.nonTargetModulesVerifiedStoppedOnCleanup == 1U);
+    REQUIRE(prepared.acquisition.moduleIsolation.size() == 1U);
+    const auto& isolated = prepared.acquisition.moduleIsolation.front();
+    CHECK(isolated.stopSent);
+    CHECK(isolated.stopVerified);
+    CHECK(isolated.fifoResetSent);
+    CHECK(isolated.readoutResetSent);
+    CHECK(isolated.cleanupVerified);
+    CHECK(isolated.message
+          == "Unexpectedly restarted, then stopped, reset, and verified "
+             "during cleanup.");
+}
