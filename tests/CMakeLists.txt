@@ -174,6 +174,21 @@ add_test(
     COMMAND diagnostic_acquisition_operation_tests
 )
 
+add_executable(
+    diagnostic_acquisition_lifecycle_tests
+    diagnostic_acquisition_lifecycle_tests.cpp
+)
+target_link_libraries(diagnostic_acquisition_lifecycle_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
+)
+
+add_test(
+    NAME diagnostic_acquisition_lifecycle_tests
+    COMMAND diagnostic_acquisition_lifecycle_tests
+)
+
 add_executable(ownership_service_tests ownership_service_tests.cpp)
 target_link_libraries(ownership_service_tests PRIVATE
     fidget_hardware
