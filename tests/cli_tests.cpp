@@ -502,6 +502,65 @@ public:
             next.diagnosticAcquisition.recoveryJournalRemoved = true;
             next.diagnosticStream.receiverRunning = false;
         }
+        else if (const auto* source = std::get_if<
+                     fidget::ChangeDiagnosticSourceCommand>(&command))
+        {
+            ++sourceChangeCommands;
+            next.diagnosticSourceChange = {};
+            next.diagnosticSourceChange.state =
+                fidget::DiagnosticSourceChangeState::Passed;
+            next.diagnosticSourceChange.message =
+                "Waveform source applied and acquisition resumed.";
+            next.diagnosticSourceChange.selectedQuad =
+                static_cast<std::uint16_t>(
+                    next.diagnosticAcquisition.requestedChannel / 4U);
+            next.diagnosticSourceChange.requestedSource = source->source;
+            next.diagnosticSourceChange.originalConfiguration = 0x00C1U;
+            next.diagnosticSourceChange.requestedConfiguration =
+                static_cast<std::uint16_t>(0x00C0U | source->source);
+            next.diagnosticSourceChange.appliedReadback =
+                next.diagnosticSourceChange.requestedConfiguration;
+            next.diagnosticSourceChange.writeVerified = true;
+            next.diagnosticSourceChange.selectorParkedAtQuadZero = true;
+            next.diagnosticSourceChange.acquisitionResumed = true;
+            next.diagnosticSourceChange.daqModeResumed = true;
+        }
+        else if (const auto* preview = std::get_if<
+                     fidget::ApplyDiagnosticPreviewCommand>(&command))
+        {
+            ++previewCommands;
+            next.diagnosticParameterPreview = {};
+            next.diagnosticParameterPreview.state =
+                fidget::DiagnosticParameterPreviewState::PreviewActive;
+            next.diagnosticParameterPreview.message =
+                "Gain preview applied and verified; acquisition resumed.";
+            next.diagnosticParameterPreview.selectedQuad =
+                static_cast<std::uint16_t>(
+                    next.diagnosticAcquisition.requestedChannel / 4U);
+            next.diagnosticParameterPreview.registerOffset =
+                preview->registerOffset;
+            next.diagnosticParameterPreview.settingName = "Gain";
+            next.diagnosticParameterPreview.originalValue = 200U;
+            next.diagnosticParameterPreview.requestedValue = preview->value;
+            next.diagnosticParameterPreview.appliedReadback = preview->value;
+            next.diagnosticParameterPreview.applyDurationMicroseconds = 75U;
+            next.diagnosticParameterPreview.originalCaptured = true;
+            next.diagnosticParameterPreview.writeVerified = true;
+            next.diagnosticParameterPreview.previewActive = true;
+        }
+        else if (std::holds_alternative<
+                     fidget::RestoreDiagnosticPreviewCommand>(command))
+        {
+            ++restorePreviewCommands;
+            auto& preview = next.diagnosticParameterPreview;
+            preview.state =
+                fidget::DiagnosticParameterPreviewState::Restored;
+            preview.message = "Original Gain restored and verified.";
+            preview.restoredReadback = preview.originalValue;
+            preview.restoreDurationMicroseconds = 80U;
+            preview.previewActive = false;
+            preview.restoreVerified = true;
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -525,6 +584,9 @@ public:
     int startupCommands = 0;
     int startAcquisitionCommands = 0;
     int stopAcquisitionCommands = 0;
+    int sourceChangeCommands = 0;
+    int previewCommands = 0;
+    int restorePreviewCommands = 0;
     int releaseCommands = 0;
     std::string savedPath;
     std::string loadedPath;
@@ -1460,6 +1522,109 @@ TEST_CASE("acquire dumps the latest requested-channel waveform as CSV")
           == "sample_index,value\n0,-2\n1,10\n2,100\n3,-100\n");
     CHECK(output.str().find("waveform_csv: " + csv.path + '\n')
           != std::string::npos);
+}
+
+TEST_CASE("acquire accepts source preview restore and Enter commands")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\ns2\np 0x611A 250\nr\n\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+    std::size_t inputWaits = 0U;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [&inputWaits] {
+            ++inputWaits;
+            return fidget::CliSessionWaitResult::InputReady;
+        });
+
+    CHECK(exitCode == 0);
+    CHECK(inputWaits == 4U);
+    CHECK(control.sourceChangeCommands == 1);
+    CHECK(control.previewCommands == 1);
+    CHECK(control.restorePreviewCommands == 1);
+    CHECK(control.stopAcquisitionCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find(
+              "source_change: state=passed quad=7 source=2")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "parameter_preview: state=active quad=7 register=0x611A")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "parameter_preview: state=restored quad=7 register=0x611A")
+          != std::string::npos);
+}
+
+TEST_CASE("invalid acquire mini command keeps monitoring without hardware")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\np 0x6148 399\n\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.previewCommands == 0);
+    CHECK(control.stopAcquisitionCommands == 1);
+    CHECK(errors.str().find("must be an even number of samples")
+          != std::string::npos);
+}
+
+TEST_CASE("SIGINT after a tune command still stops and releases in order")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input("yes\ny\ns3\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [&control] { return control.sourceChangeCommands > 0; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 130);
+    CHECK(control.sourceChangeCommands == 1);
+    CHECK(control.stopAcquisitionCommands == 1);
+    CHECK(control.releaseCommands == 1);
+    CHECK(output.str().find("session: released\n") != std::string::npos);
 }
 
 TEST_CASE("acquire defaults to no before startup and releases")

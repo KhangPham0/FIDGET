@@ -17,6 +17,7 @@
 #include <istream>
 #include <limits>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -746,6 +747,177 @@ void PrintCleanupResult(
            << " journal_removed="
            << (result.recoveryJournalRemoved ? "yes" : "no") << '\n'
            << "cleanup_message: " << result.message << '\n';
+}
+
+void PrintSourceChange(
+    std::ostream& output,
+    const DiagnosticSourceChangeResult& result)
+{
+    output << "source_change: state="
+           << (result.state == DiagnosticSourceChangeState::Passed
+                   ? "passed"
+                   : "failed")
+           << " quad=" << result.selectedQuad
+           << " source=" << static_cast<unsigned>(result.requestedSource)
+           << " config=0x" << std::uppercase << std::hex
+           << std::setw(4) << std::setfill('0')
+           << result.originalConfiguration << "->0x"
+           << std::setw(4) << result.requestedConfiguration
+           << " readback=0x" << std::setw(4) << result.appliedReadback
+           << std::dec << std::nouppercase << std::setfill(' ')
+           << " parked="
+           << (result.selectorParkedAtQuadZero ? "yes" : "no")
+           << " resumed="
+           << (result.acquisitionResumed && result.daqModeResumed
+                   ? "yes"
+                   : "no")
+           << '\n'
+           << "source_message: " << result.message << '\n';
+}
+
+void PrintParameterPreview(
+    std::ostream& output,
+    const DiagnosticParameterPreviewResult& result)
+{
+    const char* state = "failed";
+    if (result.state == DiagnosticParameterPreviewState::PreviewActive)
+    {
+        state = "active";
+    }
+    else if (result.state == DiagnosticParameterPreviewState::Restored)
+    {
+        state = "restored";
+    }
+    output << "parameter_preview: state=" << state
+           << " quad=" << result.selectedQuad
+           << " register=0x" << std::uppercase << std::hex
+           << std::setw(4) << std::setfill('0') << result.registerOffset
+           << std::dec << std::nouppercase << std::setfill(' ')
+           << " setting=\"" << result.settingName << "\""
+           << " original=" << result.originalValue
+           << " preview=" << result.requestedValue
+           << " apply_readback=" << result.appliedReadback
+           << " restore_readback=" << result.restoredReadback
+           << " apply_us=" << result.applyDurationMicroseconds
+           << " restore_us=" << result.restoreDurationMicroseconds
+           << '\n'
+           << "preview_message: " << result.message << '\n';
+}
+
+bool ParseAcquisitionCommand(
+    const std::string& line,
+    ITunerControl& tunerControl,
+    std::ostream& output,
+    std::ostream& errorOutput)
+{
+    if (line.size() == 2U && line[0] == 's'
+        && line[1] >= '0' && line[1] <= '3')
+    {
+        const auto source = static_cast<std::uint8_t>(line[1] - '0');
+        const auto before = tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(ChangeDiagnosticSourceCommand{source});
+        if (!WaitForRevision(
+                tunerControl,
+                before,
+                [](const TunerSnapshot& snapshot) {
+                    return snapshot.diagnosticSourceChange.state
+                            == DiagnosticSourceChangeState::Passed
+                        || snapshot.diagnosticSourceChange.state
+                            == DiagnosticSourceChangeState::Failed;
+                },
+                AcquisitionCompletionTimeout))
+        {
+            errorOutput << "error: source change timed out\n";
+            return false;
+        }
+        PrintSourceChange(
+            output,
+            tunerControl.CurrentSnapshot()->diagnosticSourceChange);
+        return true;
+    }
+    if (line == "r")
+    {
+        const auto before = tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(RestoreDiagnosticPreviewCommand{});
+        if (!WaitForRevision(
+                tunerControl,
+                before,
+                [](const TunerSnapshot& snapshot) {
+                    return snapshot.diagnosticParameterPreview.state
+                            == DiagnosticParameterPreviewState::Restored
+                        || snapshot.diagnosticParameterPreview.state
+                            == DiagnosticParameterPreviewState::Failed;
+                },
+                AcquisitionCompletionTimeout))
+        {
+            errorOutput << "error: parameter restore timed out\n";
+            return false;
+        }
+        PrintParameterPreview(
+            output,
+            tunerControl.CurrentSnapshot()->diagnosticParameterPreview);
+        return true;
+    }
+    if (line.size() > 2U && line[0] == 'p' && line[1] == ' ')
+    {
+        std::istringstream fields(line.substr(2U));
+        std::string registerText;
+        std::string valueText;
+        std::string trailing;
+        if (!(fields >> registerText >> valueText) || fields >> trailing)
+        {
+            errorOutput << "error: preview syntax is p <register> <value>\n";
+            return true;
+        }
+        std::uint16_t registerOffset = 0U;
+        std::uint64_t value = 0U;
+        if (!ParseRegisterOffset(registerText, registerOffset)
+            || !ParseUnsigned(valueText, 0xFFFFU, value))
+        {
+            errorOutput << "error: invalid preview register or value\n";
+            return true;
+        }
+        const auto* definition = FindFw2051ScpSetting(registerOffset);
+        if (definition == nullptr)
+        {
+            errorOutput << "error: preview register is not in the FW2051 SCP registry\n";
+            return true;
+        }
+        const auto validation = ValidateFw2051ScpSettingValue(
+            *definition, static_cast<std::uint16_t>(value), "preview ");
+        if (!validation.empty())
+        {
+            errorOutput << "error: " << validation << '\n';
+            return true;
+        }
+        const auto before = tunerControl.CurrentSnapshot()->revision;
+        tunerControl.Submit(ApplyDiagnosticPreviewCommand{
+            registerOffset,
+            static_cast<std::uint16_t>(value),
+        });
+        if (!WaitForRevision(
+                tunerControl,
+                before,
+                [](const TunerSnapshot& snapshot) {
+                    return snapshot.diagnosticParameterPreview.state
+                            == DiagnosticParameterPreviewState::PreviewActive
+                        || snapshot.diagnosticParameterPreview.state
+                            == DiagnosticParameterPreviewState::Failed;
+                },
+                AcquisitionCompletionTimeout))
+        {
+            errorOutput << "error: parameter preview timed out\n";
+            return false;
+        }
+        PrintParameterPreview(
+            output,
+            tunerControl.CurrentSnapshot()->diagnosticParameterPreview);
+        return true;
+    }
+
+    errorOutput
+        << "error: acquisition command must be s0-s3, p <register> <value>, r, or an empty line to stop\n";
+    return true;
 }
 
 bool DumpRequestedWaveformCsv(
@@ -2136,6 +2308,9 @@ int RunCliAcquire(
                        << *options.channel << '\n';
                 PrintAcquisitionIsolation(
                     output, snapshot->diagnosticAcquisition);
+                output << "acquisition_commands: s0-s3 source | "
+                          "p <register> <value> preview | r restore | "
+                          "Enter stop\n";
                 std::uint32_t elapsedIntervals = 0U;
                 while (!(interruptRequested && interruptRequested()))
                 {
@@ -2165,9 +2340,29 @@ int RunCliAcquire(
                     }
                     if (waited == CliSessionWaitResult::InputReady)
                     {
-                        std::string ignored;
-                        static_cast<void>(std::getline(input, ignored));
-                        break;
+                        std::string commandLine;
+                        if (!std::getline(input, commandLine)
+                            || commandLine.empty())
+                        {
+                            break;
+                        }
+                        if (!ParseAcquisitionCommand(
+                                commandLine,
+                                tunerControl,
+                                output,
+                                errorOutput))
+                        {
+                            result = 1;
+                            break;
+                        }
+                        snapshot = tunerControl.CurrentSnapshot();
+                        if (snapshot->acquisition
+                            != GuidedTunerAcquisitionState::Running)
+                        {
+                            result = 1;
+                            break;
+                        }
+                        continue;
                     }
                     errorOutput << "error: acquisition input wait failed\n";
                     result = 1;
