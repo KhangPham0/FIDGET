@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # GCC 8 implements C++17 filesystem in a separate compatibility library.
-# Keep this off fidget_core itself so the core architecture boundary remains
-# explicit, and place it after the core archive at final link sites.
+# src/core attaches it to fidget_core as a PUBLIC usage requirement so the
+# linker always sees it after the core archive, for every consumer.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
     set(FIDGET_CXX17_FILESYSTEM_LIBRARY stdc++fs)

@@ -51,7 +51,6 @@ add_executable(recovery_journal_tests recovery_journal_tests.cpp)
 target_link_libraries(recovery_journal_tests PRIVATE
     fidget_core
     doctest::doctest
-    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 add_test(NAME recovery_journal_tests COMMAND recovery_journal_tests)
@@ -166,7 +165,6 @@ add_executable(
 target_link_libraries(diagnostic_acquisition_operation_tests PRIVATE
     fidget_hardware
     doctest::doctest
-    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 add_test(
@@ -181,7 +179,6 @@ add_executable(
 target_link_libraries(diagnostic_acquisition_lifecycle_tests PRIVATE
     fidget_hardware
     doctest::doctest
-    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 add_test(

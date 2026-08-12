@@ -34,7 +34,6 @@ target_link_libraries(fidget PRIVATE
     fidget_hardware
     implot
     OpenGL::GL
-    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

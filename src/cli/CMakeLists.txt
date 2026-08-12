@@ -9,7 +9,6 @@ add_executable(fidget_cli main.cpp)
 target_link_libraries(fidget_cli PRIVATE
     fidget_cli_support
     fidget_hardware
-    ${FIDGET_CXX17_FILESYSTEM_LIBRARY}
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
