@@ -3,6 +3,7 @@ add_library(fidget_core STATIC
     GuidedWorkflow.cpp
     ReadoutProtocol.cpp
     RecoveryJournal.cpp
+    RecoveryVerification.cpp
     ScpProfile.cpp
     ScpRegistry.cpp
     ScpTransactionPlan.cpp
