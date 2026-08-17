@@ -24,6 +24,7 @@ enum class CliCommand
     Startup,
     Acquire,
     Recover,
+    Export,
 };
 
 enum class CliSessionWaitResult
@@ -48,6 +49,7 @@ struct CliOptions
     std::optional<std::uint16_t> channel;
     std::optional<std::uint32_t> seconds;
     std::string dumpCsvPath;
+    std::string outputPath;
     bool showHelp = false;
 };
 
@@ -138,6 +140,12 @@ using CliWaitForSessionInput = std::function<CliSessionWaitResult()>;
     std::ostream& output,
     std::ostream& errorOutput,
     const CliInterruptRequested& interruptRequested);
+
+[[nodiscard]] int RunCliExport(
+    const CliOptions& options,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput);
 
 } // namespace fidget
 

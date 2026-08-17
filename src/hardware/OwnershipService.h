@@ -79,6 +79,7 @@ private:
     void CaptureConfiguration();
     void SaveProfile(const std::string& path);
     void LoadProfile(const std::string& path);
+    void ExportMvmeScript(const ExportMvmeScriptCommand& command);
     void ApplyProfileRow(const ApplyProfileRowCommand& command);
     void ApplyAllDifferences();
     void RunDeterministicStartup(

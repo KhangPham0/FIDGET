@@ -1,7 +1,10 @@
 #include "cli/CliApp.h"
 
+#include "core/ActivityLog.h"
 #include "core/CrateProject.h"
 #include "core/DeterministicStartup.h"
+#include "core/MvmeExport.h"
+#include "core/MvmeExportFile.h"
 #include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
 #include "core/ScpTransactionPlan.h"
@@ -1006,6 +1009,8 @@ const char* FidgetCliUsage() noexcept
         "FILE [options]\n"
         "  fidget_cli acquire --project FILE --channel N [options]\n"
         "  fidget_cli recover --project FILE [--module N]\n"
+        "  fidget_cli export --profile FILE --out FILE\n"
+        "    Export is offline and never contacts crate hardware.\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -1014,12 +1019,13 @@ const char* FidgetCliUsage() noexcept
         "  --module N      Select the one-based project module (default 1)\n"
         "  --save FILE     Save a successful capture as an SCP profile\n"
         "  --profile FILE  Load this SCP profile for compare, apply, or "
-        "startup; override the project profile for acquire\n"
+        "startup, or export; override the project profile for acquire\n"
         "  --register OFF  Select a banked register, decimal or 0x-prefixed\n"
         "  --quad N        Select channel quad 0 through 7\n"
         "  --channel N     Select physical channel 0 through 31\n"
         "  --seconds N     Stop acquisition after N status intervals\n"
         "  --dump-csv FILE Write the latest requested-channel waveform\n"
+        "  --out FILE      Write an offline MVME settings export\n"
         "  -h, --help      Show this help\n";
 }
 
@@ -1081,6 +1087,10 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.options.command = CliCommand::Recover;
     }
+    else if (command == "export")
+    {
+        result.options.command = CliCommand::Export;
+    }
     else
     {
         result.error = "unknown command '" + std::string(command) + "'";
@@ -1105,7 +1115,8 @@ CliOptionsParseResult ParseCliOptions(
             && option != "--quad"
             && option != "--channel"
             && option != "--seconds"
-            && option != "--dump-csv")
+            && option != "--dump-csv"
+            && option != "--out")
         {
             result.error = "unknown option '" + std::string(option) + "'";
             return result;
@@ -1205,13 +1216,18 @@ CliOptionsParseResult ParseCliOptions(
             }
             result.options.seconds = static_cast<std::uint32_t>(seconds);
         }
-        else
+        else if (option == "--dump-csv")
         {
             result.options.dumpCsvPath = value;
+        }
+        else
+        {
+            result.options.outputPath = value;
         }
     }
 
     if (result.options.projectPath.empty() && result.options.host.empty()
+        && result.options.command != CliCommand::Export
         && !result.options.showHelp)
     {
         result.error = std::string(command)
@@ -1235,16 +1251,18 @@ CliOptionsParseResult ParseCliOptions(
         && result.options.command != CliCommand::Apply
         && result.options.command != CliCommand::ApplyAll
         && result.options.command != CliCommand::Startup
-        && result.options.command != CliCommand::Acquire)
+        && result.options.command != CliCommand::Acquire
+        && result.options.command != CliCommand::Export)
     {
         result.error =
-            "--profile is valid only for compare, apply, startup, or acquire";
+            "--profile is valid only for compare, apply, startup, acquire, or export";
         return result;
     }
     if ((result.options.command == CliCommand::Compare
          || result.options.command == CliCommand::Apply
          || result.options.command == CliCommand::ApplyAll
-         || result.options.command == CliCommand::Startup)
+         || result.options.command == CliCommand::Startup
+         || result.options.command == CliCommand::Export)
         && result.options.profilePath.empty()
         && !result.options.showHelp)
     {
@@ -1276,6 +1294,18 @@ CliOptionsParseResult ParseCliOptions(
         && !result.options.channel && !result.options.showHelp)
     {
         result.error = "acquire requires --channel N";
+        return result;
+    }
+    if (!result.options.outputPath.empty()
+        && result.options.command != CliCommand::Export)
+    {
+        result.error = "--out is valid only for export";
+        return result;
+    }
+    if (result.options.command == CliCommand::Export
+        && result.options.outputPath.empty() && !result.options.showHelp)
+    {
+        result.error = "export requires --out FILE";
         return result;
     }
 
@@ -2639,6 +2669,82 @@ int RunCliRecover(
                 == DiagnosticOrphanRecoveryState::AlreadyClean
         ? 0
         : 1;
+}
+
+int RunCliExport(
+    const CliOptions& options,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput)
+{
+    const auto loaded = LoadFw2051ScpProfile(options.profilePath);
+    if (!loaded.success || !loaded.profile)
+    {
+        errorOutput << "error: SCP profile load failed: "
+                    << loaded.message << '\n';
+        return 1;
+    }
+
+    const std::string timestamp = FormatActivityLogTimestamp(
+        std::chrono::system_clock::now());
+    const auto generated = GenerateFw2051MvmeScript(
+        *loaded.profile, timestamp);
+    if (!generated.success)
+    {
+        errorOutput << "error: MVME export generation failed: "
+                    << generated.message << '\n';
+        return 1;
+    }
+
+    auto saved = SaveMvmeExportText(
+        generated.text, options.outputPath, false);
+    if (saved.outputAlreadyExists)
+    {
+        output << "MVME export already exists. Overwrite '"
+               << options.outputPath << "' [y/N]: " << std::flush;
+        std::string confirmation;
+        if (!ReadPromptResponse(input, confirmation)
+            || !TransactionConfirmedByUser(std::move(confirmation)))
+        {
+            output << "export: not written\n";
+            return 1;
+        }
+        saved = SaveMvmeExportText(
+            generated.text, options.outputPath, true);
+    }
+    if (!saved.success)
+    {
+        errorOutput << "error: MVME export failed: "
+                    << saved.message << '\n';
+        return 1;
+    }
+
+    output << "export_manifest: checksum="
+           << generated.sourceProfileChecksum
+           << " hardware=0x"
+           << std::uppercase << std::hex << std::setw(4)
+           << std::setfill('0')
+           << loaded.profile->configuration.hardwareId
+           << " firmware=0x" << std::setw(4)
+           << loaded.profile->configuration.firmwareRevision
+           << " base=0x" << std::setw(8)
+           << loaded.profile->configuration.baseAddress
+           << std::dec << std::nouppercase << std::setfill(' ')
+           << " values=" << generated.valueCount
+           << " generated=" << timestamp << '\n'
+           << "export_output: " << options.outputPath << '\n';
+
+    ActivityLog log;
+    log.Append({
+        std::chrono::system_clock::now(),
+        ActivityLogCategory::Export,
+        TunerStatusLevel::Success,
+        saved.message,
+        std::nullopt,
+    });
+    output << "activity: "
+           << FormatActivityLogEntry(log.Entries().back()) << '\n';
+    return 0;
 }
 
 } // namespace fidget

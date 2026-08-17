@@ -2,6 +2,8 @@
 
 #include "core/ActivityLogFile.h"
 #include "core/CrateProject.h"
+#include "core/MvmeExport.h"
+#include "core/MvmeExportFile.h"
 #include "core/RecoveryJournal.h"
 #include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
@@ -169,6 +171,14 @@ void OwnershipService::Submit(TunerCommand command)
     {
         const std::string path = load->path;
         (void)worker_.Post([this, path] { LoadProfile(path); });
+        return;
+    }
+    if (const auto* exportCommand =
+            std::get_if<ExportMvmeScriptCommand>(&command))
+    {
+        const auto request = *exportCommand;
+        (void)worker_.Post(
+            [this, request] { ExportMvmeScript(request); });
         return;
     }
     if (const auto* apply = std::get_if<ApplyProfileRowCommand>(&command))
@@ -627,6 +637,9 @@ void OwnershipService::LoadProfile(const std::string& path)
     snapshot.profileLoadedForTarget = false;
     snapshot.loadedProfilePath.clear();
     snapshot.loadedProfile = {};
+    snapshot.mvmeExportSucceeded = false;
+    snapshot.mvmeExportPath.clear();
+    snapshot.mvmeExportMessage.clear();
     snapshot.singleRepairResult = {};
     snapshot.bulkApplyResult = {};
     snapshot.deterministicStartupPassed = false;
@@ -671,6 +684,55 @@ void OwnershipService::LoadProfile(const std::string& path)
         ActivityLogCategory::Capture,
         TunerStatusLevel::Success,
         loaded.message);
+}
+
+void OwnershipService::ExportMvmeScript(
+    const ExportMvmeScriptCommand& command)
+{
+    auto snapshot = *CurrentSnapshot();
+    snapshot.mvmeExportSucceeded = false;
+    snapshot.mvmeExportPath = command.path;
+    snapshot.mvmeExportMessage.clear();
+    if (!snapshot.profileLoaded)
+    {
+        const std::string message =
+            "Load a validated FW2051 SCP profile before exporting for MVME.";
+        snapshot.mvmeExportMessage = message;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Export,
+            TunerStatusLevel::Warning,
+            message);
+        return;
+    }
+
+    const auto generated = GenerateFw2051MvmeScript(
+        snapshot.loadedProfile,
+        FormatActivityLogTimestamp(std::chrono::system_clock::now()));
+    if (!generated.success)
+    {
+        snapshot.mvmeExportMessage = generated.message;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Export,
+            TunerStatusLevel::Error,
+            generated.message);
+        return;
+    }
+
+    const auto saved = SaveMvmeExportText(
+        generated.text, command.path, command.allowOverwrite);
+    snapshot.mvmeExportSucceeded = saved.success;
+    snapshot.mvmeExportMessage = saved.message;
+    PublishActivityStatus(
+        std::move(snapshot),
+        ActivityLogCategory::Export,
+        saved.success
+            ? TunerStatusLevel::Success
+            : saved.outputAlreadyExists
+                ? TunerStatusLevel::Warning
+                : TunerStatusLevel::Error,
+        saved.message);
 }
 
 void OwnershipService::ApplyProfileRow(

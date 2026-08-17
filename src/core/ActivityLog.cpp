@@ -36,21 +36,6 @@ std::string EscapeSingleLine(const std::string& text)
     return escaped;
 }
 
-std::string FormatTimestamp(
-    const std::chrono::system_clock::time_point timestamp)
-{
-    const std::time_t time = std::chrono::system_clock::to_time_t(timestamp);
-    std::tm utc{};
-    if (gmtime_r(&time, &utc) == nullptr)
-    {
-        return "invalid-time";
-    }
-
-    std::ostringstream output;
-    output << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
-    return output.str();
-}
-
 } // namespace
 
 void ActivityLog::Append(ActivityLogEntry entry)
@@ -122,10 +107,25 @@ const char* TunerStatusLevelName(const TunerStatusLevel level) noexcept
     return "unknown";
 }
 
+std::string FormatActivityLogTimestamp(
+    const std::chrono::system_clock::time_point timestamp)
+{
+    const std::time_t time = std::chrono::system_clock::to_time_t(timestamp);
+    std::tm utc{};
+    if (gmtime_r(&time, &utc) == nullptr)
+    {
+        return "invalid-time";
+    }
+
+    std::ostringstream output;
+    output << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return output.str();
+}
+
 std::string FormatActivityLogEntry(const ActivityLogEntry& entry)
 {
     std::ostringstream output;
-    output << FormatTimestamp(entry.timestamp)
+    output << FormatActivityLogTimestamp(entry.timestamp)
            << " [" << ActivityLogCategoryName(entry.category) << ']'
            << " [" << TunerStatusLevelName(entry.severity) << "] "
            << EscapeSingleLine(entry.summary);

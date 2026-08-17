@@ -72,6 +72,9 @@ struct TunerSnapshot
     bool profileLoadedForTarget = false;
     std::string loadedProfilePath;
     ScpProfile loadedProfile;
+    bool mvmeExportSucceeded = false;
+    std::string mvmeExportPath;
+    std::string mvmeExportMessage;
     bool startupAuditCompleteForTarget = false;
     bool startupAuditReady = false;
     StartupAuditResult startupAudit;

@@ -15,6 +15,7 @@ void ProfileStage::Draw(
     const Theme& theme)
 {
     AdoptActiveProfilePath(snapshot);
+    AdoptLoadedProfilePath(snapshot);
 
     ImGui::TextUnformatted("FW2051 SCP profile");
     ImGui::TextWrapped(
@@ -122,6 +123,39 @@ void ProfileStage::Draw(
         ImGui::Text("%zu", Fw2051ScpConfigurationValueCount);
         ImGui::EndTable();
     }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("MVME export");
+    ImGui::TextWrapped(
+        "Generate a reviewable MVME settings block beside the profile. "
+        "This offline operation does not contact crate hardware or edit "
+        "the MVME installation.");
+    ImGui::SetNextItemWidth(520.0F);
+    ImGui::InputText("Export path", &m_exportPath);
+    ImGui::Checkbox(
+        "Allow replacing an existing export", &m_allowExportOverwrite);
+
+    const bool mayExport = snapshot.profileLoaded
+        && !m_exportPath.empty();
+    ImGui::BeginDisabled(!mayExport);
+    if (ImGui::Button("Export MVME settings"))
+    {
+        tunerControl.Submit(ExportMvmeScriptCommand{
+            m_exportPath,
+            m_allowExportOverwrite,
+        });
+    }
+    ImGui::EndDisabled();
+
+    if (!snapshot.mvmeExportMessage.empty())
+    {
+        ImGui::TextColored(
+            snapshot.mvmeExportSucceeded
+                ? theme.statusGood
+                : theme.statusWarning,
+            "%s",
+            snapshot.mvmeExportMessage.c_str());
+    }
 }
 
 void ProfileStage::AdoptActiveProfilePath(
@@ -146,6 +180,20 @@ void ProfileStage::AdoptActiveProfilePath(
     {
         m_profilePath = snapshot.activeModuleProfilePath;
     }
+}
+
+void ProfileStage::AdoptLoadedProfilePath(
+    const TunerSnapshot& snapshot)
+{
+    if (!snapshot.profileLoaded || snapshot.loadedProfilePath.empty()
+        || snapshot.loadedProfilePath == m_exportSourcePath)
+    {
+        return;
+    }
+
+    m_exportSourcePath = snapshot.loadedProfilePath;
+    m_exportPath = snapshot.loadedProfilePath + ".mvme";
+    m_allowExportOverwrite = false;
 }
 
 } // namespace fidget

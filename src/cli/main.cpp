@@ -59,6 +59,11 @@ int main(int argc, char** argv)
         std::cout << fidget::FidgetCliUsage();
         return 0;
     }
+    if (parsed.options.command == fidget::CliCommand::Export)
+    {
+        return fidget::RunCliExport(
+            parsed.options, std::cin, std::cout, std::cerr);
+    }
 
     struct sigaction interruptAction{};
     interruptAction.sa_handler = HandleInterrupt;

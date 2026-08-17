@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "cli/CliApp.h"
+#include "core/ScpProfile.h"
 #include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 #include "core/StartupPreparation.h"
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -43,6 +45,33 @@ struct TemporaryCsv
     TemporaryCsv& operator=(const TemporaryCsv&) = delete;
 };
 
+struct TemporaryMvmeExport
+{
+    std::string profilePath;
+    std::string outputPath;
+
+    TemporaryMvmeExport()
+    {
+        const auto unique = std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count();
+        const std::string stem = "/tmp/fidget_cli_export_"
+            + std::to_string(unique);
+        profilePath = stem + ".mwwscp";
+        outputPath = stem + ".mvme";
+    }
+
+    ~TemporaryMvmeExport()
+    {
+        std::remove(profilePath.c_str());
+        std::remove(outputPath.c_str());
+        std::remove((outputPath + ".tmp").c_str());
+    }
+
+    TemporaryMvmeExport(const TemporaryMvmeExport&) = delete;
+    TemporaryMvmeExport& operator=(const TemporaryMvmeExport&) = delete;
+};
+
 struct TemporaryCrateProject
 {
     std::string path;
@@ -71,6 +100,7 @@ struct TemporaryCrateProject
     ~TemporaryCrateProject()
     {
         std::remove(path.c_str());
+        std::remove((path + ".activity").c_str());
     }
 
     TemporaryCrateProject(const TemporaryCrateProject&) = delete;
@@ -863,6 +893,19 @@ TEST_CASE("CLI options accept project and host status forms")
         CHECK(*parsed.options.seconds == 30U);
         CHECK(parsed.options.dumpCsvPath == "waveform.csv");
     }
+    {
+        const char* arguments[] = {
+            "fidget_cli", "export", "--profile", "expected.mwwscp",
+            "--out", "expected.mvme",
+        };
+        const auto parsed = fidget::ParseCliOptions(6, arguments);
+        REQUIRE(parsed.success);
+        CHECK(parsed.options.command == fidget::CliCommand::Export);
+        CHECK(parsed.options.profilePath == "expected.mwwscp");
+        CHECK(parsed.options.outputPath == "expected.mvme");
+        CHECK(parsed.options.projectPath.empty());
+        CHECK(parsed.options.host.empty());
+    }
 }
 
 TEST_CASE("CLI options accept recovery only with a crate project")
@@ -937,6 +980,127 @@ TEST_CASE("CLI options reject unsafe or incomplete status arguments")
         "--channel", "32",
     };
     CHECK_FALSE(fidget::ParseCliOptions(6, invalidChannel).success);
+
+    const char* exportWithoutProfile[] = {
+        "fidget_cli", "export", "--out", "expected.mvme",
+    };
+    CHECK_FALSE(
+        fidget::ParseCliOptions(4, exportWithoutProfile).success);
+
+    const char* exportWithoutOutput[] = {
+        "fidget_cli", "export", "--profile", "expected.mwwscp",
+    };
+    CHECK_FALSE(
+        fidget::ParseCliOptions(4, exportWithoutOutput).success);
+
+    const char* outputOnStatus[] = {
+        "fidget_cli", "status", "--host", "mvlc-test",
+        "--out", "unexpected.mvme",
+    };
+    CHECK_FALSE(fidget::ParseCliOptions(6, outputOnStatus).success);
+}
+
+TEST_CASE("offline export writes a manifest and activity entry")
+{
+    TemporaryMvmeExport files;
+    auto configuration = MakeConfiguration(false);
+    configuration.selectorWrites.clear();
+    REQUIRE(fidget::SaveFw2051ScpProfile(
+                configuration, files.profilePath)
+                .success);
+
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Export;
+    options.profilePath = files.profilePath;
+    options.outputPath = files.outputPath;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliExport(
+        options, input, output, errors);
+
+    CHECK(exitCode == 0);
+    CHECK(errors.str().empty());
+    CHECK(output.str().find("export_manifest: checksum=")
+          != std::string::npos);
+    CHECK(output.str().find(" values=141 ") != std::string::npos);
+    CHECK(output.str().find("export_output: " + files.outputPath)
+          != std::string::npos);
+    CHECK(output.str().find("activity: ") != std::string::npos);
+    CHECK(output.str().find("[export] [success]") != std::string::npos);
+
+    std::ifstream saved(files.outputPath, std::ios::binary);
+    REQUIRE(saved.good());
+    const std::string text{
+        std::istreambuf_iterator<char>(saved),
+        std::istreambuf_iterator<char>()};
+    CHECK(text.find("# ===== BEGIN FIDGET MVME EXPORT =====\n") == 0U);
+    CHECK(text.find("# value_count: 141\n") != std::string::npos);
+}
+
+TEST_CASE("offline export refuses replacement until typed y")
+{
+    TemporaryMvmeExport files;
+    auto configuration = MakeConfiguration(false);
+    configuration.selectorWrites.clear();
+    REQUIRE(fidget::SaveFw2051ScpProfile(
+                configuration, files.profilePath)
+                .success);
+    {
+        std::ofstream existing(files.outputPath, std::ios::binary);
+        existing << "keep me\n";
+    }
+
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Export;
+    options.profilePath = files.profilePath;
+    options.outputPath = files.outputPath;
+    std::istringstream refusedInput;
+    std::ostringstream refusedOutput;
+    std::ostringstream refusedErrors;
+
+    CHECK(fidget::RunCliExport(
+              options,
+              refusedInput,
+              refusedOutput,
+              refusedErrors)
+          == 1);
+    std::ifstream unchanged(files.outputPath, std::ios::binary);
+    std::string firstLine;
+    std::getline(unchanged, firstLine);
+    CHECK(firstLine == "keep me");
+
+    std::istringstream confirmedInput("y\n");
+    std::ostringstream confirmedOutput;
+    std::ostringstream confirmedErrors;
+    CHECK(fidget::RunCliExport(
+              options,
+              confirmedInput,
+              confirmedOutput,
+              confirmedErrors)
+          == 0);
+    std::ifstream replaced(files.outputPath, std::ios::binary);
+    std::getline(replaced, firstLine);
+    CHECK(firstLine == "# ===== BEGIN FIDGET MVME EXPORT =====");
+}
+
+TEST_CASE("offline export reports a missing profile without output")
+{
+    TemporaryMvmeExport files;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Export;
+    options.profilePath = files.profilePath;
+    options.outputPath = files.outputPath;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    CHECK(fidget::RunCliExport(options, input, output, errors) == 1);
+    CHECK(errors.str().find("SCP profile load failed")
+          != std::string::npos);
+    std::ifstream absent(files.outputPath, std::ios::binary);
+    CHECK_FALSE(absent.good());
 }
 
 TEST_CASE("status prints idle readings and exits successfully")

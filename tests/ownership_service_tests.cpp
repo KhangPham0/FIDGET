@@ -2087,3 +2087,59 @@ TEST_CASE("project activity persists while host-only activity does not")
     CHECK(hostOnly.CurrentSnapshot()->activityLogPath.empty());
     CHECK_FALSE(std::filesystem::exists(hostOnlyCandidate));
 }
+
+TEST_CASE("profile export is offline and records project activity")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    auto profile = SaveTestProfile(MakeValidConfiguration());
+    TemporaryProfile output(profile.path + ".mvme");
+    std::remove(output.path.c_str());
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.projectActive;
+    }));
+
+    service.Submit(LoadProfileCommand{profile.path});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.profileLoaded;
+    }));
+    const auto activityCount = service.CurrentSnapshot()->activityLog.Size();
+    const auto beforeExport = service.CurrentSnapshot()->revision;
+    service.Submit(ExportMvmeScriptCommand{output.path, false});
+    REQUIRE(WaitFor(service, [beforeExport](const TunerSnapshot& snapshot) {
+        return snapshot.revision > beforeExport
+            && snapshot.mvmeExportSucceeded;
+    }));
+
+    const auto exported = service.CurrentSnapshot();
+    CHECK(exported->mvmeExportPath == output.path);
+    CHECK(std::filesystem::exists(output.path));
+    REQUIRE(exported->activityLog.Size() == activityCount + 1U);
+    CHECK(exported->activityLog.Entries().back().category
+          == ActivityLogCategory::Export);
+    CHECK(exported->activityLog.Entries().back().severity
+          == TunerStatusLevel::Success);
+    CHECK(transport->SentRequests().empty());
+
+    const auto beforeRefusal = exported->revision;
+    service.Submit(ExportMvmeScriptCommand{output.path, false});
+    REQUIRE(WaitFor(service, [beforeRefusal](const TunerSnapshot& snapshot) {
+        return snapshot.revision > beforeRefusal
+            && !snapshot.mvmeExportSucceeded;
+    }));
+    CHECK(service.CurrentSnapshot()->mvmeExportMessage.find("already exists")
+          != std::string::npos);
+    CHECK(transport->SentRequests().empty());
+}

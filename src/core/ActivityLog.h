@@ -65,6 +65,9 @@ private:
 [[nodiscard]] const char* TunerStatusLevelName(
     TunerStatusLevel level) noexcept;
 
+[[nodiscard]] std::string FormatActivityLogTimestamp(
+    std::chrono::system_clock::time_point timestamp);
+
 [[nodiscard]] std::string FormatActivityLogEntry(
     const ActivityLogEntry& entry);
 

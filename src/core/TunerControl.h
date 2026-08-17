@@ -58,6 +58,12 @@ struct LoadProfileCommand
     std::string path;
 };
 
+struct ExportMvmeScriptCommand
+{
+    std::string path;
+    bool allowOverwrite = false;
+};
+
 struct ApplyProfileRowCommand
 {
     std::uint16_t registerOffset = 0U;
@@ -112,6 +118,7 @@ using TunerCommand = std::variant<
     CaptureConfigurationCommand,
     SaveProfileCommand,
     LoadProfileCommand,
+    ExportMvmeScriptCommand,
     ApplyProfileRowCommand,
     ApplyAllDifferencesCommand,
     RunDeterministicStartupCommand,
