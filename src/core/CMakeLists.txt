@@ -3,6 +3,7 @@ add_library(fidget_core STATIC
     ActivityLogFile.cpp
     CrateProject.cpp
     GuidedWorkflow.cpp
+    MvmeExport.cpp
     ReadoutProtocol.cpp
     RecoveryJournal.cpp
     RecoveryVerification.cpp

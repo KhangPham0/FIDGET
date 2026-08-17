@@ -1,0 +1,181 @@
+# ===== BEGIN FIDGET MVME EXPORT =====
+# FIDGET export
+# source_profile_checksum: 17470103622431138743
+# module_hardware_id: 0x5007
+# module_firmware: 0x2051
+# vme_base: 0x11000000
+# generated_utc: 2026-08-17T12:00:00Z
+# value_count: 141
+#
+# Global profile values (5)
+# global 1/5 VME base: 0x11000000 (module address, not a register write)
+# global 2/5 Hardware ID: 0x5007 (identity check, not a register write)
+# global 3/5 Firmware revision: 0x2051 (identity check, not a register write)
+# global 4/5 IRQ level
+0x6010 1
+# global 5/5 Output format
+0x6044 24
+
+# Quad 0
+0x6100 0
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2000 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2000 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 1
+0x6100 1
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2000 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2000 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 2
+0x6100 2
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2000 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2000 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 3
+0x6100 3
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2000 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2000 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 4
+0x6100 4
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2600 # Threshold ch 1
+0x6120 2600 # Threshold ch 2
+0x6122 3200 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 5
+0x6100 5
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2500 # Threshold ch 0
+0x611E 2200 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2200 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 6
+0x6100 6
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2200 # Threshold ch 0
+0x611E 2200 # Threshold ch 1
+0x6120 2200 # Threshold ch 2
+0x6122 2500 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Quad 7
+0x6100 7
+0x6110 8 # Timing filter
+0x6112 2000 # Pole-zero ch 0
+0x6114 2000 # Pole-zero ch 1
+0x6116 2000 # Pole-zero ch 2
+0x6118 2000 # Pole-zero ch 3
+0x611A 200 # Gain
+0x611C 2000 # Threshold ch 0
+0x611E 2200 # Threshold ch 1
+0x6120 2000 # Threshold ch 2
+0x6122 2500 # Threshold ch 3
+0x6124 160 # Shaping time
+0x6126 2 # Baseline restorer
+0x6128 16 # Reset time
+0x612A 4 # Signal rise time
+0x6146 50 # Pre-samples
+0x6148 400 # Total samples
+0x614A 0 # Sample configuration
+
+# Park the FW2051 bank selector at quad 0
+0x6100 0
+# ===== END FIDGET MVME EXPORT =====

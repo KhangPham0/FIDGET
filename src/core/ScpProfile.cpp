@@ -262,6 +262,12 @@ std::string ValidateFw2051ScpConfiguration(
     return {};
 }
 
+std::uint64_t ComputeFw2051ScpProfileChecksum(
+    const Fw2051ScpConfigurationSnapshot& configuration)
+{
+    return ConfigurationChecksum(configuration);
+}
+
 ScpProfileSerializationResult SerializeFw2051ScpProfile(
     const Fw2051ScpConfigurationSnapshot& configuration)
 {
@@ -285,7 +291,8 @@ ScpProfileSerializationResult SerializeFw2051ScpProfile(
     {
         WriteQuad(output, quad);
     }
-    output << "CHECKSUM " << ConfigurationChecksum(configuration) << '\n';
+    output << "CHECKSUM "
+           << ComputeFw2051ScpProfileChecksum(configuration) << '\n';
     output << "END\n";
 
     if (!output)
@@ -360,7 +367,7 @@ ScpProfileParseResult ParseFw2051ScpProfile(const std::string& text)
         return result;
     }
 
-    if (storedChecksum != ConfigurationChecksum(configuration))
+    if (storedChecksum != ComputeFw2051ScpProfileChecksum(configuration))
     {
         result.message =
             "Invalid SCP profile: checksum mismatch; the file is damaged "

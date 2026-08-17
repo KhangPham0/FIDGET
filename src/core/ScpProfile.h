@@ -68,6 +68,9 @@ struct ScpConfigurationComparison
 [[nodiscard]] std::string ValidateFw2051ScpConfiguration(
     const Fw2051ScpConfigurationSnapshot& configuration);
 
+[[nodiscard]] std::uint64_t ComputeFw2051ScpProfileChecksum(
+    const Fw2051ScpConfigurationSnapshot& configuration);
+
 [[nodiscard]] ScpProfileSerializationResult SerializeFw2051ScpProfile(
     const Fw2051ScpConfigurationSnapshot& configuration);
 

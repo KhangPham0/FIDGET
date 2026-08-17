@@ -3,6 +3,14 @@ target_link_libraries(activity_log_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME activity_log_tests COMMAND activity_log_tests)
 
+add_executable(mvme_export_tests mvme_export_tests.cpp)
+target_link_libraries(mvme_export_tests PRIVATE fidget_core doctest::doctest)
+target_compile_definitions(mvme_export_tests PRIVATE
+    FIDGET_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+
+add_test(NAME mvme_export_tests COMMAND mvme_export_tests)
+
 add_executable(stream_decoder_tests stream_decoder_tests.cpp)
 target_link_libraries(stream_decoder_tests PRIVATE fidget_core doctest::doctest)
 
