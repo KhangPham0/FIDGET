@@ -12,6 +12,7 @@
 #include "core/ScpTransactionResult.h"
 #include "core/StartupAudit.h"
 #include "core/StartupPreparation.h"
+#include "core/TunerStatus.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,14 +21,6 @@
 #include <vector>
 
 namespace fidget {
-
-enum class TunerStatusLevel
-{
-    Information,
-    Success,
-    Warning,
-    Error,
-};
 
 enum class RecoveryJournalStatus
 {

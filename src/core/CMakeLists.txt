@@ -1,4 +1,5 @@
 add_library(fidget_core STATIC
+    ActivityLog.cpp
     CrateProject.cpp
     GuidedWorkflow.cpp
     ReadoutProtocol.cpp

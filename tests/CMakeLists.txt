@@ -1,3 +1,8 @@
+add_executable(activity_log_tests activity_log_tests.cpp)
+target_link_libraries(activity_log_tests PRIVATE fidget_core doctest::doctest)
+
+add_test(NAME activity_log_tests COMMAND activity_log_tests)
+
 add_executable(stream_decoder_tests stream_decoder_tests.cpp)
 target_link_libraries(stream_decoder_tests PRIVATE fidget_core doctest::doctest)
 
