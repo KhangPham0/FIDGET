@@ -1,4 +1,5 @@
 build/
 imgui.ini
+window.ini
 .DS_Store
 .cache/

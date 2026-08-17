@@ -1018,8 +1018,8 @@ const char* FidgetCliUsage() noexcept
         "  --port PORT     Use or override the MVLC command port\n"
         "  --module N      Select the one-based project module (default 1)\n"
         "  --save FILE     Save a successful capture as an SCP profile\n"
-        "  --profile FILE  Load this SCP profile for compare, apply, or "
-        "startup, or export; override the project profile for acquire\n"
+        "  --profile FILE  Load a profile for compare, apply, startup, or "
+        "export; override the project profile for acquire\n"
         "  --register OFF  Select a banked register, decimal or 0x-prefixed\n"
         "  --quad N        Select channel quad 0 through 7\n"
         "  --channel N     Select physical channel 0 through 31\n"
@@ -1238,6 +1238,13 @@ CliOptionsParseResult ParseCliOptions(
         && result.options.projectPath.empty() && !result.options.showHelp)
     {
         result.error = "recover requires --project FILE";
+        return result;
+    }
+    if (result.options.command == CliCommand::Acquire
+        && result.options.projectPath.empty() && !result.options.showHelp)
+    {
+        result.error =
+            "acquire requires --project FILE for recovery journaling";
         return result;
     }
     if (!result.options.savePath.empty()

@@ -5,6 +5,7 @@ if(FIDGET_BUILD_GUI)
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
     add_subdirectory(glfw)
 
     # Dear ImGui (docking branch): the GUI library.
@@ -34,4 +35,5 @@ endif()
 
 # doctest: the test framework. Only the tests link it.
 set(DOCTEST_WITH_TESTS OFF CACHE BOOL "" FORCE)
+set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory(doctest)

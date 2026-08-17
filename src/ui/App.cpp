@@ -360,11 +360,6 @@ void App::DrawStatusStrip(float height, const TunerSnapshot& snapshot)
         decision.totalSteps,
         GuidedTunerStageName(decision.stage));
 
-    const char* version = "v" FIDGET_VERSION;
-    float versionWidth = ImGui::CalcTextSize(version).x;
-    ImGui::SameLine(ImGui::GetWindowWidth() - versionWidth - 10.0f);
-    ImGui::TextDisabled("%s", version);
-
     ImGui::End();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();

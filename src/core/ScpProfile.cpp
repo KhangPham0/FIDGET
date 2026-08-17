@@ -453,7 +453,7 @@ ScpProfileSaveResult SaveFw2051ScpProfile(
     }
 
     result.success = true;
-    result.message = "Saved the read-only SCP profile to '" + path + "'.";
+    result.message = "Saved the SCP profile to '" + path + "'.";
     return result;
 }
 

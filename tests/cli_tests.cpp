@@ -414,7 +414,7 @@ public:
             savedPath = save->path;
             next.statusMessages = {{
                 fidget::TunerStatusLevel::Success,
-                "Saved the read-only SCP profile.",
+                "Saved the SCP profile.",
                 {},
             }};
         }
@@ -880,7 +880,7 @@ TEST_CASE("CLI options accept project and host status forms")
     }
     {
         const char* arguments[] = {
-            "fidget_cli", "acquire", "--host", "mvlc-test",
+            "fidget_cli", "acquire", "--project", "crate.mwwcrate",
             "--profile", "expected.mwwscp", "--channel", "29",
             "--seconds", "30", "--dump-csv", "waveform.csv",
         };
@@ -906,6 +906,18 @@ TEST_CASE("CLI options accept project and host status forms")
         CHECK(parsed.options.projectPath.empty());
         CHECK(parsed.options.host.empty());
     }
+}
+
+TEST_CASE("acquisition requires a project-backed recovery path")
+{
+    const char* arguments[] = {
+        "fidget_cli", "acquire", "--host", "mvlc-test",
+        "--profile", "expected.mwwscp", "--channel", "29",
+    };
+    const auto parsed = fidget::ParseCliOptions(8, arguments);
+    CHECK_FALSE(parsed.success);
+    CHECK(parsed.error
+          == "acquire requires --project FILE for recovery journaling");
 }
 
 TEST_CASE("CLI options accept recovery only with a crate project")

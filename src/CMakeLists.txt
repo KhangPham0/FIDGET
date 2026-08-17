@@ -21,9 +21,6 @@ add_executable(fidget
     ui/WorkflowRail.cpp
 )
 
-# The version shown in the status strip comes from the project() call.
-target_compile_definitions(fidget PRIVATE FIDGET_VERSION="${PROJECT_VERSION}")
-
 # So sources can include project headers relative to src/, e.g. "ui/App.h".
 target_include_directories(fidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

@@ -252,7 +252,7 @@ const char* GuidedTunerStageMessage(const GuidedTunerStage stage) noexcept
     case GuidedTunerStage::ResolveRecovery:
         return "Resolve the recorded tuner-owned state before making any new hardware request.";
     case GuidedTunerStage::CheckController:
-        return "Run the read-only controller check. It closes its connection immediately and performs no VME write.";
+        return "Run the read-only controller check. It closes its connection immediately and performs no VME-bus write.";
     case GuidedTunerStage::ConfirmHandoff:
         return "Confirm that the MVME run is stopped and MVME is completely quit before the tuner retains ownership.";
     case GuidedTunerStage::OpenSession:
@@ -262,7 +262,7 @@ const char* GuidedTunerStageMessage(const GuidedTunerStage stage) noexcept
     case GuidedTunerStage::LoadProfile:
         return "Load the saved profile for the selected module so live hardware can be checked against the intended settings.";
     case GuidedTunerStage::AuditStartup:
-        return "Run the zero-write 37-register startup audit for the selected module.";
+        return "Run the zero-VME-bus-write 37-register startup audit for the selected module.";
     case GuidedTunerStage::CaptureConfiguration:
         return "Capture a fresh eight-quad SCP snapshot for exact comparison with the loaded profile.";
     case GuidedTunerStage::ReviewStartup:
