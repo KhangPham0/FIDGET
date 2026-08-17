@@ -12,6 +12,8 @@
 #include "ui/StartupStage.h"
 #include "ui/Theme.h"
 
+#include <array>
+#include <cstddef>
 #include <string>
 
 struct GLFWwindow;
@@ -61,6 +63,16 @@ private:
     AcquisitionStage m_acquisitionStage;
 
     long m_frameLimit = -1;
+
+    std::array<bool, 10U> m_activityCategoryVisible{
+        true, true, true, true, true,
+        true, true, true, true, true,
+    };
+    std::array<bool, 4U> m_activitySeverityVisible{
+        true, true, true, true,
+    };
+    bool m_activityAutoScroll = true;
+    std::size_t m_lastActivityEntryCount = 0U;
 
     // True until the default panel layout has been applied. Only used when
     // no saved layout (imgui.ini) exists.

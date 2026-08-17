@@ -1,13 +1,17 @@
 #include "App.h"
 
+#include "core/ActivityLog.h"
 #include "core/GuidedWorkflow.h"
 #include "core/TunerSnapshot.h"
 #include "ui/WorkflowRail.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <optional>
 
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder API, used for the default layout
@@ -30,6 +34,99 @@ namespace {
 constexpr const char* kWorkflowTitle = "Workflow";
 constexpr const char* kStageTitle = "Stage";
 constexpr const char* kActivityLogTitle = "Activity Log";
+
+constexpr std::array<ActivityLogCategory, 10U> ActivityCategories{
+    ActivityLogCategory::Session,
+    ActivityLogCategory::Audit,
+    ActivityLogCategory::Capture,
+    ActivityLogCategory::Apply,
+    ActivityLogCategory::Startup,
+    ActivityLogCategory::Acquisition,
+    ActivityLogCategory::Source,
+    ActivityLogCategory::Preview,
+    ActivityLogCategory::Recovery,
+    ActivityLogCategory::Export,
+};
+
+constexpr std::array<TunerStatusLevel, 4U> ActivitySeverities{
+    TunerStatusLevel::Information,
+    TunerStatusLevel::Success,
+    TunerStatusLevel::Warning,
+    TunerStatusLevel::Error,
+};
+
+std::optional<ActivityLogCategory> FocusedActivityCategory(
+    const GuidedTunerOperation operation)
+{
+    switch (operation)
+    {
+    case GuidedTunerOperation::Audit:
+        return ActivityLogCategory::Audit;
+    case GuidedTunerOperation::ConfigurationCapture:
+        return ActivityLogCategory::Capture;
+    case GuidedTunerOperation::ProfileApplication:
+        return ActivityLogCategory::Apply;
+    case GuidedTunerOperation::StartupPreparation:
+        return ActivityLogCategory::Startup;
+    case GuidedTunerOperation::Acquisition:
+        return ActivityLogCategory::Acquisition;
+    case GuidedTunerOperation::None:
+    case GuidedTunerOperation::Other:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::size_t ActivityCategoryIndex(const ActivityLogCategory category)
+{
+    const auto found = std::find(
+        ActivityCategories.begin(), ActivityCategories.end(), category);
+    return static_cast<std::size_t>(
+        std::distance(ActivityCategories.begin(), found));
+}
+
+std::size_t ActivitySeverityIndex(const TunerStatusLevel severity)
+{
+    const auto found = std::find(
+        ActivitySeverities.begin(), ActivitySeverities.end(), severity);
+    return static_cast<std::size_t>(
+        std::distance(ActivitySeverities.begin(), found));
+}
+
+ImVec4 ActivitySeverityColor(
+    const TunerStatusLevel severity,
+    const Theme& theme)
+{
+    switch (severity)
+    {
+    case TunerStatusLevel::Information:
+        return theme.textPrimary;
+    case TunerStatusLevel::Success:
+        return theme.statusGood;
+    case TunerStatusLevel::Warning:
+        return theme.statusWarning;
+    case TunerStatusLevel::Error:
+        return theme.statusError;
+    }
+    return theme.textPrimary;
+}
+
+void DrawActivityFilterChip(
+    const char* label,
+    bool& selected,
+    const Theme& theme)
+{
+    ImGui::PushStyleColor(
+        ImGuiCol_Button, selected ? theme.accentActive : theme.frame);
+    ImGui::PushStyleColor(
+        ImGuiCol_ButtonHovered,
+        selected ? theme.accentHover : theme.frameHover);
+    if (ImGui::SmallButton(label))
+    {
+        selected = !selected;
+    }
+    ImGui::PopStyleColor(2);
+}
 
 void GlfwErrorCallback(int error, const char* description)
 {
@@ -331,21 +428,104 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
 void App::DrawActivityLogPanel(const TunerSnapshot& snapshot)
 {
     ImGui::Begin(kActivityLogTitle);
-    if (snapshot.statusMessages.empty())
+    if (!ImGui::CollapsingHeader(
+            "Activity history", ImGuiTreeNodeFlags_DefaultOpen))
     {
-        ImGui::TextDisabled("No tuner status has been published.");
+        ImGui::End();
+        return;
     }
-    else
+
+    ImGui::TextDisabled("Categories");
+    for (std::size_t index = 0U; index < ActivityCategories.size(); ++index)
     {
-        for (const auto& message : snapshot.statusMessages)
+        if (index != 0U)
         {
-            ImGui::TextWrapped("%s", message.summary.c_str());
-            if (!message.detail.empty())
+            ImGui::SameLine();
+        }
+        ImGui::PushID(static_cast<int>(index));
+        DrawActivityFilterChip(
+            ActivityLogCategoryName(ActivityCategories[index]),
+            m_activityCategoryVisible[index],
+            m_theme);
+        ImGui::PopID();
+    }
+
+    ImGui::TextDisabled("Severity");
+    for (std::size_t index = 0U; index < ActivitySeverities.size(); ++index)
+    {
+        if (index != 0U)
+        {
+            ImGui::SameLine();
+        }
+        ImGui::PushID(static_cast<int>(ActivityCategories.size() + index));
+        DrawActivityFilterChip(
+            TunerStatusLevelName(ActivitySeverities[index]),
+            m_activitySeverityVisible[index],
+            m_theme);
+        ImGui::PopID();
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-scroll", &m_activityAutoScroll);
+
+    if (!snapshot.activityLogPersistenceError.empty())
+    {
+        ImGui::TextColored(
+            m_theme.statusError,
+            "Activity persistence error: %s",
+            snapshot.activityLogPersistenceError.c_str());
+    }
+
+    const auto& entries = snapshot.activityLog.Entries();
+    std::size_t focusedEntry = entries.size();
+    if (const auto category = FocusedActivityCategory(
+            snapshot.activeOperation))
+    {
+        for (std::size_t index = entries.size(); index > 0U; --index)
+        {
+            if (entries[index - 1U].category == *category)
             {
-                ImGui::TextDisabled("%s", message.detail.c_str());
+                focusedEntry = index - 1U;
+                break;
             }
         }
     }
+
+    ImGui::Separator();
+    ImGui::BeginChild(
+        "activity_entries", ImVec2(0.0F, 0.0F), false,
+        ImGuiWindowFlags_HorizontalScrollbar);
+    if (entries.empty())
+    {
+        ImGui::TextDisabled("No activity has been recorded.");
+    }
+    for (std::size_t index = 0U; index < entries.size(); ++index)
+    {
+        const auto& entry = entries[index];
+        const std::size_t categoryIndex = ActivityCategoryIndex(
+            entry.category);
+        const std::size_t severityIndex = ActivitySeverityIndex(
+            entry.severity);
+        if (categoryIndex >= m_activityCategoryVisible.size()
+            || severityIndex >= m_activitySeverityVisible.size()
+            || !m_activityCategoryVisible[categoryIndex]
+            || !m_activitySeverityVisible[severityIndex])
+        {
+            continue;
+        }
+
+        const ImVec4 color = index == focusedEntry
+            ? m_theme.highlight
+            : ActivitySeverityColor(entry.severity, m_theme);
+        const std::string line = FormatActivityLogEntry(entry);
+        ImGui::TextColored(color, "%s", line.c_str());
+    }
+    if (m_activityAutoScroll
+        && entries.size() != m_lastActivityEntryCount)
+    {
+        ImGui::SetScrollHereY(1.0F);
+    }
+    ImGui::EndChild();
+    m_lastActivityEntryCount = entries.size();
     ImGui::End();
 }
 
