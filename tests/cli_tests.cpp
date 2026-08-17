@@ -548,26 +548,29 @@ public:
             next.diagnosticStream.datagramsReceived = 12U;
             next.diagnosticStream.bytesReceived = 480U;
             next.diagnosticStream.decoderStats.ethernetPackets = 12U;
-            next.diagnosticStream.decoderStats.decodedWaveforms = 4U;
-            next.diagnosticStream.channelWaveformTotals = {
-                {0U, 2U},
-                {3U, 1U},
-                {start->channel, 4U},
-            };
-            fidget::MdppWaveform waveform;
-            waveform.sequence = 4U;
-            waveform.moduleId = 0x11U;
-            waveform.channel = start->channel;
-            waveform.samples = {-2, 10, 100, -100};
-            fidget::MdppChannelHistorySnapshot history;
-            history.totalCaptured = 4U;
-            history.waveforms.push_back(std::move(waveform));
-            next.diagnosticStream.histories.emplace(
-                fidget::MdppChannelAddress{
-                    0x11U,
-                    static_cast<int>(start->channel),
-                },
-                std::move(history));
+            if (!acquisitionSilent)
+            {
+                next.diagnosticStream.decoderStats.decodedWaveforms = 4U;
+                next.diagnosticStream.channelWaveformTotals = {
+                    {0U, 2U},
+                    {3U, 1U},
+                    {start->channel, 4U},
+                };
+                fidget::MdppWaveform waveform;
+                waveform.sequence = 4U;
+                waveform.moduleId = 0x11U;
+                waveform.channel = start->channel;
+                waveform.samples = {-2, 10, 100, -100};
+                fidget::MdppChannelHistorySnapshot history;
+                history.totalCaptured = 4U;
+                history.waveforms.push_back(std::move(waveform));
+                next.diagnosticStream.histories.emplace(
+                    fidget::MdppChannelAddress{
+                        0x11U,
+                        static_cast<int>(start->channel),
+                    },
+                    std::move(history));
+            }
         }
         else if (std::holds_alternative<
                      fidget::StopDiagnosticAcquisitionCommand>(command))
@@ -583,6 +586,14 @@ public:
             next.diagnosticAcquisition.daqModeDisabled = true;
             next.diagnosticAcquisition.readoutStackDisabled = true;
             next.diagnosticAcquisition.recoveryJournalRemoved = true;
+            next.diagnosticAcquisition.previewRestoreAttemptedOnStop =
+                next.diagnosticParameterPreview.previewActive;
+            next.diagnosticAcquisition.previewRestoreVerifiedOnStop =
+                next.diagnosticParameterPreview.previewActive;
+            next.diagnosticAcquisition.sourceRestoreAttemptedOnStop =
+                next.diagnosticSourceChange.sourceRestoreRequired;
+            next.diagnosticAcquisition.sourceRestoreVerifiedOnStop =
+                next.diagnosticSourceChange.sourceRestoreRequired;
             next.diagnosticStream.receiverRunning = false;
         }
         else if (const auto* source = std::get_if<
@@ -604,6 +615,7 @@ public:
             next.diagnosticSourceChange.appliedReadback =
                 next.diagnosticSourceChange.requestedConfiguration;
             next.diagnosticSourceChange.writeVerified = true;
+            next.diagnosticSourceChange.sourceRestoreRequired = true;
             next.diagnosticSourceChange.selectorParkedAtQuadZero = true;
             next.diagnosticSourceChange.acquisitionResumed = true;
             next.diagnosticSourceChange.daqModeResumed = true;
@@ -732,6 +744,7 @@ public:
     fidget::DiagnosticOrphanRecoveryState recoveryOutcome =
         fidget::DiagnosticOrphanRecoveryState::Recovered;
     bool recoveryStatusSucceeds = true;
+    bool acquisitionSilent = false;
     std::string savedPath;
     std::string loadedPath;
 
@@ -1967,4 +1980,84 @@ TEST_CASE("recover reports a foreign fingerprint as failure")
     CHECK(output.str().find("recovery_step: fingerprint failed")
           != std::string::npos);
     CHECK(control.CurrentSnapshot()->recoveryRecordAvailable);
+}
+
+TEST_CASE("confirmation prompts discard a pending blank line before y")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    control.recoveryJournalStatus = fidget::RecoveryJournalStatus::Pending;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input("\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.recoveryCommands == 1);
+}
+
+TEST_CASE("acquire reports preview and source restoration from final cleanup")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    std::istringstream input(
+        "yes\ny\ns3\np 0x611a 250\n\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::InputReady; });
+
+    CHECK(exitCode == 0);
+    CHECK(output.str().find(
+              "cleanup_preview: attempted=yes verified=yes")
+          != std::string::npos);
+    CHECK(output.str().find(
+              "cleanup_source: attempted=yes verified=yes")
+          != std::string::npos);
+}
+
+TEST_CASE("silent watched channels emit one liveness warning")
+{
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Acquire;
+    options.host = "mvlc-test";
+    options.profilePath = "expected.mwwscp";
+    options.channel = 29U;
+    options.seconds = 16U;
+    FakeTunerControl control(
+        fidget::GuidedTunerOwnershipState::Idle, false, true);
+    control.acquisitionSilent = true;
+    std::istringstream input("yes\ny\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliAcquire(
+        options,
+        control,
+        input,
+        output,
+        errors,
+        [] { return false; },
+        [] { return fidget::CliSessionWaitResult::OneSecondElapsed; });
+
+    CHECK(exitCode == 0);
+    CHECK(CountOccurrences(output.str(), "liveness_warning:") == 1U);
+    CHECK(output.str().find("not a safety gate") != std::string::npos);
 }

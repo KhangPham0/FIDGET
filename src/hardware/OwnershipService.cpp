@@ -1533,8 +1533,7 @@ bool OwnershipService::RestoreDiagnosticSource(
             std::move(snapshot),
             "Tuner ownership was lost before waveform-source restoration: "
                 + result.message
-                + " The tuner detached passively and sent no cleanup write. "
-                  "The temporary source may remain live until MVME reinitializes the module.");
+                + " The tuner detached passively and sent no cleanup write.");
         return false;
     }
     if (result.restoreVerified)
@@ -2645,6 +2644,17 @@ void OwnershipService::DetachForForeignDiagnosticFingerprint(
         snapshot.diagnosticParameterPreview.state =
             DiagnosticParameterPreviewState::Failed;
         snapshot.diagnosticParameterPreview.message += warning;
+    }
+    if (acquisitionSession_
+        && acquisitionSession_->recoveryRecord.sourceRestoreRequired)
+    {
+        const std::string warning =
+            " The temporary waveform source may remain live until MVME reinitializes the module.";
+        message += warning;
+        snapshot.diagnosticSourceChange.state =
+            DiagnosticSourceChangeState::Failed;
+        snapshot.diagnosticSourceChange.sourceRestoreRequired = true;
+        snapshot.diagnosticSourceChange.message += warning;
     }
     snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
     snapshot.acquisition = GuidedTunerAcquisitionState::Failed;

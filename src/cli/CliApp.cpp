@@ -259,6 +259,20 @@ bool TransactionConfirmedByUser(std::string response)
     return response == "y" || response == "Y";
 }
 
+bool ReadPromptResponse(std::istream& input, std::string& response)
+{
+    while (std::getline(input, response))
+    {
+        const bool empty = response.find_first_not_of(" \t\r")
+            == std::string::npos;
+        if (!empty || input.rdbuf()->in_avail() <= 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ReleaseSession(
     ITunerControl& tunerControl,
     std::ostream& errorOutput)
@@ -289,7 +303,7 @@ int ConfirmAndOpenSession(
     output << "I stopped the MVME run and completely quit MVME [y/N]: "
            << std::flush;
     std::string confirmation;
-    if (!std::getline(input, confirmation)
+    if (!ReadPromptResponse(input, confirmation)
         || !HandoffConfirmedByUser(std::move(confirmation)))
     {
         output << "session: not opened\n";
@@ -737,6 +751,16 @@ void PrintCleanupResult(
 {
     output << "cleanup_selected: stopped="
            << (result.moduleStopSent ? "yes" : "no") << '\n'
+           << "cleanup_preview: attempted="
+           << (result.previewRestoreAttemptedOnStop ? "yes" : "no")
+           << " verified="
+           << (result.previewRestoreVerifiedOnStop ? "yes" : "no")
+           << '\n'
+           << "cleanup_source: attempted="
+           << (result.sourceRestoreAttemptedOnStop ? "yes" : "no")
+           << " verified="
+           << (result.sourceRestoreVerifiedOnStop ? "yes" : "no")
+           << '\n'
            << "cleanup_isolation: verified="
            << result.nonTargetModulesVerifiedStoppedOnCleanup << '/'
            << result.nonTargetModulesQuiesced << '\n'
@@ -1867,7 +1891,7 @@ int RunCliApply(
         output << "Apply " << steps.size()
                << " banked profile write(s) [y/N]: " << std::flush;
         std::string confirmation;
-        if (!std::getline(input, confirmation) ||
+        if (!ReadPromptResponse(input, confirmation) ||
             !TransactionConfirmedByUser(std::move(confirmation)))
         {
             output << "transaction: not applied\n";
@@ -2086,7 +2110,7 @@ int RunCliStartup(
                << " preparation change(s) and " << bankedCount
                << " banked write(s) [y/N]: " << std::flush;
         std::string confirmation;
-        if (!std::getline(input, confirmation) ||
+        if (!ReadPromptResponse(input, confirmation) ||
             !TransactionConfirmedByUser(std::move(confirmation)))
         {
             output << "startup: not run\n";
@@ -2256,7 +2280,7 @@ int RunCliAcquire(
                << " banked write(s) before acquisition [y/N]: "
                << std::flush;
         std::string confirmation;
-        if (!std::getline(input, confirmation)
+        if (!ReadPromptResponse(input, confirmation)
             || !TransactionConfirmedByUser(std::move(confirmation)))
         {
             output << "acquisition: not started\n";
@@ -2323,10 +2347,30 @@ int RunCliAcquire(
                           "p <register> <value> preview | r restore | "
                           "Enter stop\n";
                 std::uint32_t elapsedIntervals = 0U;
+                bool livenessWarningPrinted = false;
                 while (!(interruptRequested && interruptRequested()))
                 {
                     snapshot = tunerControl.CurrentSnapshot();
                     PrintAcquisitionStatus(output, *snapshot);
+                    std::uint64_t requestedChannelCount = 0U;
+                    for (const auto& channel :
+                         snapshot->diagnosticStream.channelWaveformTotals)
+                    {
+                        if (channel.channel == *options.channel)
+                        {
+                            requestedChannelCount = channel.total;
+                            break;
+                        }
+                    }
+                    if (!livenessWarningPrinted
+                        && elapsedIntervals >= 15U
+                        && requestedChannelCount == 0U)
+                    {
+                        output << "liveness_warning: no waveform has been observed on channel "
+                               << *options.channel
+                               << " after about 15 seconds; acquisition remains running and this warning is not a safety gate.\n";
+                        livenessWarningPrinted = true;
+                    }
                     if (snapshot->acquisition
                         != GuidedTunerAcquisitionState::Running)
                     {
@@ -2544,7 +2588,7 @@ int RunCliRecover(
 
     output << "Recover tuner-owned orphan [y/N]: " << std::flush;
     std::string confirmation;
-    if (!std::getline(input, confirmation)
+    if (!ReadPromptResponse(input, confirmation)
         || !TransactionConfirmedByUser(std::move(confirmation)))
     {
         output << "recovery: not run\n";
