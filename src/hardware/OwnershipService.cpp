@@ -26,6 +26,7 @@ constexpr int ReadOnlyTransactionAttempts = 3;
 constexpr int MaximumReadOnlyResponseDatagrams = 8;
 constexpr int CommandReceiveTimeoutMilliseconds = 500;
 constexpr std::size_t CommandResponseBufferSize = 9000U;
+constexpr std::uint16_t DiagnosticSampleConfigurationRegister = 0x614AU;
 
 const char* InUseMessage =
     "MVLC DAQ mode is active. Stop the MVME run and disconnect its VME "
@@ -264,8 +265,9 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     if (!validation.success)
     {
         TunerSnapshot snapshot;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The crate project is invalid.",
             validation.message);
@@ -274,8 +276,9 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     if (command.activeModuleIndex >= command.project.modules.size())
     {
         TunerSnapshot snapshot;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The active module index is outside the crate project.");
         return;
@@ -334,8 +337,12 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     const std::string detail = snapshot.targetSupported
         ? validation.message
         : "The selected QDC backend is not implemented.";
-    PublishStatus(
-        std::move(snapshot), level, "The crate project is active.", detail);
+    PublishActivityStatus(
+        std::move(snapshot),
+        ActivityLogCategory::Session,
+        level,
+        "The crate project is active.",
+        detail);
 }
 
 void OwnershipService::ClearProject()
@@ -354,8 +361,9 @@ void OwnershipService::ClearProject()
     pendingRecoveryRecord_.reset();
 
     TunerSnapshot snapshot;
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Session,
         TunerStatusLevel::Information,
         "No crate project is active.");
 }
@@ -366,8 +374,9 @@ void OwnershipService::CheckStatus()
     if (!transport_)
     {
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The ownership service has no command transport.");
         return;
@@ -375,24 +384,27 @@ void OwnershipService::CheckStatus()
     if (snapshot.recoveryRecordAvailable)
     {
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "Resolve the project recovery journal before normal controller access.");
         return;
     }
     if (!snapshot.projectActive)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "Select a valid crate project before checking the controller.");
         return;
     }
     if (snapshot.ownership == GuidedTunerOwnershipState::SessionOpen)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Information,
             "The tuner session is already open.");
         return;
@@ -411,8 +423,9 @@ void OwnershipService::SetHandoffConfirmed(bool confirmed)
 {
     auto snapshot = *CurrentSnapshot();
     snapshot.mvmeHandoffConfirmed = confirmed;
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Session,
         confirmed ? TunerStatusLevel::Success : TunerStatusLevel::Information,
         confirmed
             ? "MVME handoff has been confirmed."
@@ -425,8 +438,9 @@ void OwnershipService::OpenSession()
     if (!transport_)
     {
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The ownership service has no command transport.");
         return;
@@ -434,16 +448,18 @@ void OwnershipService::OpenSession()
     if (snapshot.recoveryRecordAvailable)
     {
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "Resolve the project recovery journal before opening a tuner session.");
         return;
     }
     if (snapshot.ownership != GuidedTunerOwnershipState::Idle)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "A verified idle status check is required before opening the "
             "tuner session.");
@@ -451,8 +467,9 @@ void OwnershipService::OpenSession()
     }
     if (!snapshot.mvmeHandoffConfirmed)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "An idle DAQ-mode register cannot prove that an idle MVME "
             "process has released USB. Confirmation is still required "
@@ -498,8 +515,9 @@ void OwnershipService::CaptureConfiguration()
         snapshot.configurationFresh = false;
         RefreshProfileComparison(snapshot);
         snapshot.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Capture,
             TunerStatusLevel::Warning,
             "Open a tuner session before reading an SCP configuration.");
         return;
@@ -517,8 +535,9 @@ void OwnershipService::CaptureConfiguration()
         snapshot.configurationFresh = false;
         RefreshProfileComparison(snapshot);
         snapshot.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Capture,
             TunerStatusLevel::Warning,
             "The selected module backend is not implemented for SCP "
             "configuration capture.");
@@ -564,7 +583,8 @@ void OwnershipService::CaptureConfiguration()
         ? TunerStatusLevel::Success
         : TunerStatusLevel::Error;
     const std::string message = operation.configuration.message;
-    PublishStatus(std::move(snapshot), level, message);
+    PublishActivityStatus(
+        std::move(snapshot), ActivityLogCategory::Capture, level, message);
 }
 
 void OwnershipService::SaveProfile(const std::string& path)
@@ -573,8 +593,9 @@ void OwnershipService::SaveProfile(const std::string& path)
     if (!snapshot.configurationCompleteForTarget ||
         !snapshot.configurationFresh)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Capture,
             TunerStatusLevel::Warning,
             "Capture a fresh SCP configuration for the active module "
             "before saving a profile.");
@@ -583,8 +604,9 @@ void OwnershipService::SaveProfile(const std::string& path)
 
     const auto saved = SaveFw2051ScpProfile(
         snapshot.configurationCapture, path);
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Capture,
         saved.success ? TunerStatusLevel::Success : TunerStatusLevel::Error,
         saved.message);
 }
@@ -608,8 +630,11 @@ void OwnershipService::LoadProfile(const std::string& path)
 
     if (!loaded.success || !loaded.profile)
     {
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Error, loaded.message);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Capture,
+            TunerStatusLevel::Error,
+            loaded.message);
         return;
     }
 
@@ -624,8 +649,9 @@ void OwnershipService::LoadProfile(const std::string& path)
 
     if (!snapshot.profileLoadedForTarget)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Capture,
             TunerStatusLevel::Warning,
             "The SCP profile loaded, but its VME base does not match the "
             "active module.",
@@ -633,8 +659,9 @@ void OwnershipService::LoadProfile(const std::string& path)
         return;
     }
 
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Capture,
         TunerStatusLevel::Success,
         loaded.message);
 }
@@ -645,16 +672,18 @@ void OwnershipService::ApplyProfileRow(
     auto snapshot = *CurrentSnapshot();
     if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Open a tuner session before applying an SCP profile value.");
         return;
     }
     if (!snapshot.profileLoadedForTarget)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Load an SCP profile for the active module before applying a "
             "value.");
@@ -664,8 +693,9 @@ void OwnershipService::ApplyProfileRow(
         !snapshot.configurationFresh ||
         !snapshot.configurationComparison.comparable)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Capture all eight SCP quads again before applying a profile "
             "value.");
@@ -684,8 +714,9 @@ void OwnershipService::ApplyProfileRow(
         FindFw2051ScpSetting(command.registerOffset) == nullptr ||
         found->liveValue > 0xFFFFU || found->profileValue > 0xFFFFU)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "The requested row is not an applicable banked SCP profile "
             "difference.");
@@ -724,12 +755,33 @@ void OwnershipService::ApplyProfileRow(
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
-    PublishStatus(
+    const auto level = result.state == ScpSingleRepairState::Passed
+        ? TunerStatusLevel::Success
+        : TunerStatusLevel::Error;
+    std::optional<ActivityParameterChange> change;
+    if (result.writeAttempted)
+    {
+        const auto retainedValue = result.profileValueRetained
+            ? result.profileValue
+            : result.rollbackVerified
+                ? result.rollbackReadback
+                : result.appliedReadback;
+        change = ActivityParameterChange{
+            result.registerOffset,
+            result.selectedQuad,
+            result.liveValueCaptured
+                ? result.capturedLiveValue
+                : result.expectedLiveValue,
+            retainedValue,
+        };
+    }
+    PublishActivityStatus(
         std::move(snapshot),
-        result.state == ScpSingleRepairState::Passed
-            ? TunerStatusLevel::Success
-            : TunerStatusLevel::Error,
-        result.message);
+        ActivityLogCategory::Apply,
+        level,
+        result.message,
+        {},
+        std::move(change));
 }
 
 void OwnershipService::ApplyAllDifferences()
@@ -737,16 +789,18 @@ void OwnershipService::ApplyAllDifferences()
     auto snapshot = *CurrentSnapshot();
     if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Open a tuner session before applying an SCP profile.");
         return;
     }
     if (!snapshot.profileLoadedForTarget)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Load an SCP profile for the active module before applying it.");
         return;
@@ -755,8 +809,9 @@ void OwnershipService::ApplyAllDifferences()
         !snapshot.configurationFresh ||
         !snapshot.configurationComparison.comparable)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Apply,
             TunerStatusLevel::Warning,
             "Capture all eight SCP quads again before applying a profile.");
         return;
@@ -769,8 +824,11 @@ void OwnershipService::ApplyAllDifferences()
         const auto message = snapshot.profileApplicationPlan.message.empty()
             ? "There are no applicable banked SCP differences to apply."
             : snapshot.profileApplicationPlan.message;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Warning, message);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Apply,
+            TunerStatusLevel::Warning,
+            message);
         return;
     }
 
@@ -801,8 +859,10 @@ void OwnershipService::ApplyAllDifferences()
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
-    PublishStatus(
+    AppendBulkWriteActivities(snapshot, result);
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Apply,
         result.state == ScpBulkApplyState::Passed
             ? TunerStatusLevel::Success
             : TunerStatusLevel::Error,
@@ -816,8 +876,9 @@ void OwnershipService::RunDeterministicStartup(
     RefreshProfileComparison(snapshot);
     if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Startup,
             TunerStatusLevel::Warning,
             "Open a tuner session before deterministic startup.");
         return;
@@ -830,8 +891,9 @@ void OwnershipService::RunDeterministicStartup(
         snapshot.deterministicStartupResult.message =
             "Deterministic startup requires explicit confirmation of the "
             "reviewed recipe.";
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Startup,
             TunerStatusLevel::Warning,
             "Deterministic startup requires explicit confirmation of the "
             "reviewed recipe.");
@@ -843,8 +905,11 @@ void OwnershipService::RunDeterministicStartup(
         const auto message = snapshot.standaloneStartupPlan.message.empty()
             ? "The deterministic startup recipe is not available."
             : snapshot.standaloneStartupPlan.message;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Warning, message);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Startup,
+            TunerStatusLevel::Warning,
+            message);
         return;
     }
 
@@ -904,8 +969,10 @@ void OwnershipService::RunDeterministicStartup(
         snapshot.configurationFresh = false;
     }
     RefreshProfileComparison(snapshot);
-    PublishStatus(
+    AppendBulkWriteActivities(snapshot, result.bankedApplication);
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Startup,
         result.state == DeterministicStartupState::Passed
             ? TunerStatusLevel::Success
             : TunerStatusLevel::Error,
@@ -918,40 +985,45 @@ void OwnershipService::StartDiagnosticAcquisition(
     auto snapshot = *CurrentSnapshot();
     if (snapshot.ownership != GuidedTunerOwnershipState::SessionOpen)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Warning,
             "Open a tuner session before direct acquisition.");
         return;
     }
     if (!snapshot.deterministicStartupPassed)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Warning,
             "Complete deterministic startup before direct acquisition.");
         return;
     }
     if (command.channel > 31U)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Warning,
             "The requested physical channel must be 0 through 31.");
         return;
     }
     if (!dataReceiver_)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Error,
             "The ownership service has no MVLC data receiver.");
         return;
     }
     if (acquisitionSession_)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Warning,
             "A diagnostic acquisition session is already active.");
         return;
@@ -1027,8 +1099,9 @@ void OwnershipService::StartDiagnosticAcquisition(
         != DiagnosticAcquisitionState::Running)
     {
         snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Error,
             acquisitionSession_->acquisition.message);
         return;
@@ -1055,8 +1128,9 @@ void OwnershipService::StartDiagnosticAcquisition(
             "The independent MVLC data receiver could not start.";
         snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
         snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Acquisition,
             TunerStatusLevel::Error,
             acquisitionSession_->acquisition.message);
         return;
@@ -1065,8 +1139,9 @@ void OwnershipService::StartDiagnosticAcquisition(
     snapshot.acquisition = GuidedTunerAcquisitionState::Running;
     snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
     snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Acquisition,
         TunerStatusLevel::Success,
         acquisitionSession_->acquisition.message);
 }
@@ -1083,8 +1158,9 @@ void OwnershipService::ChangeDiagnosticSource(
             DiagnosticSourceChangeState::Failed;
         snapshot.diagnosticSourceChange.message =
             "Start direct acquisition before changing the waveform source.";
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Source,
             TunerStatusLevel::Warning,
             "Start direct acquisition before changing the waveform source.");
         return;
@@ -1097,8 +1173,9 @@ void OwnershipService::ChangeDiagnosticSource(
         snapshot.diagnosticSourceChange.message =
             "Restore the active parameter preview before changing the waveform source.";
         const auto message = snapshot.diagnosticSourceChange.message;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Source,
             TunerStatusLevel::Warning,
             message);
         return;
@@ -1132,6 +1209,11 @@ void OwnershipService::ChangeDiagnosticSource(
     snapshot.diagnosticSourceChange = result;
     if (result.foreignFingerprint)
     {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Source,
+            TunerStatusLevel::Error,
+            result.message);
         DetachForForeignDiagnosticFingerprint(
             std::move(snapshot),
             "Tuner ownership was lost before the waveform-source change: "
@@ -1144,14 +1226,33 @@ void OwnershipService::ChangeDiagnosticSource(
         acquisitionReceiver_->ClearWaveformHistoriesForQuad(selectedQuad);
         snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
     }
-    PublishStatus(
+    const auto level = result.state == DiagnosticSourceChangeState::Passed
+        ? TunerStatusLevel::Success
+        : result.communicationUnavailable
+            ? TunerStatusLevel::Warning
+            : TunerStatusLevel::Error;
+    std::optional<ActivityParameterChange> change;
+    if (result.writeAttempted)
+    {
+        const auto retainedValue = result.writeVerified
+            ? result.appliedReadback
+            : result.rollbackVerified
+                ? result.restoredReadback
+                : result.appliedReadback;
+        change = ActivityParameterChange{
+            DiagnosticSampleConfigurationRegister,
+            result.selectedQuad,
+            result.originalConfiguration,
+            retainedValue,
+        };
+    }
+    PublishActivityStatus(
         std::move(snapshot),
-        result.state == DiagnosticSourceChangeState::Passed
-            ? TunerStatusLevel::Success
-            : result.communicationUnavailable
-                ? TunerStatusLevel::Warning
-                : TunerStatusLevel::Error,
-        result.message);
+        ActivityLogCategory::Source,
+        level,
+        result.message,
+        {},
+        std::move(change));
 }
 
 void OwnershipService::ApplyDiagnosticPreview(
@@ -1166,16 +1267,18 @@ void OwnershipService::ApplyDiagnosticPreview(
             DiagnosticParameterPreviewState::Failed;
         snapshot.diagnosticParameterPreview.message =
             "Start direct acquisition before previewing a parameter.";
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Preview,
             TunerStatusLevel::Warning,
             "Start direct acquisition before previewing a parameter.");
         return;
     }
     if (snapshot.diagnosticParameterPreview.previewActive)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Preview,
             TunerStatusLevel::Warning,
             "Restore the active parameter preview before applying another one.");
         return;
@@ -1211,6 +1314,11 @@ void OwnershipService::ApplyDiagnosticPreview(
     snapshot.diagnosticParameterPreview = result;
     if (result.foreignFingerprint)
     {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Preview,
+            TunerStatusLevel::Error,
+            result.message);
         DetachForForeignDiagnosticFingerprint(
             std::move(snapshot),
             "Tuner ownership was lost before the parameter preview: "
@@ -1223,14 +1331,34 @@ void OwnershipService::ApplyDiagnosticPreview(
         acquisitionReceiver_->ClearWaveformHistoriesForQuad(selectedQuad);
         snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
     }
-    PublishStatus(
+    const auto level = result.state
+            == DiagnosticParameterPreviewState::PreviewActive
+        ? TunerStatusLevel::Success
+        : result.communicationUnavailable
+            ? TunerStatusLevel::Warning
+            : TunerStatusLevel::Error;
+    std::optional<ActivityParameterChange> change;
+    if (result.writeAttempted)
+    {
+        const auto retainedValue = result.writeVerified
+            ? result.appliedReadback
+            : result.rollbackVerified
+                ? result.restoredReadback
+                : result.appliedReadback;
+        change = ActivityParameterChange{
+            result.registerOffset,
+            result.selectedQuad,
+            result.originalValue,
+            retainedValue,
+        };
+    }
+    PublishActivityStatus(
         std::move(snapshot),
-        result.state == DiagnosticParameterPreviewState::PreviewActive
-            ? TunerStatusLevel::Success
-            : result.communicationUnavailable
-                ? TunerStatusLevel::Warning
-                : TunerStatusLevel::Error,
-        result.message);
+        ActivityLogCategory::Preview,
+        level,
+        result.message,
+        {},
+        std::move(change));
 }
 
 bool OwnershipService::RestoreDiagnosticPreview(
@@ -1242,8 +1370,9 @@ bool OwnershipService::RestoreDiagnosticPreview(
     {
         if (!automaticallyRestoredOnStop)
         {
-            PublishStatus(
+            PublishActivityStatus(
                 std::move(snapshot),
+                ActivityLogCategory::Preview,
                 TunerStatusLevel::Warning,
                 "There is no active parameter preview to restore.");
         }
@@ -1256,8 +1385,9 @@ bool OwnershipService::RestoreDiagnosticPreview(
         snapshot.diagnosticParameterPreview.message =
             "The active preview cannot be restored without its acquisition session.";
         const auto message = snapshot.diagnosticParameterPreview.message;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Preview,
             TunerStatusLevel::Error,
             message);
         return false;
@@ -1291,6 +1421,11 @@ bool OwnershipService::RestoreDiagnosticPreview(
     snapshot.diagnosticParameterPreview = result;
     if (result.foreignFingerprint)
     {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Preview,
+            TunerStatusLevel::Error,
+            result.message);
         DetachForForeignDiagnosticFingerprint(
             std::move(snapshot),
             "Tuner ownership was lost before preview restoration: "
@@ -1307,10 +1442,23 @@ bool OwnershipService::RestoreDiagnosticPreview(
     const bool restored =
         result.state == DiagnosticParameterPreviewState::Restored
         && result.restoreVerified && !result.previewActive;
-    PublishStatus(
+    std::optional<ActivityParameterChange> change;
+    if (result.restoreAttempted)
+    {
+        change = ActivityParameterChange{
+            result.registerOffset,
+            result.selectedQuad,
+            activePreview.appliedReadback,
+            result.restoredReadback,
+        };
+    }
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Preview,
         restored ? TunerStatusLevel::Success : TunerStatusLevel::Error,
-        result.message);
+        result.message,
+        {},
+        std::move(change));
     return restored;
 }
 
@@ -1319,8 +1467,9 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
     auto snapshot = *CurrentSnapshot();
     if (!pendingRecoveryRecord_)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Recovery,
             TunerStatusLevel::Warning,
             snapshot.recoveryJournalStatus
                     == RecoveryJournalStatus::Malformed
@@ -1338,8 +1487,9 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
             "Could not open the journaled MVLC endpoint for recovery status: "
                 + opened.error);
@@ -1368,8 +1518,9 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
         const auto error = !firmware.success
             ? firmware.error
             : !daq.success ? daq.error : hardware.error;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
             "Could not read recovery status from the journaled MVLC: "
                 + error);
@@ -1381,8 +1532,9 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
     snapshot.mvlcHardwareId = hardware.value;
     snapshot.controllerReadingsValid = true;
     snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Recovery,
         TunerStatusLevel::Warning,
         daq.value == 0U
             ? "The journaled MVLC is already DAQ-idle; recovery can remove the stale journal without a hardware write."
@@ -1401,8 +1553,9 @@ void OwnershipService::RecoverDiagnosticOrphan(
     auto snapshot = *CurrentSnapshot();
     if (!pendingRecoveryRecord_)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Recovery,
             TunerStatusLevel::Warning,
             snapshot.recoveryJournalStatus
                     == RecoveryJournalStatus::Malformed
@@ -1413,8 +1566,9 @@ void OwnershipService::RecoverDiagnosticOrphan(
     }
     if (!transport_)
     {
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
             "Recovery refused: the ownership service has no command transport.");
         return;
@@ -1480,6 +1634,27 @@ void OwnershipService::RecoverDiagnosticOrphan(
         snapshot.recoveryRecord = pendingRecoveryRecord_;
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
     }
+    if (result.steps.empty())
+    {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Recovery,
+            completed ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+            result.message);
+    }
+    else
+    {
+        for (const auto& step : result.steps)
+        {
+            AppendActivity(
+                snapshot,
+                ActivityLogCategory::Recovery,
+                step.success
+                    ? TunerStatusLevel::Success
+                    : TunerStatusLevel::Error,
+                step.name + ": " + step.message);
+        }
+    }
     PublishStatus(
         std::move(snapshot),
         completed ? TunerStatusLevel::Success : TunerStatusLevel::Error,
@@ -1495,14 +1670,16 @@ bool OwnershipService::RestoreDiagnosticSource(
     {
         return true;
     }
+    const auto activeSource = snapshot.diagnosticSourceChange;
     if (!acquisitionReceiver_)
     {
         snapshot.diagnosticSourceChange.state =
             DiagnosticSourceChangeState::Failed;
         snapshot.diagnosticSourceChange.message =
             "The waveform source cannot be restored without its acquisition session.";
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Source,
             TunerStatusLevel::Error,
             "The waveform source cannot be restored without its acquisition session.");
         return false;
@@ -1529,6 +1706,11 @@ bool OwnershipService::RestoreDiagnosticSource(
     snapshot.diagnosticSourceChange = result;
     if (result.foreignFingerprint)
     {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Source,
+            TunerStatusLevel::Error,
+            result.message);
         DetachForForeignDiagnosticFingerprint(
             std::move(snapshot),
             "Tuner ownership was lost before waveform-source restoration: "
@@ -1545,10 +1727,23 @@ bool OwnershipService::RestoreDiagnosticSource(
     const bool restored = result.state
             == DiagnosticSourceChangeState::Passed
         && result.restoreVerified && !result.sourceRestoreRequired;
-    PublishStatus(
+    std::optional<ActivityParameterChange> change;
+    if (result.restoreAttempted)
+    {
+        change = ActivityParameterChange{
+            DiagnosticSampleConfigurationRegister,
+            result.selectedQuad,
+            activeSource.appliedReadback,
+            result.restoredReadback,
+        };
+    }
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Source,
         restored ? TunerStatusLevel::Success : TunerStatusLevel::Error,
-        result.message);
+        result.message,
+        {},
+        std::move(change));
     return restored;
 }
 
@@ -1678,8 +1873,9 @@ bool OwnershipService::StopDiagnosticAcquisition()
     }
 
     const std::string message = acquisitionSession_->acquisition.message;
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Acquisition,
         stoppedCleanly ? TunerStatusLevel::Success : TunerStatusLevel::Error,
         message);
     acquisitionReceiver_.reset();
@@ -1729,8 +1925,11 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Error, opened.error);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Error,
+            opened.error);
         return;
     }
 
@@ -1743,8 +1942,11 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Error, firmware.error);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Error,
+            firmware.error);
         return;
     }
     snapshot.mvlcFirmwareRevision = firmware.value;
@@ -1755,8 +1957,11 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Error, daq.error);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Error,
+            daq.error);
         return;
     }
     snapshot.mvlcDaqMode = daq.value;
@@ -1764,8 +1969,11 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::InUse;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Warning, InUseMessage);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Warning,
+            InUseMessage);
         return;
     }
 
@@ -1781,8 +1989,11 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
-            std::move(snapshot), TunerStatusLevel::Error, hardware.error);
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Error,
+            hardware.error);
         return;
     }
     snapshot.mvlcHardwareId = hardware.value;
@@ -1791,8 +2002,9 @@ void OwnershipService::ProbeController(
     {
         transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             InvalidHardwareMessage);
         return;
@@ -1802,8 +2014,9 @@ void OwnershipService::ProbeController(
         ? GuidedTunerOwnershipState::SessionOpen
         : GuidedTunerOwnershipState::Idle;
     watchdogCommunicationUncertain_ = false;
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Session,
         TunerStatusLevel::Success,
         retainSession ? SessionOpenMessage : IdleMessage);
     if (!retainSession)
@@ -1821,8 +2034,9 @@ void OwnershipService::ProbeController(
         transport_->Close();
         auto failed = *CurrentSnapshot();
         failed.ownership = GuidedTunerOwnershipState::Failed;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(failed),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The ownership watchdog could not start.",
             error.what());
@@ -1861,8 +2075,9 @@ void OwnershipService::ReleaseSession()
         detached.controllerReadingsValid = false;
         detached.mvmeHandoffConfirmed = false;
         detached.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(detached),
+            ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "The local tuner session was released. The recovery journal "
             "was retained because verified hardware cleanup was not safe.");
@@ -1908,8 +2123,9 @@ void OwnershipService::ReleaseSession()
     snapshot.diagnosticStream = {};
     snapshot.diagnosticSourceChange = {};
     snapshot.diagnosticParameterPreview = {};
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Session,
         TunerStatusLevel::Information,
         DisconnectedMessage);
 }
@@ -1930,8 +2146,9 @@ void OwnershipService::RunStartupAudit()
         snapshot.startupAuditCompleteForTarget = false;
         snapshot.startupAuditReady = false;
         snapshot.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Audit,
             TunerStatusLevel::Warning,
             "Open a tuner session before auditing module-wide startup "
             "settings.");
@@ -1949,8 +2166,9 @@ void OwnershipService::RunStartupAudit()
         snapshot.startupAuditCompleteForTarget = false;
         snapshot.startupAuditReady = false;
         snapshot.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Audit,
             TunerStatusLevel::Warning,
             "The selected module backend is not implemented for startup "
             "auditing.");
@@ -1987,8 +2205,9 @@ void OwnershipService::RunStartupAudit()
         snapshot.startupAuditCompleteForTarget = false;
         snapshot.startupAuditReady = false;
         snapshot.activeOperation = GuidedTunerOperation::None;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Audit,
             TunerStatusLevel::Error,
             gate.message);
         return;
@@ -2045,8 +2264,9 @@ void OwnershipService::RunStartupAudit()
         snapshot.startupAuditCompleteForTarget = false;
         snapshot.startupAuditReady = false;
         const std::string message = snapshot.startupAudit.message;
-        PublishStatus(
+        PublishActivityStatus(
             std::move(snapshot),
+            ActivityLogCategory::Audit,
             TunerStatusLevel::Error,
             message);
         return;
@@ -2061,8 +2281,9 @@ void OwnershipService::RunStartupAudit()
         snapshot.startupAuditCompleteForTarget &&
         audit.readyForDiagnosticStart;
     RefreshProfileComparison(snapshot);
-    PublishStatus(
+    PublishActivityStatus(
         std::move(snapshot),
+        ActivityLogCategory::Audit,
         audit.readyForDiagnosticStart
             ? TunerStatusLevel::Success
             : TunerStatusLevel::Warning,
@@ -2516,6 +2737,11 @@ void OwnershipService::PollWatchdog()
                   "write, or readout-stack cleanup was sent, so a possible "
                   "MVME run was left untouched.";
             snapshot.diagnosticAcquisition = acquisition;
+            AppendActivity(
+                snapshot,
+                ActivityLogCategory::Acquisition,
+                TunerStatusLevel::Error,
+                message);
             DetachForForeignDiagnosticFingerprint(
                 std::move(snapshot), message);
             return;
@@ -2603,8 +2829,13 @@ void OwnershipService::DetachForForeignDaq(
     snapshot.deterministicStartupPassed = false;
     snapshot.deterministicStartupResult = {};
     RefreshProfileComparison(snapshot);
-    PublishStatus(
+    const auto category =
+        snapshot.acquisition == GuidedTunerAcquisitionState::Running
+        ? ActivityLogCategory::Acquisition
+        : ActivityLogCategory::Session;
+    PublishActivityStatus(
         std::move(snapshot),
+        category,
         TunerStatusLevel::Error,
         std::move(message));
 }
@@ -2692,6 +2923,75 @@ void OwnershipService::PublishStatus(
     snapshot.statusMessages.push_back(
         {level, std::move(summary), std::move(detail)});
     Publish(std::move(snapshot));
+}
+
+void OwnershipService::PublishActivityStatus(
+    TunerSnapshot snapshot,
+    const ActivityLogCategory category,
+    const TunerStatusLevel level,
+    std::string summary,
+    std::string detail,
+    std::optional<ActivityParameterChange> parameterChange)
+{
+    AppendActivity(
+        snapshot,
+        category,
+        level,
+        summary,
+        std::move(parameterChange));
+    PublishStatus(
+        std::move(snapshot), level, std::move(summary), std::move(detail));
+}
+
+void OwnershipService::AppendActivity(
+    TunerSnapshot& snapshot,
+    const ActivityLogCategory category,
+    const TunerStatusLevel level,
+    std::string summary,
+    std::optional<ActivityParameterChange> parameterChange)
+{
+    snapshot.activityLog.Append({
+        std::chrono::system_clock::now(),
+        category,
+        level,
+        std::move(summary),
+        std::move(parameterChange),
+    });
+}
+
+void OwnershipService::AppendBulkWriteActivities(
+    TunerSnapshot& snapshot,
+    const ScpBulkApplyResult& result)
+{
+    for (const auto& value : result.values)
+    {
+        if (!value.writeAttempted || value.quad < 0)
+        {
+            continue;
+        }
+
+        const auto severity = value.profileValueRetained
+            ? TunerStatusLevel::Success
+            : value.rollbackVerified
+                ? TunerStatusLevel::Warning
+                : TunerStatusLevel::Error;
+        const std::string outcome = value.profileValueRetained
+            ? " retained the profile value."
+            : value.rollbackVerified
+                ? " was rolled back to its prior value."
+                : " did not retain a verified value.";
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Apply,
+            severity,
+            "Bulk profile write for " + value.settingName + outcome,
+            ActivityParameterChange{
+                value.registerOffset,
+                static_cast<std::uint16_t>(value.quad),
+                value.expectedValue,
+                value.profileValue,
+            });
+    }
 }
 
 } // namespace fidget

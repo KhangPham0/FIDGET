@@ -1072,6 +1072,8 @@ TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
           == GuidedTunerOwnershipState::RecoveryRequired);
 
     QueueAlreadyCleanRecovery(*transport, record);
+    const auto activitiesBeforeRecovery =
+        service.CurrentSnapshot()->activityLog.Size();
     service.Submit(RecoverDiagnosticOrphanCommand{true});
     REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
         return snapshot.diagnosticRecovery.state
@@ -1082,6 +1084,16 @@ TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
     CHECK(recovered->recoveryJournalStatus == RecoveryJournalStatus::None);
     CHECK(recovered->ownership == GuidedTunerOwnershipState::Disconnected);
     CHECK_FALSE(std::filesystem::exists(files.journalPath));
+    REQUIRE_FALSE(recovered->diagnosticRecovery.steps.empty());
+    CHECK(recovered->activityLog.Size()
+          == activitiesBeforeRecovery
+              + recovered->diagnosticRecovery.steps.size());
+    for (std::size_t index = activitiesBeforeRecovery;
+         index < recovered->activityLog.Size(); ++index)
+    {
+        CHECK(recovered->activityLog.Entries()[index].category
+              == ActivityLogCategory::Recovery);
+    }
 
     for (const auto& request : transport->SentRequests())
     {
@@ -1674,6 +1686,7 @@ TEST_CASE("the service applies one row and makes the capture stale")
           0x611AU);
 
     QueueSingleGainApply(*transport, 13U);
+    const auto activitiesBeforeApply = ready->activityLog.Size();
     service.Submit(ApplyProfileRowCommand{0x611AU, 7U});
     REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
         return snapshot.singleRepairResult.state ==
@@ -1693,6 +1706,14 @@ TEST_CASE("the service applies one row and makes the capture stale")
     CHECK_FALSE(applied->profileApplicationPlan.success);
     CHECK(applied->configurationComparison.message.find(
               "Capture a fresh SCP configuration") != std::string::npos);
+    REQUIRE(applied->activityLog.Size() == activitiesBeforeApply + 1U);
+    const auto& activity = applied->activityLog.Entries().back();
+    CHECK(activity.category == ActivityLogCategory::Apply);
+    REQUIRE(activity.parameterChange.has_value());
+    CHECK(activity.parameterChange->registerOffset == 0x611AU);
+    CHECK(activity.parameterChange->quad == 7U);
+    CHECK(activity.parameterChange->before == 250U);
+    CHECK(activity.parameterChange->after == 200U);
 
     const auto requestCount = transport->SentRequests().size();
     const auto beforeRefusal = applied->revision;
@@ -1743,6 +1764,7 @@ TEST_CASE("the service applies the planned banked differences and stales")
           0x614AU);
 
     QueueBulkApply(*transport, live, 13U);
+    const auto activitiesBeforeApply = ready->activityLog.Size();
     service.Submit(ApplyAllDifferencesCommand{});
     REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
         return snapshot.bulkApplyResult.state == ScpBulkApplyState::Passed;
@@ -1760,6 +1782,23 @@ TEST_CASE("the service applies the planned banked differences and stales")
     CHECK(applied->bulkApplyResult.readoutResetSent);
     CHECK_FALSE(applied->configurationFresh);
     CHECK_FALSE(applied->configurationComparison.comparable);
+    REQUIRE(applied->activityLog.Size() == activitiesBeforeApply + 3U);
+    const auto& activities = applied->activityLog.Entries();
+    REQUIRE(activities[activitiesBeforeApply].parameterChange.has_value());
+    CHECK(activities[activitiesBeforeApply].parameterChange->registerOffset
+          == 0x611AU);
+    CHECK(activities[activitiesBeforeApply].parameterChange->before == 250U);
+    CHECK(activities[activitiesBeforeApply].parameterChange->after == 200U);
+    REQUIRE(activities[activitiesBeforeApply + 1U]
+                .parameterChange.has_value());
+    CHECK(activities[activitiesBeforeApply + 1U]
+              .parameterChange->registerOffset == 0x614AU);
+    CHECK(activities[activitiesBeforeApply + 1U]
+              .parameterChange->before == 3U);
+    CHECK(activities[activitiesBeforeApply + 1U]
+              .parameterChange->after == 0U);
+    CHECK(activities.back().category == ActivityLogCategory::Apply);
+    CHECK_FALSE(activities.back().parameterChange.has_value());
 }
 
 TEST_CASE("the service exposes the planner reason for a global mismatch")
@@ -1924,4 +1963,73 @@ TEST_CASE("diagnostic tune commands refuse to run outside acquisition")
     CHECK(refused->diagnosticParameterPreview.state
           == DiagnosticParameterPreviewState::Failed);
     CHECK(transport->SentRequests().size() == requestCount);
+}
+
+TEST_CASE("typed service operations publish one categorized completion")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseProject(service);
+
+    const auto expectCompletion = [&service](
+                                      TunerCommand command,
+                                      const ActivityLogCategory category) {
+        const auto before = service.CurrentSnapshot();
+        const auto activityCount = before->activityLog.Size();
+        service.Submit(std::move(command));
+        REQUIRE(WaitFor(service, [activityCount](
+                                     const TunerSnapshot& snapshot) {
+            return snapshot.activityLog.Size() > activityCount;
+        }));
+        const auto after = service.CurrentSnapshot();
+        REQUIRE(after->activityLog.Size() == activityCount + 1U);
+        CHECK(after->activityLog.Entries().back().category == category);
+    };
+
+    expectCompletion(
+        RunStartupAuditCommand{}, ActivityLogCategory::Audit);
+    expectCompletion(
+        CaptureConfigurationCommand{}, ActivityLogCategory::Capture);
+    expectCompletion(
+        SaveProfileCommand{"unused.mwwscp"},
+        ActivityLogCategory::Capture);
+    expectCompletion(
+        LoadProfileCommand{"missing-profile.mwwscp"},
+        ActivityLogCategory::Capture);
+    expectCompletion(
+        ApplyProfileRowCommand{0x611AU, 7U},
+        ActivityLogCategory::Apply);
+    expectCompletion(
+        ApplyAllDifferencesCommand{}, ActivityLogCategory::Apply);
+    expectCompletion(
+        RunDeterministicStartupCommand{false},
+        ActivityLogCategory::Startup);
+    expectCompletion(
+        StartDiagnosticAcquisitionCommand{29U},
+        ActivityLogCategory::Acquisition);
+    expectCompletion(
+        ChangeDiagnosticSourceCommand{3U}, ActivityLogCategory::Source);
+    expectCompletion(
+        ApplyDiagnosticPreviewCommand{0x6124U, 200U},
+        ActivityLogCategory::Preview);
+    expectCompletion(
+        RestoreDiagnosticPreviewCommand{}, ActivityLogCategory::Preview);
+    expectCompletion(
+        RecoverDiagnosticOrphanCommand{true},
+        ActivityLogCategory::Recovery);
+    expectCompletion(
+        SetMvmeHandoffConfirmedCommand{true},
+        ActivityLogCategory::Session);
+
+    QueueIdleProbe(*transport);
+    expectCompletion(CheckStatusCommand{}, ActivityLogCategory::Session);
+    CHECK(service.CurrentSnapshot()->ownership
+          == GuidedTunerOwnershipState::Idle);
+
+    expectCompletion(ReleaseSessionCommand{}, ActivityLogCategory::Session);
 }

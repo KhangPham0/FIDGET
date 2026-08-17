@@ -1,6 +1,7 @@
 #ifndef FIDGET_CORE_TUNER_SNAPSHOT_H
 #define FIDGET_CORE_TUNER_SNAPSHOT_H
 
+#include "core/ActivityLog.h"
 #include "core/Acquisition.h"
 #include "core/CrateProject.h"
 #include "core/DeterministicStartup.h"
@@ -96,6 +97,7 @@ struct TunerSnapshot
     DiagnosticParameterPreviewResult diagnosticParameterPreview;
     bool cleanupVerified = false;
 
+    ActivityLog activityLog;
     std::vector<TunerStatusMessage> statusMessages;
 };
 

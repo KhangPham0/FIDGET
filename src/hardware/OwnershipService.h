@@ -132,6 +132,24 @@ private:
         TunerStatusLevel level,
         std::string summary,
         std::string detail = {});
+    void PublishActivityStatus(
+        TunerSnapshot snapshot,
+        ActivityLogCategory category,
+        TunerStatusLevel level,
+        std::string summary,
+        std::string detail = {},
+        std::optional<ActivityParameterChange> parameterChange =
+            std::nullopt);
+    void AppendActivity(
+        TunerSnapshot& snapshot,
+        ActivityLogCategory category,
+        TunerStatusLevel level,
+        std::string summary,
+        std::optional<ActivityParameterChange> parameterChange =
+            std::nullopt);
+    void AppendBulkWriteActivities(
+        TunerSnapshot& snapshot,
+        const ScpBulkApplyResult& result);
 
     std::unique_ptr<ICommandTransport> transport_;
     std::unique_ptr<IDataReceiver> dataReceiver_;
