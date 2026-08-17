@@ -97,6 +97,11 @@ struct RestoreDiagnosticPreviewCommand
 {
 };
 
+struct RecoverDiagnosticOrphanCommand
+{
+    bool confirmed = false;
+};
+
 using TunerCommand = std::variant<
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
@@ -115,6 +120,7 @@ using TunerCommand = std::variant<
     ChangeDiagnosticSourceCommand,
     ApplyDiagnosticPreviewCommand,
     RestoreDiagnosticPreviewCommand,
+    RecoverDiagnosticOrphanCommand,
     ReleaseSessionCommand>;
 
 class ITunerControl

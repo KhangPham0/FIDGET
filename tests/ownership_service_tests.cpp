@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "core/VmeProtocol.h"
+#include "core/RecoveryVerification.h"
 #include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 #include "fake_command_transport.h"
@@ -15,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -49,6 +52,28 @@ struct TemporaryProfile
         {
             std::remove(path.c_str());
         }
+    }
+};
+
+struct TemporaryRecoveryProject
+{
+    std::string projectPath;
+    std::string journalPath;
+
+    TemporaryRecoveryProject()
+    {
+        const auto unique = std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+        projectPath = (std::filesystem::temp_directory_path()
+            / ("fidget-service-recovery-" + std::to_string(unique)
+               + ".mwwcrate")).string();
+        journalPath = fidget::ProjectTunerRecoveryJournalPath(projectPath);
+    }
+
+    ~TemporaryRecoveryProject()
+    {
+        std::remove(projectPath.c_str());
+        std::remove(journalPath.c_str());
     }
 };
 
@@ -553,6 +578,84 @@ fidget::CrateProject MakeProject()
     return project;
 }
 
+fidget::TunerRecoveryRecord MakeRecoveryRecord()
+{
+    using namespace fidget;
+
+    TunerRecoveryRecord record;
+    record.phase = TunerRecoveryPhase::Active;
+    record.host = "mvlc-test";
+    record.commandPort = 32768U;
+    record.mvlcHardwareId = ExpectedMvlcHardwareId;
+    record.mvlcFirmwareRevision = 0x0046U;
+    record.mdppBaseAddress = 0x11000000U;
+    record.mdppHardwareId = 0x5007U;
+    record.mdppIrqLevel = 3U;
+    record.mdppOutputFormat = 0x0018U;
+    record.stackTriggerRegister = 0x1104U;
+    record.stackTriggerValue = 0x0042U;
+    record.stackOffsetRegister = 0x1204U;
+    record.stackOffsetValue = 0x0200U;
+    record.ownershipTokenRegister = 0x221CU;
+    record.ownershipTokenValue = 0xA55A1234U;
+    return record;
+}
+
+void QueueBatchRead(
+    fidget::test::FakeCommandTransport& transport,
+    const std::uint16_t reference,
+    const std::vector<std::uint16_t>& addresses,
+    const std::vector<std::uint32_t>& values)
+{
+    using namespace fidget;
+    REQUIRE(addresses.size() == values.size());
+    const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+        reference, addresses.data(), addresses.size());
+    REQUIRE(request.success);
+    std::vector<std::uint32_t> frame{
+        (static_cast<std::uint32_t>(MvlcSuperFrameType) << 24U)
+            | static_cast<std::uint32_t>(1U + addresses.size() * 2U),
+        MvlcReferenceWordCommand | reference,
+    };
+    for (std::size_t index = 0U; index < addresses.size(); ++index)
+    {
+        frame.push_back(MvlcReadLocalCommand | addresses[index]);
+        frame.push_back(values[index]);
+    }
+    transport.QueueExchange({
+        EncodeWords(request.words),
+        {fidget::test::FakeReceiveAction::Datagram(
+            MakeCommandPacket({frame}))},
+    });
+}
+
+void QueueAlreadyCleanRecovery(
+    fidget::test::FakeCommandTransport& transport,
+    const fidget::TunerRecoveryRecord& record)
+{
+    using namespace fidget;
+
+    QueueBatchRead(
+        transport,
+        0x5000U,
+        {
+            TunerRecoveryMvlcHardwareIdRegister,
+            TunerRecoveryMvlcFirmwareRegister,
+        },
+        {record.mvlcHardwareId, record.mvlcFirmwareRevision});
+    const auto expected = BuildTunerRecoveryFingerprintExpectation(record);
+    REQUIRE(expected.success);
+    auto values = std::vector<std::uint32_t>(
+        expected.values.begin(), expected.values.end());
+    values[0] = 0U;
+    QueueBatchRead(
+        transport,
+        0x5001U,
+        std::vector<std::uint16_t>(
+            expected.addresses.begin(), expected.addresses.end()),
+        values);
+}
+
 bool WaitFor(
     fidget::OwnershipService& service,
     const std::function<bool(const fidget::TunerSnapshot&)>& predicate);
@@ -857,6 +960,139 @@ void CheckOnlyReadRequests(
 }
 
 } // namespace
+
+TEST_CASE("recovery is refused without a journal even on a busy crate")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.projectActive;
+    }));
+    CHECK(service.CurrentSnapshot()->recoveryJournalStatus
+          == RecoveryJournalStatus::None);
+
+    QueueRead(*transport, FirmwareRevisionRegister, 1U, 0x0046U);
+    QueueRead(*transport, DaqModeRegister, 2U, 0x00000005U);
+    service.Submit(CheckStatusCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership == GuidedTunerOwnershipState::InUse;
+    }));
+    const auto requestsBeforeRecovery = transport->SentRequests().size();
+
+    const auto revision = service.CurrentSnapshot()->revision;
+    service.Submit(RecoverDiagnosticOrphanCommand{true});
+    REQUIRE(WaitFor(service, [revision](const TunerSnapshot& snapshot) {
+        return snapshot.revision > revision;
+    }));
+    CHECK(transport->SentRequests().size() == requestsBeforeRecovery);
+    CHECK(service.CurrentSnapshot()->diagnosticRecovery.state
+          == DiagnosticOrphanRecoveryState::NotRun);
+}
+
+TEST_CASE("malformed recovery journals are surfaced and retained")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    {
+        std::ofstream malformed(files.journalPath, std::ios::trunc);
+        malformed << "damaged recovery evidence\n";
+    }
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.recoveryJournalStatus
+            == RecoveryJournalStatus::Malformed;
+    }));
+    const auto revision = service.CurrentSnapshot()->revision;
+    service.Submit(RecoverDiagnosticOrphanCommand{true});
+    REQUIRE(WaitFor(service, [revision](const TunerSnapshot& snapshot) {
+        return snapshot.revision > revision;
+    }));
+
+    CHECK(transport->SentRequests().empty());
+    CHECK(std::filesystem::exists(files.journalPath));
+    CHECK(service.CurrentSnapshot()->recoveryRecordAvailable);
+    CHECK_FALSE(service.CurrentSnapshot()->recoveryRecord.has_value());
+}
+
+TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    const auto record = MakeRecoveryRecord();
+    REQUIRE(SaveTunerRecoveryJournal(record, files.journalPath).success);
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.recoveryJournalStatus
+            == RecoveryJournalStatus::Pending;
+    }));
+    CHECK(service.CurrentSnapshot()->ownership
+          == GuidedTunerOwnershipState::RecoveryRequired);
+
+    QueueRead(*transport, TunerRecoveryMvlcFirmwareRegister, 1U, 0x0046U);
+    QueueRead(*transport, TunerRecoveryDaqModeRegister, 2U, 0x00000005U);
+    QueueRead(
+        *transport,
+        TunerRecoveryMvlcHardwareIdRegister,
+        3U,
+        ExpectedMvlcHardwareId);
+    service.Submit(RecoverDiagnosticOrphanCommand{false});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.controllerReadingsValid;
+    }));
+    CHECK(service.CurrentSnapshot()->mvlcDaqMode == 0x00000005U);
+    CHECK(service.CurrentSnapshot()->ownership
+          == GuidedTunerOwnershipState::RecoveryRequired);
+
+    QueueAlreadyCleanRecovery(*transport, record);
+    service.Submit(RecoverDiagnosticOrphanCommand{true});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.diagnosticRecovery.state
+            == DiagnosticOrphanRecoveryState::AlreadyClean;
+    }));
+    const auto recovered = service.CurrentSnapshot();
+    CHECK_FALSE(recovered->recoveryRecordAvailable);
+    CHECK(recovered->recoveryJournalStatus == RecoveryJournalStatus::None);
+    CHECK(recovered->ownership == GuidedTunerOwnershipState::Disconnected);
+    CHECK_FALSE(std::filesystem::exists(files.journalPath));
+
+    for (const auto& request : transport->SentRequests())
+    {
+        const auto words = DecodeWords(request);
+        for (const auto word : words)
+        {
+            CHECK(word != MvlcVmeWriteA32D16Command);
+            CHECK((word & 0xFFFF0000U) != MvlcWriteLocalCommand);
+        }
+    }
+}
 
 TEST_CASE("an idle check permits a confirmed session and release")
 {

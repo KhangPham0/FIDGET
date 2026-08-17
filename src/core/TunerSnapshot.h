@@ -5,6 +5,7 @@
 #include "core/CrateProject.h"
 #include "core/DeterministicStartup.h"
 #include "core/GuidedWorkflow.h"
+#include "core/RecoveryVerification.h"
 #include "core/ScpConfiguration.h"
 #include "core/ScpProfile.h"
 #include "core/ScpTransactionPlan.h"
@@ -14,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,13 @@ enum class TunerStatusLevel
     Success,
     Warning,
     Error,
+};
+
+enum class RecoveryJournalStatus
+{
+    None,
+    Pending,
+    Malformed,
 };
 
 struct TunerStatusMessage
@@ -59,6 +68,11 @@ struct TunerSnapshot
 
     bool recoveryRecordAvailable = false;
     std::string recoveryJournalPath;
+    RecoveryJournalStatus recoveryJournalStatus =
+        RecoveryJournalStatus::None;
+    std::string recoveryJournalMessage;
+    std::optional<TunerRecoveryRecord> recoveryRecord;
+    DiagnosticOrphanRecoveryResult diagnosticRecovery;
     GuidedTunerOperation activeOperation = GuidedTunerOperation::None;
     bool profileLoaded = false;
     bool profileLoadedForTarget = false;

@@ -43,6 +43,69 @@ struct TemporaryCsv
     TemporaryCsv& operator=(const TemporaryCsv&) = delete;
 };
 
+struct TemporaryCrateProject
+{
+    std::string path;
+
+    TemporaryCrateProject()
+    {
+        const auto unique = std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count();
+        path = "/tmp/fidget_cli_recovery_" + std::to_string(unique)
+            + ".mwwcrate";
+        fidget::CrateProject project;
+        project.mvlcHost = "mvlc-test";
+        project.mvlcCommandPort = 32768U;
+        project.streamHost = "stream-test";
+        project.streamPort = 42333U;
+        project.modules.push_back({
+            "MDPP-32 SCP",
+            0x11000000U,
+            fidget::MdppBackend::Scp,
+            "mdpp1_scp_profile.mwwscp",
+        });
+        REQUIRE(fidget::SaveCrateProject(project, path).success);
+    }
+
+    ~TemporaryCrateProject()
+    {
+        std::remove(path.c_str());
+    }
+
+    TemporaryCrateProject(const TemporaryCrateProject&) = delete;
+    TemporaryCrateProject& operator=(const TemporaryCrateProject&) = delete;
+};
+
+fidget::TunerRecoveryRecord MakeRecoveryRecord()
+{
+    fidget::TunerRecoveryRecord record;
+    record.phase = fidget::TunerRecoveryPhase::Active;
+    record.host = "mvlc-test";
+    record.commandPort = 32768U;
+    record.mvlcHardwareId = 0x5008U;
+    record.mvlcFirmwareRevision = 0x0046U;
+    record.mdppBaseAddress = 0x11000000U;
+    record.mdppHardwareId = 0x5007U;
+    record.mdppIrqLevel = 3U;
+    record.mdppOutputFormat = 0x0018U;
+    record.stackTriggerRegister = 0x1104U;
+    record.stackTriggerValue = 0x0042U;
+    record.stackOffsetRegister = 0x1204U;
+    record.stackOffsetValue = 0x0200U;
+    record.ownershipTokenRegister = 0x221CU;
+    record.ownershipTokenValue = 0xA55A1234U;
+    record.previewRestoreRequired = true;
+    record.previewQuad = 7U;
+    record.previewRegisterOffset = 0x611AU;
+    record.previewOriginalValue = 200U;
+    record.previewAppliedValue = 250U;
+    record.sourceRestoreRequired = true;
+    record.sourceQuad = 7U;
+    record.sourceOriginalConfiguration = 0x0040U;
+    return record;
+}
+
 fidget::StartupAuditResult MakeAuditResult(bool blocked)
 {
     std::array<
@@ -214,6 +277,26 @@ public:
                 project->project.modules[project->activeModuleIndex]
                     .profilePath;
             next.targetSupported = true;
+            next.projectPath = project->projectPath;
+            next.recoveryJournalPath = project->projectPath + ".recovery";
+            next.recoveryJournalStatus = recoveryJournalStatus;
+            next.recoveryRecordAvailable = recoveryJournalStatus
+                != fidget::RecoveryJournalStatus::None;
+            if (recoveryJournalStatus
+                == fidget::RecoveryJournalStatus::Pending)
+            {
+                next.recoveryRecord = MakeRecoveryRecord();
+                next.ownership =
+                    fidget::GuidedTunerOwnershipState::RecoveryRequired;
+            }
+            else if (recoveryJournalStatus
+                     == fidget::RecoveryJournalStatus::Malformed)
+            {
+                next.recoveryJournalMessage =
+                    "Tuner recovery-journal checksum mismatch.";
+                next.ownership =
+                    fidget::GuidedTunerOwnershipState::RecoveryRequired;
+            }
         }
         else if (std::holds_alternative<fidget::CheckStatusCommand>(command))
         {
@@ -561,6 +644,60 @@ public:
             preview.previewActive = false;
             preview.restoreVerified = true;
         }
+        else if (const auto* recovery = std::get_if<
+                     fidget::RecoverDiagnosticOrphanCommand>(&command))
+        {
+            if (!recovery->confirmed)
+            {
+                ++recoveryStatusCommands;
+                next.ownership =
+                    fidget::GuidedTunerOwnershipState::RecoveryRequired;
+                next.controllerReadingsValid = recoveryStatusSucceeds;
+                next.mvlcHardwareId = 0x5008U;
+                next.mvlcFirmwareRevision = 0x0046U;
+                next.mvlcDaqMode = 0x00000005U;
+                next.statusMessages = {{
+                    recoveryStatusSucceeds
+                        ? fidget::TunerStatusLevel::Warning
+                        : fidget::TunerStatusLevel::Error,
+                    recoveryStatusSucceeds
+                        ? "Only fingerprint-gated orphan recovery is allowed."
+                        : "Recovery status failed.",
+                    {},
+                }};
+            }
+            else
+            {
+                ++recoveryCommands;
+                next.diagnosticRecovery = {};
+                next.diagnosticRecovery.state = recoveryOutcome;
+                next.diagnosticRecovery.message = recoveryOutcome
+                        == fidget::DiagnosticOrphanRecoveryState::Recovered
+                    ? "Recovered the tuner-owned diagnostic orphan."
+                    : recoveryOutcome
+                            == fidget::DiagnosticOrphanRecoveryState::AlreadyClean
+                        ? "The journal was stale and was removed."
+                        : "Unique tuner ownership token mismatched.";
+                next.diagnosticRecovery.steps.push_back({
+                    "fingerprint",
+                    recoveryOutcome
+                        != fidget::DiagnosticOrphanRecoveryState::ForeignOrMismatched,
+                    "Checked the complete unique tuner fingerprint.",
+                });
+                if (recoveryOutcome
+                        == fidget::DiagnosticOrphanRecoveryState::Recovered
+                    || recoveryOutcome
+                        == fidget::DiagnosticOrphanRecoveryState::AlreadyClean)
+                {
+                    next.recoveryJournalStatus =
+                        fidget::RecoveryJournalStatus::None;
+                    next.recoveryRecordAvailable = false;
+                    next.recoveryRecord.reset();
+                    next.ownership =
+                        fidget::GuidedTunerOwnershipState::Disconnected;
+                }
+            }
+        }
         else if (std::holds_alternative<fidget::ReleaseSessionCommand>(command))
         {
             ++releaseCommands;
@@ -587,7 +724,14 @@ public:
     int sourceChangeCommands = 0;
     int previewCommands = 0;
     int restorePreviewCommands = 0;
+    int recoveryStatusCommands = 0;
+    int recoveryCommands = 0;
     int releaseCommands = 0;
+    fidget::RecoveryJournalStatus recoveryJournalStatus =
+        fidget::RecoveryJournalStatus::None;
+    fidget::DiagnosticOrphanRecoveryState recoveryOutcome =
+        fidget::DiagnosticOrphanRecoveryState::Recovered;
+    bool recoveryStatusSucceeds = true;
     std::string savedPath;
     std::string loadedPath;
 
@@ -706,6 +850,26 @@ TEST_CASE("CLI options accept project and host status forms")
         CHECK(*parsed.options.seconds == 30U);
         CHECK(parsed.options.dumpCsvPath == "waveform.csv");
     }
+}
+
+TEST_CASE("CLI options accept recovery only with a crate project")
+{
+    const char* valid[] = {
+        "fidget_cli", "recover", "--project", "crate.mwwcrate",
+        "--module", "2",
+    };
+    const auto parsed = fidget::ParseCliOptions(6, valid);
+    REQUIRE(parsed.success);
+    CHECK(parsed.options.command == fidget::CliCommand::Recover);
+    CHECK(parsed.options.projectPath == "crate.mwwcrate");
+    CHECK(parsed.options.moduleIndex == 1U);
+
+    const char* hostOnly[] = {
+        "fidget_cli", "recover", "--host", "mvlc-test",
+    };
+    const auto refused = fidget::ParseCliOptions(4, hostOnly);
+    CHECK_FALSE(refused.success);
+    CHECK(refused.error == "recover requires --project FILE");
 }
 
 TEST_CASE("CLI options reject unsafe or incomplete status arguments")
@@ -1685,4 +1849,122 @@ TEST_CASE("SIGINT during acquire stops and releases before exit 130")
     CHECK(control.stopAcquisitionCommands == 1);
     CHECK(control.releaseCommands == 1);
     CHECK(output.str().find("session: released\n") != std::string::npos);
+}
+
+TEST_CASE("recover reports a missing journal as a successful no-op")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(output.str().find("no recovery journal for this project")
+          != std::string::npos);
+    CHECK(control.recoveryStatusCommands == 0);
+    CHECK(control.recoveryCommands == 0);
+}
+
+TEST_CASE("recover refuses malformed evidence without deleting it")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    control.recoveryJournalStatus = fidget::RecoveryJournalStatus::Malformed;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(errors.str().find("malformed and was retained")
+          != std::string::npos);
+    CHECK(control.recoveryStatusCommands == 0);
+    CHECK(control.recoveryCommands == 0);
+}
+
+TEST_CASE("recover defaults to No on closed input with no recovery write")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    control.recoveryJournalStatus = fidget::RecoveryJournalStatus::Pending;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.recoveryStatusCommands == 1);
+    CHECK(control.recoveryCommands == 0);
+    CHECK(output.str().find("recovery_preview_restore: required")
+          != std::string::npos);
+    CHECK(output.str().find("recovery_source_restore: required")
+          != std::string::npos);
+    CHECK(output.str().find("recovery: not run") != std::string::npos);
+}
+
+TEST_CASE("recover prints the decoded plan and successful steps")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    control.recoveryJournalStatus = fidget::RecoveryJournalStatus::Pending;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.recoveryStatusCommands == 1);
+    CHECK(control.recoveryCommands == 1);
+    CHECK(output.str().find("recovery_endpoint: mvlc-test:32768")
+          != std::string::npos);
+    CHECK(output.str().find("recovery_step: fingerprint passed")
+          != std::string::npos);
+    CHECK(output.str().find("Recovered the tuner-owned diagnostic orphan")
+          != std::string::npos);
+}
+
+TEST_CASE("recover reports a foreign fingerprint as failure")
+{
+    TemporaryCrateProject project;
+    FakeTunerControl control;
+    control.recoveryJournalStatus = fidget::RecoveryJournalStatus::Pending;
+    control.recoveryOutcome =
+        fidget::DiagnosticOrphanRecoveryState::ForeignOrMismatched;
+    fidget::CliOptions options;
+    options.command = fidget::CliCommand::Recover;
+    options.projectPath = project.path;
+    std::istringstream input("y\n");
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliRecover(
+        options, control, input, output, errors, [] { return false; });
+
+    CHECK(exitCode == 1);
+    CHECK(control.recoveryCommands == 1);
+    CHECK(output.str().find("recovery_step: fingerprint failed")
+          != std::string::npos);
+    CHECK(control.CurrentSnapshot()->recoveryRecordAvailable);
 }

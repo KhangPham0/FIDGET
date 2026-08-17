@@ -981,6 +981,7 @@ const char* FidgetCliUsage() noexcept
         "  fidget_cli startup (--project FILE | --host HOST) --profile "
         "FILE [options]\n"
         "  fidget_cli acquire --project FILE --channel N [options]\n"
+        "  fidget_cli recover --project FILE [--module N]\n"
         "\n"
         "Options:\n"
         "  --project FILE  Load a crate project\n"
@@ -1051,6 +1052,10 @@ CliOptionsParseResult ParseCliOptions(
     else if (command == "acquire")
     {
         result.options.command = CliCommand::Acquire;
+    }
+    else if (command == "recover")
+    {
+        result.options.command = CliCommand::Recover;
     }
     else
     {
@@ -1187,6 +1192,12 @@ CliOptionsParseResult ParseCliOptions(
     {
         result.error = std::string(command)
             + " requires --project FILE or --host HOST";
+        return result;
+    }
+    if (result.options.command == CliCommand::Recover
+        && result.options.projectPath.empty() && !result.options.showHelp)
+    {
+        result.error = "recover requires --project FILE";
         return result;
     }
     if (!result.options.savePath.empty()
@@ -2432,6 +2443,158 @@ int RunCliAcquire(
         errorOutput,
         interruptRequested,
         result);
+}
+
+int RunCliRecover(
+    const CliOptions& options,
+    ITunerControl& tunerControl,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& errorOutput,
+    const CliInterruptRequested& interruptRequested)
+{
+    CrateProject project;
+    if (!ResolveProject(options, project, errorOutput))
+    {
+        return 1;
+    }
+
+    const auto beforeProject = tunerControl.CurrentSnapshot()->revision;
+    UseCrateProjectCommand useProject;
+    useProject.projectPath = options.projectPath;
+    useProject.project = std::move(project);
+    useProject.activeModuleIndex = options.moduleIndex;
+    tunerControl.Submit(std::move(useProject));
+    if (!WaitForRevision(
+            tunerControl,
+            beforeProject,
+            [](const TunerSnapshot& snapshot) {
+                return snapshot.projectActive;
+            }))
+    {
+        errorOutput << "error: project activation timed out\n";
+        return 1;
+    }
+
+    auto snapshot = tunerControl.CurrentSnapshot();
+    if (snapshot->recoveryJournalStatus == RecoveryJournalStatus::None)
+    {
+        output << "no recovery journal for this project\n";
+        return 0;
+    }
+    if (snapshot->recoveryJournalStatus == RecoveryJournalStatus::Malformed
+        || !snapshot->recoveryRecord)
+    {
+        errorOutput << "error: recovery journal is malformed and was retained: "
+                    << snapshot->recoveryJournalMessage << '\n';
+        return 1;
+    }
+
+    const auto& record = *snapshot->recoveryRecord;
+    output << "recovery_journal: " << snapshot->recoveryJournalPath << '\n'
+           << "recovery_endpoint: " << record.host << ':'
+           << record.commandPort << '\n';
+    PrintHexReading(output, "recovery_module_base", record.mdppBaseAddress);
+    output << "recovery_state: "
+           << (record.phase == TunerRecoveryPhase::Active
+                   ? "active"
+                   : "prepared")
+           << '\n';
+    PrintHexReading(
+        output, "recovery_token", record.ownershipTokenValue);
+    output << "recovery_preview_restore: "
+           << (record.previewRestoreRequired ? "required" : "not-required")
+           << '\n'
+           << "recovery_source_restore: "
+           << (record.sourceRestoreRequired ? "required" : "not-required")
+           << '\n';
+
+    const auto beforeStatus = snapshot->revision;
+    tunerControl.Submit(RecoverDiagnosticOrphanCommand{false});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeStatus,
+            [](const TunerSnapshot& value) {
+                return value.controllerReadingsValid
+                    || (!value.statusMessages.empty()
+                        && value.ownership
+                            == GuidedTunerOwnershipState::RecoveryRequired);
+            }))
+    {
+        errorOutput << "error: recovery status check timed out\n";
+        return 1;
+    }
+    snapshot = tunerControl.CurrentSnapshot();
+    output << "ownership: "
+           << OwnershipClassification(snapshot->ownership) << '\n';
+    if (!snapshot->controllerReadingsValid)
+    {
+        errorOutput << "error: recovery status check failed";
+        if (!snapshot->statusMessages.empty())
+        {
+            errorOutput << ": " << snapshot->statusMessages.back().summary;
+        }
+        errorOutput << '\n';
+        return 1;
+    }
+    PrintHexReading(output, "mvlc_hardware_id", snapshot->mvlcHardwareId);
+    PrintHexReading(
+        output, "mvlc_firmware_revision", snapshot->mvlcFirmwareRevision);
+    PrintHexReading(output, "mvlc_daq_mode", snapshot->mvlcDaqMode);
+
+    output << "Recover tuner-owned orphan [y/N]: " << std::flush;
+    std::string confirmation;
+    if (!std::getline(input, confirmation)
+        || !TransactionConfirmedByUser(std::move(confirmation)))
+    {
+        output << "recovery: not run\n";
+        return interruptRequested && interruptRequested() ? 130 : 1;
+    }
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+
+    const auto beforeRecovery = snapshot->revision;
+    tunerControl.Submit(RecoverDiagnosticOrphanCommand{true});
+    if (!WaitForRevision(
+            tunerControl,
+            beforeRecovery,
+            [](const TunerSnapshot& value) {
+                return value.diagnosticRecovery.state
+                        == DiagnosticOrphanRecoveryState::Recovered
+                    || value.diagnosticRecovery.state
+                        == DiagnosticOrphanRecoveryState::AlreadyClean
+                    || value.diagnosticRecovery.state
+                        == DiagnosticOrphanRecoveryState::ForeignOrMismatched
+                    || value.diagnosticRecovery.state
+                        == DiagnosticOrphanRecoveryState::Failed;
+            },
+            AcquisitionCompletionTimeout))
+    {
+        errorOutput << "error: diagnostic orphan recovery timed out\n";
+        return 1;
+    }
+
+    snapshot = tunerControl.CurrentSnapshot();
+    for (const auto& step : snapshot->diagnosticRecovery.steps)
+    {
+        output << "recovery_step: " << step.name << ' '
+               << (step.success ? "passed" : "failed") << " - "
+               << step.message << '\n';
+    }
+    output << "recovery: "
+           << snapshot->diagnosticRecovery.message << '\n';
+    if (interruptRequested && interruptRequested())
+    {
+        return 130;
+    }
+    return snapshot->diagnosticRecovery.state
+                == DiagnosticOrphanRecoveryState::Recovered
+            || snapshot->diagnosticRecovery.state
+                == DiagnosticOrphanRecoveryState::AlreadyClean
+        ? 0
+        : 1;
 }
 
 } // namespace fidget

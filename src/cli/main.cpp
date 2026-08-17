@@ -142,6 +142,16 @@ int main(int argc, char** argv)
             interrupted,
             WaitForSessionInput);
     }
+    if (parsed.options.command == fidget::CliCommand::Recover)
+    {
+        return fidget::RunCliRecover(
+            parsed.options,
+            tunerControl,
+            std::cin,
+            std::cout,
+            std::cerr,
+            interrupted);
+    }
     return fidget::RunCliApply(
         parsed.options,
         tunerControl,

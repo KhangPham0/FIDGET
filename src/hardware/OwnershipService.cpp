@@ -226,6 +226,15 @@ void OwnershipService::Submit(TunerCommand command)
         });
         return;
     }
+    if (const auto* recovery =
+            std::get_if<RecoverDiagnosticOrphanCommand>(&command))
+    {
+        StopWatchdog();
+        const auto request = *recovery;
+        (void)worker_.Post(
+            [this, request] { RecoverDiagnosticOrphan(request); });
+        return;
+    }
 
     StopWatchdog();
     (void)worker_.Post([this] { ReleaseSession(); });
@@ -276,6 +285,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     activeModuleIndex_ = command.activeModuleIndex;
     recoveryJournalPath_ = ProjectTunerRecoveryJournalPath(
         command.projectPath);
+    pendingRecoveryRecord_.reset();
     const auto& module = project_.modules[activeModuleIndex_];
 
     TunerSnapshot snapshot;
@@ -291,6 +301,32 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     snapshot.activeModuleProfilePath = module.profilePath;
     snapshot.targetSupported = MdppBackendImplemented(module.backend);
     snapshot.ownership = GuidedTunerOwnershipState::Disconnected;
+
+    if (!recoveryJournalPath_.empty())
+    {
+        const auto recovery = LoadTunerRecoveryJournal(
+            recoveryJournalPath_);
+        if (recovery.success && recovery.record)
+        {
+            pendingRecoveryRecord_ = *recovery.record;
+            snapshot.recoveryRecordAvailable = true;
+            snapshot.recoveryJournalStatus =
+                RecoveryJournalStatus::Pending;
+            snapshot.recoveryJournalMessage = recovery.message;
+            snapshot.recoveryRecord = *recovery.record;
+            snapshot.ownership =
+                GuidedTunerOwnershipState::RecoveryRequired;
+        }
+        else if (!recovery.fileMissing)
+        {
+            snapshot.recoveryRecordAvailable = true;
+            snapshot.recoveryJournalStatus =
+                RecoveryJournalStatus::Malformed;
+            snapshot.recoveryJournalMessage = recovery.message;
+            snapshot.ownership =
+                GuidedTunerOwnershipState::RecoveryRequired;
+        }
+    }
 
     const auto level = snapshot.targetSupported
         ? TunerStatusLevel::Success
@@ -315,6 +351,7 @@ void OwnershipService::ClearProject()
     project_ = {};
     activeModuleIndex_ = 0U;
     recoveryJournalPath_.clear();
+    pendingRecoveryRecord_.reset();
 
     TunerSnapshot snapshot;
     PublishStatus(
@@ -333,6 +370,15 @@ void OwnershipService::CheckStatus()
             std::move(snapshot),
             TunerStatusLevel::Error,
             "The ownership service has no command transport.");
+        return;
+    }
+    if (snapshot.recoveryRecordAvailable)
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Resolve the project recovery journal before normal controller access.");
         return;
     }
     if (!snapshot.projectActive)
@@ -383,6 +429,15 @@ void OwnershipService::OpenSession()
             std::move(snapshot),
             TunerStatusLevel::Error,
             "The ownership service has no command transport.");
+        return;
+    }
+    if (snapshot.recoveryRecordAvailable)
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "Resolve the project recovery journal before opening a tuner session.");
         return;
     }
     if (snapshot.ownership != GuidedTunerOwnershipState::Idle)
@@ -957,8 +1012,17 @@ void OwnershipService::StartDiagnosticAcquisition(
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
-    snapshot.recoveryRecordAvailable =
-        acquisitionSession_->acquisition.recoveryJournalPrepared;
+    const bool recoveryPending =
+        acquisitionSession_->acquisition.recoveryJournalPrepared
+        && acquisitionSession_->acquisition.state
+            != DiagnosticAcquisitionState::Running;
+    snapshot.recoveryRecordAvailable = recoveryPending;
+    if (recoveryPending)
+    {
+        pendingRecoveryRecord_ = acquisitionSession_->recoveryRecord;
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::Pending;
+        snapshot.recoveryRecord = pendingRecoveryRecord_;
+    }
     if (acquisitionSession_->acquisition.state
         != DiagnosticAcquisitionState::Running)
     {
@@ -1145,8 +1209,6 @@ void OwnershipService::ApplyDiagnosticPreview(
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.diagnosticParameterPreview = result;
-    snapshot.recoveryRecordAvailable =
-        acquisitionSession_->acquisition.recoveryJournalPrepared;
     if (result.foreignFingerprint)
     {
         DetachForForeignDiagnosticFingerprint(
@@ -1250,6 +1312,178 @@ bool OwnershipService::RestoreDiagnosticPreview(
         restored ? TunerStatusLevel::Success : TunerStatusLevel::Error,
         result.message);
     return restored;
+}
+
+void OwnershipService::CheckDiagnosticRecoveryStatus()
+{
+    auto snapshot = *CurrentSnapshot();
+    if (!pendingRecoveryRecord_)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            snapshot.recoveryJournalStatus
+                    == RecoveryJournalStatus::Malformed
+                ? "The recovery journal is malformed and cannot authorize hardware access."
+                : "No recovery journal is available for this project.",
+            snapshot.recoveryJournalMessage);
+        return;
+    }
+
+    transport_->Close();
+    const auto opened = transport_->Open(
+        pendingRecoveryRecord_->host,
+        pendingRecoveryRecord_->commandPort);
+    if (!opened.success)
+    {
+        transport_->Close();
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "Could not open the journaled MVLC endpoint for recovery status: "
+                + opened.error);
+        return;
+    }
+
+    nextReadReference_ = 1U;
+    const auto firmware = ReadLocalRegister(
+        TunerRecoveryMvlcFirmwareRegister,
+        nextReadReference_++,
+        serviceStopRequested_);
+    const auto daq = ReadLocalRegister(
+        TunerRecoveryDaqModeRegister,
+        nextReadReference_++,
+        serviceStopRequested_);
+    const auto hardware = ReadLocalRegister(
+        TunerRecoveryMvlcHardwareIdRegister,
+        nextReadReference_++,
+        serviceStopRequested_);
+    transport_->Close();
+
+    if (!firmware.success || !daq.success || !hardware.success)
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        snapshot.controllerReadingsValid = false;
+        const auto error = !firmware.success
+            ? firmware.error
+            : !daq.success ? daq.error : hardware.error;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "Could not read recovery status from the journaled MVLC: "
+                + error);
+        return;
+    }
+
+    snapshot.mvlcFirmwareRevision = firmware.value;
+    snapshot.mvlcDaqMode = daq.value;
+    snapshot.mvlcHardwareId = hardware.value;
+    snapshot.controllerReadingsValid = true;
+    snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Warning,
+        daq.value == 0U
+            ? "The journaled MVLC is already DAQ-idle; recovery can remove the stale journal without a hardware write."
+            : "The journaled MVLC is active. Only fingerprint-gated orphan recovery is allowed.");
+}
+
+void OwnershipService::RecoverDiagnosticOrphan(
+    const RecoverDiagnosticOrphanCommand& command)
+{
+    if (!command.confirmed)
+    {
+        CheckDiagnosticRecoveryStatus();
+        return;
+    }
+
+    auto snapshot = *CurrentSnapshot();
+    if (!pendingRecoveryRecord_)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            snapshot.recoveryJournalStatus
+                    == RecoveryJournalStatus::Malformed
+                ? "Recovery refused: the project recovery journal is malformed and was retained."
+                : "Recovery refused: no recovery journal exists for this project.",
+            snapshot.recoveryJournalMessage);
+        return;
+    }
+    if (!transport_)
+    {
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "Recovery refused: the ownership service has no command transport.");
+        return;
+    }
+
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.diagnosticRecovery = {};
+    snapshot.diagnosticRecovery.state =
+        DiagnosticOrphanRecoveryState::Recovering;
+    snapshot.diagnosticRecovery.message =
+        "Verifying the journaled tuner fingerprint...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Starting fingerprint-gated diagnostic orphan recovery.");
+
+    transport_->Close();
+    const auto opened = transport_->Open(
+        pendingRecoveryRecord_->host,
+        pendingRecoveryRecord_->commandPort);
+    DiagnosticOrphanRecoveryResult result;
+    if (!opened.success)
+    {
+        result.state = DiagnosticOrphanRecoveryState::Failed;
+        result.message =
+            "Could not open the journaled MVLC endpoint for recovery: "
+            + opened.error;
+    }
+    else
+    {
+        result = fidget::RecoverDiagnosticOrphan(
+            *transport_,
+            {*pendingRecoveryRecord_, recoveryJournalPath_},
+            serviceStopRequested_);
+    }
+    transport_->Close();
+
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticRecovery = result;
+    const bool completed = result.state
+            == DiagnosticOrphanRecoveryState::Recovered
+        || result.state == DiagnosticOrphanRecoveryState::AlreadyClean;
+    if (completed)
+    {
+        pendingRecoveryRecord_.reset();
+        snapshot.recoveryRecordAvailable = false;
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::None;
+        snapshot.recoveryJournalMessage.clear();
+        snapshot.recoveryRecord.reset();
+        snapshot.ownership = GuidedTunerOwnershipState::Disconnected;
+    }
+    else
+    {
+        const auto retained = LoadTunerRecoveryJournal(
+            recoveryJournalPath_);
+        if (retained.success && retained.record)
+        {
+            pendingRecoveryRecord_ = *retained.record;
+        }
+        snapshot.recoveryRecordAvailable = true;
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::Pending;
+        snapshot.recoveryRecord = pendingRecoveryRecord_;
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+    }
+    PublishStatus(
+        std::move(snapshot),
+        completed ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+        result.message);
 }
 
 bool OwnershipService::RestoreDiagnosticSource(
@@ -1415,6 +1649,18 @@ bool OwnershipService::StopDiagnosticAcquisition()
     }
     snapshot.recoveryRecordAvailable =
         acquisitionSession_->acquisition.recoveryJournalPrepared;
+    if (snapshot.recoveryRecordAvailable)
+    {
+        pendingRecoveryRecord_ = acquisitionSession_->recoveryRecord;
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::Pending;
+        snapshot.recoveryRecord = pendingRecoveryRecord_;
+    }
+    else
+    {
+        pendingRecoveryRecord_.reset();
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::None;
+        snapshot.recoveryRecord.reset();
+    }
     const bool stoppedCleanly = acquisitionSession_->acquisition.state
         == DiagnosticAcquisitionState::Stopped;
     snapshot.acquisition = stoppedCleanly
@@ -2404,6 +2650,12 @@ void OwnershipService::DetachForForeignDiagnosticFingerprint(
     snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.recoveryRecordAvailable = true;
+    if (acquisitionSession_)
+    {
+        pendingRecoveryRecord_ = acquisitionSession_->recoveryRecord;
+        snapshot.recoveryJournalStatus = RecoveryJournalStatus::Pending;
+        snapshot.recoveryRecord = pendingRecoveryRecord_;
+    }
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,

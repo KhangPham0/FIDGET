@@ -13,6 +13,9 @@ public:
         ITunerControl& tunerControl,
         const TunerSnapshot& snapshot,
         const Theme& theme);
+
+private:
+    bool m_recoveryConfirmed = false;
 };
 
 } // namespace fidget

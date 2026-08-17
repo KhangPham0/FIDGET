@@ -7,6 +7,7 @@
 #include "hardware/DeterministicStartupOperation.h"
 #include "hardware/DiagnosticAcquisitionOperation.h"
 #include "hardware/DiagnosticPreviewOperation.h"
+#include "hardware/DiagnosticRecoveryOperation.h"
 #include "hardware/DiagnosticSourceOperation.h"
 #include "hardware/ScpCaptureOperation.h"
 #include "hardware/ScpBulkApplyOperation.h"
@@ -88,6 +89,9 @@ private:
         const ChangeDiagnosticSourceCommand& command);
     void ApplyDiagnosticPreview(
         const ApplyDiagnosticPreviewCommand& command);
+    void RecoverDiagnosticOrphan(
+        const RecoverDiagnosticOrphanCommand& command);
+    void CheckDiagnosticRecoveryStatus();
     [[nodiscard]] bool RestoreDiagnosticPreview(
         bool resumeAfterTransaction,
         bool automaticallyRestoredOnStop);
@@ -136,6 +140,7 @@ private:
         acquisitionSession_;
     DiagnosticAcquisitionPreparationRequest acquisitionRequest_;
     std::string recoveryJournalPath_;
+    std::optional<TunerRecoveryRecord> pendingRecoveryRecord_;
     CommandWorker worker_;
     std::shared_ptr<const TunerSnapshot> snapshot_;
     CrateProject project_;

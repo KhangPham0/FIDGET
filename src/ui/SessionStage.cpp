@@ -62,6 +62,82 @@ void SessionStage::Draw(
     const Theme& theme)
 {
     ImGui::TextUnformatted("Ownership session");
+    if (snapshot.recoveryJournalStatus != RecoveryJournalStatus::None)
+    {
+        ImGui::TextColored(
+            theme.statusError, "Recovery journal blocks normal access");
+        ImGui::Separator();
+        ImGui::TextWrapped(
+            "Journal: %s", snapshot.recoveryJournalPath.c_str());
+        if (snapshot.recoveryJournalStatus
+            == RecoveryJournalStatus::Malformed)
+        {
+            ImGui::TextWrapped(
+                "The journal is malformed and has been retained as evidence. "
+                "FIDGET will not use it to authorize a hardware write.");
+            ImGui::TextDisabled(
+                "%s", snapshot.recoveryJournalMessage.c_str());
+            return;
+        }
+
+        if (snapshot.recoveryRecord)
+        {
+            const auto& record = *snapshot.recoveryRecord;
+            ImGui::Text(
+                "Endpoint: %s:%u",
+                record.host.c_str(),
+                static_cast<unsigned>(record.commandPort));
+            ImGui::Text(
+                "Module base: 0x%08X",
+                static_cast<unsigned>(record.mdppBaseAddress));
+            ImGui::Text(
+                "Token: 0x%08X",
+                static_cast<unsigned>(record.ownershipTokenValue));
+            ImGui::Text(
+                "Preview restore: %s",
+                record.previewRestoreRequired ? "required" : "not required");
+            ImGui::Text(
+                "Source restore: %s",
+                record.sourceRestoreRequired ? "required" : "not required");
+        }
+
+        const bool recovering = snapshot.diagnosticRecovery.state
+            == DiagnosticOrphanRecoveryState::Recovering;
+        ImGui::BeginDisabled(recovering);
+        if (ImGui::Button("Check recovery status"))
+        {
+            tunerControl.Submit(RecoverDiagnosticOrphanCommand{false});
+        }
+        ImGui::Checkbox(
+            "I authorize fingerprint-gated recovery of this tuner-owned orphan",
+            &m_recoveryConfirmed);
+        ImGui::BeginDisabled(!m_recoveryConfirmed);
+        if (ImGui::Button("Recover tuner-owned orphan"))
+        {
+            tunerControl.Submit(RecoverDiagnosticOrphanCommand{true});
+            m_recoveryConfirmed = false;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+
+        if (snapshot.diagnosticRecovery.state
+            != DiagnosticOrphanRecoveryState::NotRun)
+        {
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "%s", snapshot.diagnosticRecovery.message.c_str());
+            for (const auto& step : snapshot.diagnosticRecovery.steps)
+            {
+                ImGui::TextColored(
+                    step.success ? theme.statusGood : theme.statusError,
+                    "%s: %s",
+                    step.name.c_str(),
+                    step.message.c_str());
+            }
+        }
+        return;
+    }
+
     ImGui::BeginChild(
         "session_status",
         ImVec2(0.0F, 146.0F),
