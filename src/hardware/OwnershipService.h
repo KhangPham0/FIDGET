@@ -158,6 +158,7 @@ private:
         acquisitionSession_;
     DiagnosticAcquisitionPreparationRequest acquisitionRequest_;
     std::string recoveryJournalPath_;
+    std::string activityLogPath_;
     std::optional<TunerRecoveryRecord> pendingRecoveryRecord_;
     CommandWorker worker_;
     std::shared_ptr<const TunerSnapshot> snapshot_;

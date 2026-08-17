@@ -2,10 +2,14 @@
 #include "doctest/doctest.h"
 
 #include "core/ActivityLog.h"
+#include "core/ActivityLogFile.h"
 
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 TEST_CASE("activity log retains insertion order")
@@ -84,4 +88,46 @@ TEST_CASE("activity formatter produces one line with parameter details")
 
     CHECK(line
           == "1970-01-01T00:00:00Z [apply] [success] Gain applied\\nwith verification register=0x611A quad=7 before=250 after=200");
+}
+
+TEST_CASE("project activity files append and flush complete lines")
+{
+    using namespace fidget;
+
+    const auto projectPath = (
+        std::filesystem::temp_directory_path()
+        / "fidget-activity-log-test.mwwcrate").string();
+    const auto activityPath = ProjectActivityLogPath(projectPath);
+    std::remove(activityPath.c_str());
+
+    const ActivityLogEntry first{
+        {}, ActivityLogCategory::Session, TunerStatusLevel::Success,
+        "project opened", std::nullopt};
+    const ActivityLogEntry second{
+        {}, ActivityLogCategory::Audit, TunerStatusLevel::Warning,
+        "audit found a warning", std::nullopt};
+    REQUIRE(AppendActivityLogEntry(activityPath, first).success);
+    REQUIRE(AppendActivityLogEntry(activityPath, second).success);
+
+    std::ifstream input(activityPath, std::ios::binary);
+    REQUIRE(input.good());
+    std::string firstLine;
+    std::string secondLine;
+    REQUIRE(static_cast<bool>(std::getline(input, firstLine)));
+    REQUIRE(static_cast<bool>(std::getline(input, secondLine)));
+    CHECK(firstLine == FormatActivityLogEntry(first));
+    CHECK(secondLine == FormatActivityLogEntry(second));
+    std::string trailing;
+    CHECK_FALSE(static_cast<bool>(std::getline(input, trailing)));
+
+    std::remove(activityPath.c_str());
+}
+
+TEST_CASE("empty project paths do not name an activity file")
+{
+    using namespace fidget;
+
+    CHECK(ProjectActivityLogPath("").empty());
+    CHECK(ProjectActivityLogPath("two-scp-crate.mwwcrate")
+          == "two-scp-crate.mwwcrate.activity");
 }

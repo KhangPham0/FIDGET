@@ -97,6 +97,8 @@ struct TunerSnapshot
     DiagnosticParameterPreviewResult diagnosticParameterPreview;
     bool cleanupVerified = false;
 
+    std::string activityLogPath;
+    std::string activityLogPersistenceError;
     ActivityLog activityLog;
     std::vector<TunerStatusMessage> statusMessages;
 };

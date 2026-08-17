@@ -1,5 +1,6 @@
 #include "hardware/OwnershipService.h"
 
+#include "core/ActivityLogFile.h"
 #include "core/CrateProject.h"
 #include "core/RecoveryJournal.h"
 #include "core/ScpProfile.h"
@@ -260,6 +261,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     {
         transport_->Close();
     }
+    activityLogPath_.clear();
 
     const auto validation = ValidateCrateProject(command.project);
     if (!validation.success)
@@ -288,6 +290,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     activeModuleIndex_ = command.activeModuleIndex;
     recoveryJournalPath_ = ProjectTunerRecoveryJournalPath(
         command.projectPath);
+    activityLogPath_ = ProjectActivityLogPath(command.projectPath);
     pendingRecoveryRecord_.reset();
     const auto& module = project_.modules[activeModuleIndex_];
 
@@ -295,6 +298,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     snapshot.projectActive = true;
     snapshot.projectPath = std::move(command.projectPath);
     snapshot.recoveryJournalPath = recoveryJournalPath_;
+    snapshot.activityLogPath = activityLogPath_;
     snapshot.mvlcHost = project_.mvlcHost;
     snapshot.mvlcCommandPort = project_.mvlcCommandPort;
     snapshot.activeModuleIndex = activeModuleIndex_;
@@ -355,17 +359,20 @@ void OwnershipService::ClearProject()
     {
         transport_->Close();
     }
+    const auto previousActivityLogPath = activityLogPath_;
     project_ = {};
     activeModuleIndex_ = 0U;
     recoveryJournalPath_.clear();
     pendingRecoveryRecord_.reset();
 
     TunerSnapshot snapshot;
+    activityLogPath_ = previousActivityLogPath;
     PublishActivityStatus(
         std::move(snapshot),
         ActivityLogCategory::Session,
         TunerStatusLevel::Information,
         "No crate project is active.");
+    activityLogPath_.clear();
 }
 
 void OwnershipService::CheckStatus()
@@ -2957,6 +2964,17 @@ void OwnershipService::AppendActivity(
         std::move(summary),
         std::move(parameterChange),
     });
+    if (activityLogPath_.empty())
+    {
+        snapshot.activityLogPersistenceError.clear();
+        return;
+    }
+
+    const auto appended = AppendActivityLogEntry(
+        activityLogPath_, snapshot.activityLog.Entries().back());
+    snapshot.activityLogPersistenceError = appended.success
+        ? std::string{}
+        : appended.message;
 }
 
 void OwnershipService::AppendBulkWriteActivities(

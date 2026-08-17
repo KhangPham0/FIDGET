@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include "core/ActivityLogFile.h"
 #include "core/VmeProtocol.h"
 #include "core/RecoveryVerification.h"
 #include "core/ScpRegistry.h"
@@ -59,6 +60,7 @@ struct TemporaryRecoveryProject
 {
     std::string projectPath;
     std::string journalPath;
+    std::string activityPath;
 
     TemporaryRecoveryProject()
     {
@@ -68,12 +70,14 @@ struct TemporaryRecoveryProject
             / ("fidget-service-recovery-" + std::to_string(unique)
                + ".mwwcrate")).string();
         journalPath = fidget::ProjectTunerRecoveryJournalPath(projectPath);
+        activityPath = fidget::ProjectActivityLogPath(projectPath);
     }
 
     ~TemporaryRecoveryProject()
     {
         std::remove(projectPath.c_str());
         std::remove(journalPath.c_str());
+        std::remove(activityPath.c_str());
     }
 };
 
@@ -902,8 +906,12 @@ bool WaitFor(
 
 void UseProject(fidget::OwnershipService& service)
 {
+    const auto projectPath = (
+        std::filesystem::temp_directory_path()
+        / "fidget-ownership-service-test.mwwcrate").string();
+    std::remove(fidget::ProjectActivityLogPath(projectPath).c_str());
     fidget::UseCrateProjectCommand command;
-    command.projectPath = "crate.mwwcrate";
+    command.projectPath = projectPath;
     command.project = MakeProject();
     service.Submit(std::move(command));
     REQUIRE(WaitFor(service, [](const fidget::TunerSnapshot& snapshot) {
@@ -912,7 +920,9 @@ void UseProject(fidget::OwnershipService& service)
     CHECK(service.CurrentSnapshot()->activeModuleProfilePath ==
           "mdpp1_scp_profile.mwwscp");
     CHECK(service.CurrentSnapshot()->recoveryJournalPath
-          == "crate.mwwcrate.recovery");
+          == projectPath + ".recovery");
+    CHECK(service.CurrentSnapshot()->activityLogPath
+          == projectPath + ".activity");
 }
 
 void CheckIdle(
@@ -2032,4 +2042,48 @@ TEST_CASE("typed service operations publish one categorized completion")
           == GuidedTunerOwnershipState::Idle);
 
     expectCompletion(ReleaseSessionCommand{}, ActivityLogCategory::Session);
+}
+
+TEST_CASE("project activity persists while host-only activity does not")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    OwnershipService service(
+        std::move(ownedTransport), std::chrono::hours(1));
+
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.projectActive;
+    }));
+    REQUIRE(std::filesystem::exists(files.activityPath));
+    CHECK(service.CurrentSnapshot()->activityLogPersistenceError.empty());
+
+    const auto firstSize = std::filesystem::file_size(files.activityPath);
+    service.Submit(RunStartupAuditCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return !snapshot.activityLog.Empty()
+            && snapshot.activityLog.Entries().back().category
+                == ActivityLogCategory::Audit;
+    }));
+    CHECK(std::filesystem::file_size(files.activityPath) > firstSize);
+
+    const auto hostOnlyCandidate = (
+        std::filesystem::temp_directory_path()
+        / "fidget-host-only.mwwcrate.activity").string();
+    std::remove(hostOnlyCandidate.c_str());
+    auto hostOnlyTransport = std::make_unique<FakeCommandTransport>();
+    OwnershipService hostOnly(
+        std::move(hostOnlyTransport), std::chrono::hours(1));
+    hostOnly.Submit(RunStartupAuditCommand{});
+    REQUIRE(WaitFor(hostOnly, [](const TunerSnapshot& snapshot) {
+        return !snapshot.activityLog.Empty();
+    }));
+    CHECK(hostOnly.CurrentSnapshot()->activityLogPath.empty());
+    CHECK_FALSE(std::filesystem::exists(hostOnlyCandidate));
 }
