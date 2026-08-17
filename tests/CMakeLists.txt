@@ -181,6 +181,20 @@ add_test(
 )
 
 add_executable(
+    diagnostic_recovery_operation_tests
+    diagnostic_recovery_operation_tests.cpp
+)
+target_link_libraries(diagnostic_recovery_operation_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(
+    NAME diagnostic_recovery_operation_tests
+    COMMAND diagnostic_recovery_operation_tests
+)
+
+add_executable(
     diagnostic_acquisition_lifecycle_tests
     diagnostic_acquisition_lifecycle_tests.cpp
 )
