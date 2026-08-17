@@ -808,6 +808,8 @@ void UseProject(fidget::OwnershipService& service)
     }));
     CHECK(service.CurrentSnapshot()->activeModuleProfilePath ==
           "mdpp1_scp_profile.mwwscp");
+    CHECK(service.CurrentSnapshot()->recoveryJournalPath
+          == "crate.mwwcrate.recovery");
 }
 
 void CheckIdle(

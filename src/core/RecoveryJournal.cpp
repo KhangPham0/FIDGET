@@ -1,7 +1,6 @@
 #include "core/RecoveryJournal.h"
 
 #include <charconv>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -575,40 +574,9 @@ bool RemoveTunerRecoveryJournal(const std::string& path, std::string& error)
     return true;
 }
 
-std::string DefaultTunerRecoveryJournalPath()
+std::string ProjectTunerRecoveryJournalPath(const std::string& projectPath)
 {
-    if (const char* overridePath = std::getenv("MWW_RECOVERY_JOURNAL"))
-    {
-        if (*overridePath != '\0')
-        {
-            return overridePath;
-        }
-    }
-
-    const char* homeDirectory = std::getenv("HOME");
-    if (homeDirectory == nullptr || *homeDirectory == '\0')
-    {
-        return "mesytec-waveform-workbench.recovery";
-    }
-
-#if defined(__APPLE__)
-    return (std::filesystem::path(homeDirectory) / "Library"
-            / "Application Support" / "Mesytec Waveform Workbench"
-            / "tuner-recovery.v1").string();
-#else
-    if (const char* stateHome = std::getenv("XDG_STATE_HOME"))
-    {
-        if (*stateHome != '\0')
-        {
-            return (std::filesystem::path(stateHome)
-                    / "mesytec-waveform-workbench"
-                    / "tuner-recovery.v1").string();
-        }
-    }
-    return (std::filesystem::path(homeDirectory) / ".local" / "state"
-            / "mesytec-waveform-workbench"
-            / "tuner-recovery.v1").string();
-#endif
+    return projectPath.empty() ? std::string{} : projectPath + ".recovery";
 }
 
 } // namespace fidget

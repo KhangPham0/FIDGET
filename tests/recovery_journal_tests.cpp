@@ -88,6 +88,18 @@ TEST_CASE("recovery journal strings round-trip every owned value")
     CHECK(roundTrip.previewAppliedValue == 510U);
 }
 
+TEST_CASE("recovery journals are adjacent to their crate project")
+{
+    using namespace fidget;
+
+    CHECK(ProjectTunerRecoveryJournalPath("two-scp-crate.mwwcrate")
+          == "two-scp-crate.mwwcrate.recovery");
+    CHECK(ProjectTunerRecoveryJournalPath(
+              "/data/crates/two-scp-crate.mwwcrate")
+          == "/data/crates/two-scp-crate.mwwcrate.recovery");
+    CHECK(ProjectTunerRecoveryJournalPath("").empty());
+}
+
 TEST_CASE("recovery journal parsing rejects corruption and incomplete records")
 {
     using namespace fidget;

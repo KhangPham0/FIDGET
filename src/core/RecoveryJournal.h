@@ -87,7 +87,8 @@ struct TunerRecoveryLoadResult
     const std::string& path,
     std::string& error);
 
-[[nodiscard]] std::string DefaultTunerRecoveryJournalPath();
+[[nodiscard]] std::string ProjectTunerRecoveryJournalPath(
+    const std::string& projectPath);
 
 } // namespace fidget
 

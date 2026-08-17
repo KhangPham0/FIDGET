@@ -58,6 +58,7 @@ struct TunerSnapshot
     std::uint32_t mvlcDaqMode = 0U;
 
     bool recoveryRecordAvailable = false;
+    std::string recoveryJournalPath;
     GuidedTunerOperation activeOperation = GuidedTunerOperation::None;
     bool profileLoaded = false;
     bool profileLoadedForTarget = false;

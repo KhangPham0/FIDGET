@@ -5,7 +5,6 @@
 #include <cstring>
 #include <memory>
 
-#include "core/RecoveryJournal.h"
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"
@@ -17,8 +16,7 @@ int main(int argc, char** argv)
     auto dataReceiver = std::make_unique<fidget::MvlcDataReceiver>();
     fidget::OwnershipService tunerControl(
         std::move(transport),
-        std::move(dataReceiver),
-        fidget::DefaultTunerRecoveryJournalPath());
+        std::move(dataReceiver));
     fidget::App app(tunerControl);
 
     // Smoke test mode: "fidget --frames N" renders N frames and exits, so a

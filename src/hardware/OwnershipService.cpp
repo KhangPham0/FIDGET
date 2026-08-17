@@ -48,7 +48,6 @@ OwnershipService::OwnershipService(
     : OwnershipService(
         std::move(transport),
         nullptr,
-        DefaultTunerRecoveryJournalPath(),
         watchdogInterval)
 {
 }
@@ -56,11 +55,9 @@ OwnershipService::OwnershipService(
 OwnershipService::OwnershipService(
     std::unique_ptr<ICommandTransport> transport,
     std::unique_ptr<IDataReceiver> dataReceiver,
-    std::string recoveryJournalPath,
     std::chrono::milliseconds watchdogInterval)
     : transport_(std::move(transport))
     , dataReceiver_(std::move(dataReceiver))
-    , recoveryJournalPath_(std::move(recoveryJournalPath))
     , snapshot_(std::make_shared<const TunerSnapshot>())
     , watchdogInterval_(watchdogInterval)
 {
@@ -277,11 +274,14 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
 
     project_ = std::move(command.project);
     activeModuleIndex_ = command.activeModuleIndex;
+    recoveryJournalPath_ = ProjectTunerRecoveryJournalPath(
+        command.projectPath);
     const auto& module = project_.modules[activeModuleIndex_];
 
     TunerSnapshot snapshot;
     snapshot.projectActive = true;
     snapshot.projectPath = std::move(command.projectPath);
+    snapshot.recoveryJournalPath = recoveryJournalPath_;
     snapshot.mvlcHost = project_.mvlcHost;
     snapshot.mvlcCommandPort = project_.mvlcCommandPort;
     snapshot.activeModuleIndex = activeModuleIndex_;
@@ -314,6 +314,7 @@ void OwnershipService::ClearProject()
     }
     project_ = {};
     activeModuleIndex_ = 0U;
+    recoveryJournalPath_.clear();
 
     TunerSnapshot snapshot;
     PublishStatus(

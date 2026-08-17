@@ -505,6 +505,23 @@ TEST_CASE("acquisition cannot begin when recovery journaling is unavailable")
     }
 }
 
+TEST_CASE("acquisition refuses an empty project recovery path")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    FakeCommandTransport transport;
+    Open(transport);
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport, MakeRequest(""), cancelled, AllowOwnership());
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.message
+          == "Direct acquisition requires a recovery-journal path.");
+    CHECK(transport.SentRequests().empty());
+}
+
 TEST_CASE("a prepared acquisition installs the stack starts and journals active")
 {
     using namespace fidget;

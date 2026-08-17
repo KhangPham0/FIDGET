@@ -47,7 +47,6 @@ public:
     OwnershipService(
         std::unique_ptr<ICommandTransport> transport,
         std::unique_ptr<IDataReceiver> dataReceiver,
-        std::string recoveryJournalPath,
         std::chrono::milliseconds watchdogInterval =
             std::chrono::seconds(1));
     ~OwnershipService() override;
