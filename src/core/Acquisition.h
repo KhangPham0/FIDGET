@@ -56,6 +56,10 @@ struct DiagnosticSourceChangeResult
     bool writeVerified = false;
     bool rollbackAttempted = false;
     bool rollbackVerified = false;
+    bool restoreAttempted = false;
+    bool restoreVerified = false;
+    bool automaticallyRestoredOnStop = false;
+    bool sourceRestoreRequired = false;
     bool selectorParkedAtQuadZero = false;
     bool fifoResetSent = false;
     bool readoutResetSent = false;
@@ -170,6 +174,10 @@ struct DiagnosticAcquisitionResult
     bool recoveryJournalPrepared = false;
     bool recoveryJournalActive = false;
     bool recoveryJournalRemoved = false;
+    bool previewRestoreAttemptedOnStop = false;
+    bool previewRestoreVerifiedOnStop = false;
+    bool sourceRestoreAttemptedOnStop = false;
+    bool sourceRestoreVerifiedOnStop = false;
     std::size_t configuredModuleCount = 0U;
     std::size_t nonTargetModuleCount = 0U;
     std::size_t activeNonTargetModulesFound = 0U;

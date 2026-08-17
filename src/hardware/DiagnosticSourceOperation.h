@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace fidget {
 
@@ -20,6 +21,14 @@ struct DiagnosticSourceChangeRequest
     ICommandTransport& transport,
     DiagnosticAcquisitionPreparationResult& acquisitionSession,
     const DiagnosticSourceChangeRequest& request,
+    const std::string& recoveryJournalPath,
+    const std::atomic<bool>& cancellationRequested);
+
+[[nodiscard]] DiagnosticSourceChangeResult RestoreDiagnosticWaveformSource(
+    ICommandTransport& transport,
+    DiagnosticAcquisitionPreparationResult& acquisitionSession,
+    const std::string& recoveryJournalPath,
+    bool ownershipAlreadyVerifiedAndPaused,
     const std::atomic<bool>& cancellationRequested);
 
 } // namespace fidget

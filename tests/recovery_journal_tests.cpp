@@ -30,6 +30,9 @@ fidget::TunerRecoveryRecord MakeRecord()
     record.ownershipTokenRegister = 0x221CU;
     record.ownershipTokenValue = 0x1234ABCDU;
     record.isolatedModuleBaseAddresses = {0x33330000U, 0x44440000U};
+    record.sourceRestoreRequired = true;
+    record.sourceQuad = 7U;
+    record.sourceOriginalConfiguration = 0x0040U;
     record.previewRestoreRequired = true;
     record.previewQuad = 7U;
     record.previewRegisterOffset = 0x611AU;
@@ -62,6 +65,17 @@ constexpr const char* LegacyV1Journal =
     "CHECKSUM 4158629254257455462\n"
     "END\n";
 
+constexpr const char* LegacyV2Journal =
+    "MWW_TUNER_RECOVERY 2\n"
+    "ENDPOINT mvlc-test 32768\n"
+    "MVLC 20488 70\n"
+    "MDPP 285212672 20487 1 24\n"
+    "ISOLATED 2 858980352 1145307136\n"
+    "STACK 4356 64 4612 512 8732 305441741\n"
+    "STATE 2 1 7 24858 200 510\n"
+    "CHECKSUM 1388001408713401195\n"
+    "END\n";
+
 } // namespace
 
 TEST_CASE("recovery journal strings round-trip every owned value")
@@ -83,6 +97,9 @@ TEST_CASE("recovery journal strings round-trip every owned value")
     CHECK(roundTrip.ownershipTokenValue == record.ownershipTokenValue);
     CHECK(roundTrip.isolatedModuleBaseAddresses
           == record.isolatedModuleBaseAddresses);
+    CHECK(roundTrip.sourceRestoreRequired);
+    CHECK(roundTrip.sourceQuad == 7U);
+    CHECK(roundTrip.sourceOriginalConfiguration == 0x0040U);
     CHECK(roundTrip.previewRestoreRequired);
     CHECK(roundTrip.previewOriginalValue == 200U);
     CHECK(roundTrip.previewAppliedValue == 510U);
@@ -137,6 +154,21 @@ TEST_CASE("literal legacy v1 recovery journals remain readable")
     CHECK(parsed.record->isolatedModuleBaseAddresses.empty());
     CHECK(parsed.record->mvlcFirmwareRevision == 0x0046U);
     CHECK(parsed.record->ownershipTokenValue == 0x1234ABCDU);
+    CHECK_FALSE(parsed.record->sourceRestoreRequired);
+}
+
+TEST_CASE("version 2 recovery journals import without a source deviation")
+{
+    using namespace fidget;
+
+    const auto parsed = ParseTunerRecoveryJournal(LegacyV2Journal);
+    INFO(parsed.message);
+    REQUIRE(parsed.success);
+    REQUIRE(parsed.record.has_value());
+    CHECK(parsed.record->formatVersion == 2U);
+    CHECK_FALSE(parsed.record->sourceRestoreRequired);
+    CHECK(parsed.record->sourceQuad == 0U);
+    CHECK(parsed.record->sourceOriginalConfiguration == 0U);
 }
 
 TEST_CASE("recovery journal file wrappers save load remove and report missing")

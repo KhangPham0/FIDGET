@@ -70,6 +70,12 @@ std::uint64_t RecordChecksum(const TunerRecoveryRecord& record)
             HashValue(hash, baseAddress);
         }
     }
+    if (record.formatVersion >= 3U)
+    {
+        HashValue(hash, record.sourceRestoreRequired ? 1U : 0U);
+        HashValue(hash, record.sourceQuad);
+        HashValue(hash, record.sourceOriginalConfiguration);
+    }
     HashValue(hash, record.previewRestoreRequired ? 1U : 0U);
     HashValue(hash, record.previewQuad);
     HashValue(hash, record.previewRegisterOffset);
@@ -96,8 +102,8 @@ bool ValidHost(const std::string& host)
 
 bool ValidateRecord(const TunerRecoveryRecord& record, std::string& error)
 {
-    if (record.formatVersion != 1U
-        && record.formatVersion != TunerRecoveryJournalFormatVersion)
+    if (record.formatVersion < 1U
+        || record.formatVersion > TunerRecoveryJournalFormatVersion)
     {
         error = "Unsupported tuner recovery-journal version.";
         return false;
@@ -174,6 +180,11 @@ bool ValidateRecord(const TunerRecoveryRecord& record, std::string& error)
             || record.previewRegisterOffset == 0U))
     {
         error = "Invalid parameter-preview recovery record.";
+        return false;
+    }
+    if (record.sourceRestoreRequired && record.sourceQuad > 7U)
+    {
+        error = "Invalid waveform-source recovery record.";
         return false;
     }
     return true;
@@ -253,6 +264,13 @@ void WriteRecord(std::ostream& output, const TunerRecoveryRecord& record)
            << record.stackOffsetValue << ' '
            << record.ownershipTokenRegister << ' '
            << record.ownershipTokenValue << '\n';
+    if (record.formatVersion >= 3U)
+    {
+        output << "SOURCE "
+               << (record.sourceRestoreRequired ? 1U : 0U) << ' '
+               << record.sourceQuad << ' '
+               << record.sourceOriginalConfiguration << '\n';
+    }
     output << "STATE " << static_cast<std::uint16_t>(record.phase) << ' '
            << (record.previewRestoreRequired ? 1U : 0U) << ' '
            << record.previewQuad << ' '
@@ -293,6 +311,7 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
     std::string magic;
     std::uint16_t phase = 0U;
     std::uint16_t previewRequired = 0U;
+    std::uint16_t sourceRequired = 0U;
     std::uint16_t isolatedModuleCount = 0U;
     std::uint64_t checksum = 0U;
 
@@ -319,8 +338,8 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
         return result;
     }
 
-    if (record.formatVersion != 1U
-        && record.formatVersion != TunerRecoveryJournalFormatVersion)
+    if (record.formatVersion < 1U
+        || record.formatVersion > TunerRecoveryJournalFormatVersion)
     {
         result.message = "Unsupported tuner recovery-journal version.";
         return result;
@@ -385,8 +404,29 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
             input,
             record.ownershipTokenValue,
             "ownership token value",
-            error)
-        || !ExpectToken(input, "STATE", error)
+            error))
+    {
+        result.message = error.empty()
+            ? "Malformed tuner recovery journal."
+            : error;
+        return result;
+    }
+
+    if (record.formatVersion >= 3U
+        && (!ExpectToken(input, "SOURCE", error)
+            || !ReadUnsigned(input, sourceRequired, "source state", error)
+            || !ReadUnsigned(input, record.sourceQuad, "source quad", error)
+            || !ReadUnsigned(
+                input,
+                record.sourceOriginalConfiguration,
+                "source original configuration",
+                error)))
+    {
+        result.message = error;
+        return result;
+    }
+
+    if (!ExpectToken(input, "STATE", error)
         || !ReadUnsigned(input, phase, "recovery phase", error)
         || !ReadUnsigned(input, previewRequired, "preview state", error)
         || !ReadUnsigned(input, record.previewQuad, "preview quad", error)
@@ -414,6 +454,12 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
     }
 
     record.phase = static_cast<TunerRecoveryPhase>(phase);
+    if (sourceRequired > 1U)
+    {
+        result.message = "Invalid source state in tuner recovery journal.";
+        return result;
+    }
+    record.sourceRestoreRequired = sourceRequired == 1U;
     if (previewRequired > 1U)
     {
         result.message = "Invalid preview state in tuner recovery journal.";

@@ -1061,6 +1061,7 @@ void OwnershipService::ChangeDiagnosticSource(
         *transport_,
         *acquisitionSession_,
         {selectedQuad, command.source},
+        recoveryJournalPath_,
         serviceStopRequested_);
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
@@ -1251,6 +1252,73 @@ bool OwnershipService::RestoreDiagnosticPreview(
     return restored;
 }
 
+bool OwnershipService::RestoreDiagnosticSource(
+    const bool ownershipAlreadyVerifiedAndPaused)
+{
+    auto snapshot = *CurrentSnapshot();
+    if (!acquisitionSession_
+        || !acquisitionSession_->recoveryRecord.sourceRestoreRequired)
+    {
+        return true;
+    }
+    if (!acquisitionReceiver_)
+    {
+        snapshot.diagnosticSourceChange.state =
+            DiagnosticSourceChangeState::Failed;
+        snapshot.diagnosticSourceChange.message =
+            "The waveform source cannot be restored without its acquisition session.";
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "The waveform source cannot be restored without its acquisition session.");
+        return false;
+    }
+
+    snapshot.activeOperation = GuidedTunerOperation::Acquisition;
+    snapshot.diagnosticSourceChange.state =
+        DiagnosticSourceChangeState::Applying;
+    snapshot.diagnosticSourceChange.message =
+        "Stop requested: restoring the original waveform source before cleanup...";
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Restoring the original waveform source before cleanup.");
+
+    const auto result = RestoreDiagnosticWaveformSource(
+        *transport_,
+        *acquisitionSession_,
+        recoveryJournalPath_,
+        ownershipAlreadyVerifiedAndPaused,
+        serviceStopRequested_);
+    snapshot = *CurrentSnapshot();
+    snapshot.activeOperation = GuidedTunerOperation::None;
+    snapshot.diagnosticSourceChange = result;
+    if (result.foreignFingerprint)
+    {
+        DetachForForeignDiagnosticFingerprint(
+            std::move(snapshot),
+            "Tuner ownership was lost before waveform-source restoration: "
+                + result.message
+                + " The tuner detached passively and sent no cleanup write. "
+                  "The temporary source may remain live until MVME reinitializes the module.");
+        return false;
+    }
+    if (result.restoreVerified)
+    {
+        acquisitionReceiver_->ClearWaveformHistoriesForQuad(
+            result.selectedQuad);
+        snapshot.diagnosticStream = acquisitionReceiver_->CurrentSnapshot();
+    }
+    const bool restored = result.state
+            == DiagnosticSourceChangeState::Passed
+        && result.restoreVerified && !result.sourceRestoreRequired;
+    PublishStatus(
+        std::move(snapshot),
+        restored ? TunerStatusLevel::Success : TunerStatusLevel::Error,
+        result.message);
+    return restored;
+}
+
 bool OwnershipService::StopDiagnosticAcquisition()
 {
     if (!acquisitionSession_)
@@ -1277,6 +1345,45 @@ bool OwnershipService::StopDiagnosticAcquisition()
         }
     }
 
+    auto afterRestore = CurrentSnapshot();
+    if (previewWasActive)
+    {
+        acquisitionSession_->acquisition.previewRestoreAttemptedOnStop =
+            afterRestore->diagnosticParameterPreview.restoreAttempted;
+        acquisitionSession_->acquisition.previewRestoreVerifiedOnStop =
+            afterRestore->diagnosticParameterPreview.restoreVerified;
+    }
+    const bool previewLeftSessionVerifiedAndPaused = previewWasActive
+        && afterRestore->diagnosticParameterPreview.fingerprintVerified
+        && afterRestore->diagnosticParameterPreview.modulePaused
+        && afterRestore->diagnosticParameterPreview.daqModePaused
+        && !afterRestore->diagnosticParameterPreview.acquisitionResumed;
+
+    const bool sourceWasActive =
+        acquisitionSession_->recoveryRecord.sourceRestoreRequired;
+    if (!RestoreDiagnosticSource(previewLeftSessionVerifiedAndPaused))
+    {
+        afterRestore = CurrentSnapshot();
+        if (!acquisitionSession_
+            || afterRestore->diagnosticSourceChange.foreignFingerprint
+            || afterRestore->diagnosticSourceChange.communicationUnavailable)
+        {
+            return false;
+        }
+    }
+    afterRestore = CurrentSnapshot();
+    if (sourceWasActive)
+    {
+        acquisitionSession_->acquisition.sourceRestoreAttemptedOnStop =
+            afterRestore->diagnosticSourceChange.restoreAttempted;
+        acquisitionSession_->acquisition.sourceRestoreVerifiedOnStop =
+            afterRestore->diagnosticSourceChange.restoreVerified;
+    }
+    const bool sourceLeftSessionVerifiedAndPaused = sourceWasActive
+        && afterRestore->diagnosticSourceChange.fingerprintVerified
+        && afterRestore->diagnosticSourceChange.modulePaused
+        && afterRestore->diagnosticSourceChange.daqModePaused;
+
     if (acquisitionReceiver_)
     {
         acquisitionReceiver_->StopAndJoin();
@@ -1292,7 +1399,8 @@ bool OwnershipService::StopDiagnosticAcquisition()
         std::move(*acquisitionSession_),
         acquisitionRequest_,
         serviceStopRequested_,
-        previewWasActive
+        (previewLeftSessionVerifiedAndPaused
+         || sourceLeftSessionVerifiedAndPaused)
             ? DiagnosticStopOwnershipCheck::
                 VerifiedImmediatelyBeforePreviewRestore
             : DiagnosticStopOwnershipCheck::Required);
@@ -1300,6 +1408,11 @@ bool OwnershipService::StopDiagnosticAcquisition()
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
     snapshot.diagnosticAcquisition = acquisitionSession_->acquisition;
+    if (sourceWasActive)
+    {
+        snapshot.diagnosticSourceChange =
+            afterRestore->diagnosticSourceChange;
+    }
     snapshot.recoveryRecordAvailable =
         acquisitionSession_->acquisition.recoveryJournalPrepared;
     const bool stoppedCleanly = acquisitionSession_->acquisition.state

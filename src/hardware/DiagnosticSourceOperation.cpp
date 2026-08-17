@@ -1,5 +1,6 @@
 #include "hardware/DiagnosticSourceOperation.h"
 
+#include "core/RecoveryJournal.h"
 #include "core/ScpConfiguration.h"
 #include "hardware/DiagnosticPauseResume.h"
 #include "hardware/VmeTransaction.h"
@@ -42,12 +43,37 @@ std::string RegisterOperationError(
         + " at register 0x" + registerText + ": " + error;
 }
 
+bool SaveSourceRecoveryState(
+    DiagnosticAcquisitionPreparationResult& session,
+    const std::string& path,
+    const bool active,
+    const std::uint16_t quad,
+    const std::uint16_t originalConfiguration,
+    std::string& error)
+{
+    auto record = session.recoveryRecord;
+    record.sourceRestoreRequired = active;
+    record.sourceQuad = active ? quad : 0U;
+    record.sourceOriginalConfiguration = active
+        ? originalConfiguration
+        : 0U;
+    const auto saved = SaveTunerRecoveryJournal(record, path);
+    if (!saved.success)
+    {
+        error = saved.message;
+        return false;
+    }
+    session.recoveryRecord = std::move(record);
+    return true;
+}
+
 } // namespace
 
 DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
     ICommandTransport& transport,
     DiagnosticAcquisitionPreparationResult& acquisitionSession,
     const DiagnosticSourceChangeRequest& request,
+    const std::string& recoveryJournalPath,
     const std::atomic<bool>& cancellationRequested)
 {
     DiagnosticSourceChangeResult result;
@@ -75,6 +101,22 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         result.state = DiagnosticSourceChangeState::Failed;
         result.message =
             "Waveform source can change only while direct acquisition is running.";
+        return result;
+    }
+    if (recoveryJournalPath.empty())
+    {
+        result.state = DiagnosticSourceChangeState::Failed;
+        result.message =
+            "A recovery-journal path is required before changing the waveform source.";
+        return result;
+    }
+    if (acquisitionSession.recoveryRecord.sourceRestoreRequired
+        && acquisitionSession.recoveryRecord.sourceQuad
+            != request.selectedQuad)
+    {
+        result.state = DiagnosticSourceChangeState::Failed;
+        result.message =
+            "Restore the active waveform-source deviation before changing another quad.";
         return result;
     }
 
@@ -172,6 +214,16 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         }
     }
 
+    const bool sourceWasAlreadyActive =
+        acquisitionSession.recoveryRecord.sourceRestoreRequired;
+    const auto restoreConfiguration = sourceWasAlreadyActive
+        ? acquisitionSession.recoveryRecord.sourceOriginalConfiguration
+        : result.originalConfiguration;
+    const bool returnsToOriginal = sourceWasAlreadyActive
+        && result.originalCaptured
+        && result.requestedConfiguration == restoreConfiguration;
+    bool recoveryRestoreArmed = false;
+
     if (result.originalCaptured && cancellationRequested.load())
     {
         AppendFailure(
@@ -188,52 +240,75 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         }
         else
         {
-            result.writeAttempted = true;
-            const auto written = writeVme(
-                SampleConfigurationRegister,
-                result.requestedConfiguration);
-            if (!written.success)
+            if (!sourceWasAlreadyActive)
             {
-                AppendFailure(
-                    failure,
-                    RegisterOperationError(
-                        "write",
-                        "sample configuration",
-                        SampleConfigurationRegister,
-                        written.error));
+                std::string journalError;
+                recoveryRestoreArmed = SaveSourceRecoveryState(
+                    acquisitionSession,
+                    recoveryJournalPath,
+                    true,
+                    request.selectedQuad,
+                    result.originalConfiguration,
+                    journalError);
+                if (!recoveryRestoreArmed)
+                {
+                    AppendFailure(
+                        failure,
+                        "The original waveform-source configuration could not be journaled, so no source write was allowed: "
+                            + journalError);
+                }
             }
-            else
+            if (failure.empty())
             {
-                std::this_thread::sleep_for(FrontendSettleTime);
-                const auto readback = readVme(SampleConfigurationRegister);
-                if (!readback.success)
+                result.writeAttempted = true;
+                const auto written = writeVme(
+                    SampleConfigurationRegister,
+                    result.requestedConfiguration);
+                if (!written.success)
                 {
                     AppendFailure(
                         failure,
                         RegisterOperationError(
-                            "verify",
+                            "write",
                             "sample configuration",
                             SampleConfigurationRegister,
-                            readback.error));
+                            written.error));
                 }
                 else
                 {
-                    result.appliedReadback = readback.value;
-                    if (result.appliedReadback
-                        == result.requestedConfiguration)
-                    {
-                        result.writeVerified = true;
-                    }
-                    else
+                    std::this_thread::sleep_for(FrontendSettleTime);
+                    const auto readback = readVme(
+                        SampleConfigurationRegister);
+                    if (!readback.success)
                     {
                         AppendFailure(
                             failure,
-                            "Sample-configuration readback was "
-                                + std::to_string(result.appliedReadback)
-                                + ", expected "
-                                + std::to_string(
-                                    result.requestedConfiguration)
-                                + ".");
+                            RegisterOperationError(
+                                "verify",
+                                "sample configuration",
+                                SampleConfigurationRegister,
+                                readback.error));
+                    }
+                    else
+                    {
+                        result.appliedReadback = readback.value;
+                        if (result.appliedReadback
+                            == result.requestedConfiguration)
+                        {
+                            result.writeVerified = true;
+                        }
+                        else
+                        {
+                            AppendFailure(
+                                failure,
+                                "Sample-configuration readback was "
+                                    + std::to_string(
+                                        result.appliedReadback)
+                                    + ", expected "
+                                    + std::to_string(
+                                        result.requestedConfiguration)
+                                    + ".");
+                        }
                     }
                 }
             }
@@ -310,6 +385,30 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         }
     }
 
+    const bool deviationNowInactive = returnsToOriginal
+        && result.writeVerified;
+    const bool newlyArmedButRecovered = recoveryRestoreArmed
+        && result.rollbackVerified;
+    if (deviationNowInactive || newlyArmedButRecovered)
+    {
+        std::string journalError;
+        if (!SaveSourceRecoveryState(
+                acquisitionSession,
+                recoveryJournalPath,
+                false,
+                request.selectedQuad,
+                restoreConfiguration,
+                journalError))
+        {
+            AppendFailure(
+                failure,
+                "The waveform source is restored, but the conservative recovery record could not be updated: "
+                    + journalError);
+        }
+    }
+    result.sourceRestoreRequired =
+        acquisitionSession.recoveryRecord.sourceRestoreRequired;
+
     const bool configurationSafe = !result.writeAttempted
         || result.writeVerified || result.rollbackVerified;
     const bool selectorSafe = !selectorSelected
@@ -371,6 +470,219 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
             ? "The waveform-source transaction could not recover a verified running state."
             : failure;
     }
+    return result;
+}
+
+DiagnosticSourceChangeResult RestoreDiagnosticWaveformSource(
+    ICommandTransport& transport,
+    DiagnosticAcquisitionPreparationResult& acquisitionSession,
+    const std::string& recoveryJournalPath,
+    const bool ownershipAlreadyVerifiedAndPaused,
+    const std::atomic<bool>& cancellationRequested)
+{
+    DiagnosticSourceChangeResult result;
+    result.state = DiagnosticSourceChangeState::Applying;
+    result.automaticallyRestoredOnStop = true;
+    result.sourceRestoreRequired =
+        acquisitionSession.recoveryRecord.sourceRestoreRequired;
+    result.selectedQuad = acquisitionSession.recoveryRecord.sourceQuad;
+    result.originalConfiguration =
+        acquisitionSession.recoveryRecord.sourceOriginalConfiguration;
+    result.originalCaptured = result.sourceRestoreRequired;
+    result.message =
+        "Stop requested: restoring the original waveform source before cleanup...";
+
+    if (!result.sourceRestoreRequired)
+    {
+        result.state = DiagnosticSourceChangeState::Passed;
+        result.message = "No waveform-source restore is required.";
+        return result;
+    }
+    if (recoveryJournalPath.empty())
+    {
+        result.state = DiagnosticSourceChangeState::Failed;
+        result.message =
+            "The waveform source cannot be restored without its recovery journal.";
+        return result;
+    }
+
+    std::string failure;
+    if (ownershipAlreadyVerifiedAndPaused)
+    {
+        result.fingerprintVerified = true;
+        result.modulePaused = true;
+        result.daqModePaused = true;
+    }
+    else
+    {
+        auto fingerprintReference = acquisitionSession.nextSuperReference;
+        const auto fingerprint = VerifyDiagnosticOwnershipFingerprint(
+            transport,
+            acquisitionSession,
+            fingerprintReference,
+            cancellationRequested);
+        acquisitionSession.nextSuperReference = fingerprintReference;
+        if (fingerprint.outcome != DiagnosticFingerprintOutcome::Verified)
+        {
+            result.foreignFingerprint = fingerprint.outcome
+                == DiagnosticFingerprintOutcome::ForeignFingerprint;
+            result.communicationUnavailable = fingerprint.outcome
+                == DiagnosticFingerprintOutcome::CommunicationUnavailable;
+            result.state = DiagnosticSourceChangeState::Failed;
+            result.message = fingerprint.message;
+            return result;
+        }
+        result.fingerprintVerified = true;
+        const auto paused = PauseDiagnosticDataTaking(
+            transport,
+            acquisitionSession.acquisition.baseAddress,
+            acquisitionSession.nextSuperReference,
+            acquisitionSession.nextStackReference,
+            cancellationRequested);
+        result.modulePaused = paused.modulePaused;
+        result.daqModePaused = paused.daqModePaused;
+        AppendFailure(failure, paused.error);
+    }
+
+    const auto writeVme = [&](const std::uint16_t registerOffset,
+                              const std::uint16_t value) {
+        return WriteVmeD16(
+            transport,
+            acquisitionSession.acquisition.baseAddress + registerOffset,
+            value,
+            acquisitionSession.nextSuperReference,
+            acquisitionSession.nextStackReference,
+            cancellationRequested);
+    };
+    const auto readVme = [&](const std::uint16_t registerOffset) {
+        return ReadVmeD16(
+            transport,
+            acquisitionSession.acquisition.baseAddress + registerOffset,
+            acquisitionSession.nextSuperReference,
+            acquisitionSession.nextStackReference,
+            cancellationRequested);
+    };
+
+    bool selectorSelected = false;
+    if (result.modulePaused && result.daqModePaused)
+    {
+        const auto selected = writeVme(
+            Fw2051ScpSelectorRegister, result.selectedQuad);
+        if (!selected.success)
+        {
+            AppendFailure(
+                failure,
+                RegisterOperationError(
+                    "write",
+                    "channel-quad selector",
+                    Fw2051ScpSelectorRegister,
+                    selected.error));
+        }
+        else
+        {
+            selectorSelected = true;
+            std::this_thread::sleep_for(SelectorSettleTime);
+        }
+    }
+
+    if (selectorSelected && failure.empty())
+    {
+        result.restoreAttempted = true;
+        const auto restored = writeVme(
+            SampleConfigurationRegister, result.originalConfiguration);
+        if (!restored.success)
+        {
+            AppendFailure(
+                failure,
+                RegisterOperationError(
+                    "restore",
+                    "sample configuration",
+                    SampleConfigurationRegister,
+                    restored.error));
+        }
+        else
+        {
+            std::this_thread::sleep_for(FrontendSettleTime);
+            const auto readback = readVme(SampleConfigurationRegister);
+            if (!readback.success)
+            {
+                AppendFailure(
+                    failure,
+                    RegisterOperationError(
+                        "verify restored",
+                        "sample configuration",
+                        SampleConfigurationRegister,
+                        readback.error));
+            }
+            else
+            {
+                result.restoredReadback = readback.value;
+                result.restoreVerified = readback.value
+                    == result.originalConfiguration;
+                if (!result.restoreVerified)
+                {
+                    AppendFailure(
+                        failure,
+                        "Restored sample-configuration readback was "
+                            + std::to_string(readback.value)
+                            + ", expected "
+                            + std::to_string(result.originalConfiguration)
+                            + ".");
+                }
+            }
+        }
+    }
+
+    if (selectorSelected)
+    {
+        const auto parked = writeVme(Fw2051ScpSelectorRegister, 0U);
+        if (!parked.success)
+        {
+            AppendFailure(
+                failure,
+                RegisterOperationError(
+                    "park",
+                    "channel-quad selector",
+                    Fw2051ScpSelectorRegister,
+                    parked.error));
+        }
+        else
+        {
+            result.selectorParkedAtQuadZero = true;
+            std::this_thread::sleep_for(SelectorSettleTime);
+        }
+    }
+
+    if (result.restoreVerified && result.selectorParkedAtQuadZero)
+    {
+        std::string journalError;
+        if (!SaveSourceRecoveryState(
+                acquisitionSession,
+                recoveryJournalPath,
+                false,
+                result.selectedQuad,
+                result.originalConfiguration,
+                journalError))
+        {
+            AppendFailure(
+                failure,
+                "The waveform source was restored, but the recovery record could not be updated: "
+                    + journalError);
+        }
+    }
+    result.sourceRestoreRequired =
+        acquisitionSession.recoveryRecord.sourceRestoreRequired;
+    const bool passed = failure.empty() && result.restoreVerified
+        && result.selectorParkedAtQuadZero
+        && !result.sourceRestoreRequired;
+    result.state = passed
+        ? DiagnosticSourceChangeState::Passed
+        : DiagnosticSourceChangeState::Failed;
+    result.message = passed
+        ? "Original waveform source automatically restored and verified before tuner cleanup."
+        : failure.empty()
+            ? "The original waveform source could not be restored safely."
+            : failure;
     return result;
 }
 

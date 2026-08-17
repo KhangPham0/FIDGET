@@ -995,6 +995,77 @@ TEST_CASE("cleanup retains the journal when automatic preview restore failed")
           != std::string::npos);
 }
 
+TEST_CASE("cleanup retains the journal when automatic source restore failed")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences queued{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, queued);
+    auto request = MakeRequest(journal.Get());
+    request.configuredModuleBaseAddresses = {TargetBase};
+    const std::atomic<bool> cancelled{false};
+    auto prepared = PrepareDiagnosticAcquisition(
+        transport, request, cancelled, AllowOwnership());
+    prepared.acquisition.state = DiagnosticAcquisitionState::Running;
+    prepared.acquisition.recoveryJournalActive = true;
+    prepared.recoveryRecord.phase = TunerRecoveryPhase::Active;
+    prepared.recoveryRecord.sourceRestoreRequired = true;
+    prepared.recoveryRecord.sourceQuad = 7U;
+    prepared.recoveryRecord.sourceOriginalConfiguration = 0x0040U;
+    REQUIRE(SaveTunerRecoveryJournal(
+        prepared.recoveryRecord, journal.Get()).success);
+
+    QueueWrite(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueRead(
+        transport,
+        queued,
+        TargetBase + DiagnosticAcquisitionControlRegister,
+        0U);
+    QueueLocalWrite(
+        transport,
+        queued,
+        {
+            {DiagnosticDaqModeRegister, 0U},
+            {0x1104U, 0U},
+            {0x1204U, 0U},
+            {0x221CU, 0U},
+        });
+    QueueLocalRead(transport, queued, DiagnosticDaqModeRegister, 0U);
+    QueueLocalRead(transport, queued, 0x1104U, 0U);
+    QueueLocalRead(transport, queued, 0x1204U, 0U);
+    QueueLocalRead(transport, queued, 0x221CU, 0U);
+
+    FakeDataReceiver dataReceiver;
+    REQUIRE(dataReceiver.Open("mvlc-test", 32769U).success);
+    prepared = StopDiagnosticAcquisition(
+        transport,
+        dataReceiver,
+        std::move(prepared),
+        request,
+        cancelled,
+        DiagnosticStopOwnershipCheck::
+            VerifiedImmediatelyBeforePreviewRestore);
+
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.moduleStopSent);
+    CHECK(prepared.acquisition.daqModeDisabled);
+    CHECK(prepared.acquisition.readoutStackDisabled);
+    CHECK(prepared.acquisition.orphanRecoveryRequired);
+    CHECK_FALSE(prepared.acquisition.recoveryJournalRemoved);
+    CHECK(std::filesystem::exists(journal.Get()));
+    CHECK(prepared.acquisition.message.find(
+              "temporary waveform source could not be restored")
+          != std::string::npos);
+}
+
 TEST_CASE("a restarted isolated module is stopped and reset during cleanup")
 {
     using namespace fidget;

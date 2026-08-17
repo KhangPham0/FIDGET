@@ -91,6 +91,8 @@ private:
     [[nodiscard]] bool RestoreDiagnosticPreview(
         bool resumeAfterTransaction,
         bool automaticallyRestoredOnStop);
+    [[nodiscard]] bool RestoreDiagnosticSource(
+        bool ownershipAlreadyVerifiedAndPaused);
     [[nodiscard]] bool StopDiagnosticAcquisition();
     void PublishDiagnosticStream(DiagnosticStreamSnapshot stream);
     void ReleaseSession();

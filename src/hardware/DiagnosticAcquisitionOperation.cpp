@@ -1019,6 +1019,14 @@ DiagnosticAcquisitionPreparationResult StopDiagnosticAcquisition(
             "selected module and MVLC stack were cleaned up, but the "
             "recovery journal was retained for the next-launch recovery flow.");
     }
+    if (prepared.recoveryRecord.sourceRestoreRequired)
+    {
+        result.orphanRecoveryRequired = true;
+        fail(
+            "The temporary waveform source could not be restored. The "
+            "selected module and MVLC stack were cleaned up, but the "
+            "recovery journal was retained for the next-launch recovery flow.");
+    }
     const bool stoppedCleanly = failure.empty()
         && result.moduleStopSent
         && result.daqModeDisabled
