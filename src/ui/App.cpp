@@ -34,6 +34,8 @@ namespace {
 constexpr const char* kWorkflowTitle = "Workflow";
 constexpr const char* kStageTitle = "Stage";
 constexpr const char* kActivityLogTitle = "Activity Log";
+// Bump this whenever a dockable window is added, removed, or retitled.
+constexpr int kLayoutVersion = 1;
 
 constexpr std::array<ActivityLogCategory, 10U> ActivityCategories{
     ActivityLogCategory::Session,
@@ -156,6 +158,28 @@ std::filesystem::path ExecutableDirectory()
     return std::filesystem::current_path();
 }
 
+int ReadLayoutVersion(const std::string& path)
+{
+    std::ifstream file(path);
+    int version = 0;
+    if (!(file >> version))
+    {
+        return 0;
+    }
+
+    file >> std::ws;
+    return file.eof() ? version : 0;
+}
+
+void WriteLayoutVersion(const std::string& path)
+{
+    std::ofstream file(path, std::ios::trunc);
+    if (file)
+    {
+        file << kLayoutVersion << '\n';
+    }
+}
+
 } // namespace
 
 App::App(ITunerControl& tunerControl)
@@ -239,7 +263,8 @@ bool App::Init()
     int posX = workX + (workWidth - width) / 2;
     int posY = workY + (workHeight - height) / 2;
 
-    m_windowStateFilePath = (ExecutableDirectory() / "window.ini").string();
+    const std::filesystem::path executableDirectory = ExecutableDirectory();
+    m_windowStateFilePath = (executableDirectory / "window.ini").string();
     LoadWindowState(width, height, posX, posY);
 
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
@@ -264,11 +289,14 @@ bool App::Init()
     io.ConfigDpiScaleFonts = true;
     io.ConfigDpiScaleViewports = true;
 
-    // The layout file lives next to the executable, and the default layout
-    // is built only when no saved layout exists from a previous run.
-    m_layoutFilePath = (ExecutableDirectory() / "imgui.ini").string();
+    // The layout files live next to the executable. A missing layout or a
+    // version mismatch rebuilds the default before normal persistence resumes.
+    m_layoutFilePath = (executableDirectory / "imgui.ini").string();
+    m_layoutVersionFilePath = (executableDirectory / "layout.version").string();
     io.IniFilename = m_layoutFilePath.c_str();
-    m_needDefaultLayout = !std::filesystem::exists(m_layoutFilePath);
+    const int storedLayoutVersion = ReadLayoutVersion(m_layoutVersionFilePath);
+    m_needDefaultLayout = !std::filesystem::exists(m_layoutFilePath)
+        || storedLayoutVersion != kLayoutVersion;
 
     ImGuiStyle& style = ImGui::GetStyle();
     style.ScaleAllSizes(scale);
@@ -312,6 +340,7 @@ void App::DrawFrame()
     if (m_needDefaultLayout)
     {
         BuildDefaultLayout(dockspaceId);
+        WriteLayoutVersion(m_layoutVersionFilePath);
         m_needDefaultLayout = false;
     }
     ImGui::End();

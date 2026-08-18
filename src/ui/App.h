@@ -74,13 +74,14 @@ private:
     bool m_activityAutoScroll = true;
     std::size_t m_lastActivityEntryCount = 0U;
 
-    // True until the default panel layout has been applied. Only used when
-    // no saved layout (imgui.ini) exists.
+    // True until the default panel layout has been applied for the current
+    // layout version.
     bool m_needDefaultLayout = false;
 
     // The layout file lives next to the executable: FIDGET keeps its files
     // with itself instead of scattering them over the user's machine.
     std::string m_layoutFilePath;
+    std::string m_layoutVersionFilePath;
     std::string m_windowStateFilePath;
 };
 
