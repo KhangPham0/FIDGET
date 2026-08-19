@@ -37,6 +37,8 @@ public:
 private:
     bool Init();
     void DrawFrame();
+    void DrawMainMenu();
+    void DrawAboutWindow();
     void DrawStatusStrip(float height, const TunerSnapshot& snapshot);
     void DrawWorkflowPanel(const TunerSnapshot& snapshot);
     void DrawStagePanel(const TunerSnapshot& snapshot);
@@ -73,6 +75,11 @@ private:
     };
     bool m_activityAutoScroll = true;
     std::size_t m_lastActivityEntryCount = 0U;
+
+    // Optional panels retain their docking state while hidden.
+    bool m_showWorkflow = true;
+    bool m_showActivityLog = true;
+    bool m_showAbout = false;
 
     // True until the default panel layout has been applied for the current
     // layout version.

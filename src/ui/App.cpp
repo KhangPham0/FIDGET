@@ -4,6 +4,7 @@
 #include "core/GuidedWorkflow.h"
 #include "core/TunerSnapshot.h"
 #include "ui/WorkflowRail.h"
+#include "ui/fonts/IconsFontAwesome5.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,14 @@
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
+
+// Shortcut labels use the platform's conventional modifier name. ImGui
+// maps the Ctrl modifier to Command on macOS.
+#ifdef __APPLE__
+#define FIDGET_MOD "Cmd"
+#else
+#define FIDGET_MOD "Ctrl"
 #endif
 
 namespace fidget {
@@ -314,6 +323,7 @@ bool App::Init()
 
 void App::DrawFrame()
 {
+    DrawMainMenu();
     HandleShortcuts();
 
     // The status strip is fixed chrome above the dockspace; everything
@@ -345,9 +355,115 @@ void App::DrawFrame()
     }
     ImGui::End();
 
-    DrawWorkflowPanel(*snapshot);
+    if (m_showWorkflow)
+    {
+        DrawWorkflowPanel(*snapshot);
+    }
     DrawStagePanel(*snapshot);
-    DrawActivityLogPanel(*snapshot);
+    if (m_showActivityLog)
+    {
+        DrawActivityLogPanel(*snapshot);
+    }
+    DrawAboutWindow();
+}
+
+void App::DrawMainMenu()
+{
+    if (!ImGui::BeginMainMenuBar())
+    {
+        return;
+    }
+
+    if (ImGui::BeginMenu("File"))
+    {
+        if (ImGui::MenuItem(ICON_FA_SIGN_OUT_ALT "  Quit"))
+        {
+            glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("View"))
+    {
+        ImGui::MenuItem(
+            ICON_FA_STREAM "  Workflow",
+            FIDGET_MOD "+B",
+            &m_showWorkflow);
+        ImGui::MenuItem(
+            ICON_FA_HISTORY "  Activity Log",
+            FIDGET_MOD "+L",
+            &m_showActivityLog);
+        ImGui::Separator();
+        if (ImGui::MenuItem(
+                ICON_FA_SEARCH_PLUS "  Larger text", FIDGET_MOD "+="))
+        {
+            ChangeFontScale(+1);
+        }
+        if (ImGui::MenuItem(
+                ICON_FA_SEARCH_MINUS "  Smaller text", FIDGET_MOD "+-"))
+        {
+            ChangeFontScale(-1);
+        }
+        if (ImGui::MenuItem(
+                ICON_FA_FONT "  Reset text size", FIDGET_MOD "+0"))
+        {
+            ChangeFontScale(0);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_WINDOW_RESTORE "  Reset layout"))
+        {
+            m_showWorkflow = true;
+            m_showActivityLog = true;
+            m_needDefaultLayout = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("About"))
+    {
+        if (ImGui::MenuItem(ICON_FA_INFO_CIRCLE "  About FIDGET"))
+        {
+            m_showAbout = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
+}
+
+void App::DrawAboutWindow()
+{
+    if (!m_showAbout)
+    {
+        return;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(440.0F, 0.0F), ImGuiCond_Appearing);
+    if (ImGui::Begin(
+            "About FIDGET",
+            &m_showAbout,
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
+    {
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5F);
+        ImGui::TextUnformatted("FIDGET");
+        ImGui::PopFont();
+        ImGui::PushStyleColor(
+            ImGuiCol_Text,
+            ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped(
+            "Frontend for Interactive Data Graphing and Electronics Tuning");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "FIDGET is a tuner for MDPP-32 SCP digitizers behind an MVLC. "
+            "It guards parameter writes with ownership checks and exact "
+            "readback, and verifies every restore.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Built on Dear ImGui, ImPlot, and GLFW.");
+    }
+    ImGui::End();
 }
 
 void App::DrawStatusStrip(float height, const TunerSnapshot& snapshot)
@@ -555,6 +671,20 @@ void App::DrawActivityLogPanel(const TunerSnapshot& snapshot)
 
 void App::HandleShortcuts()
 {
+    // Do not treat shortcuts as commands while the user is editing a field.
+    if (ImGui::GetIO().WantTextInput)
+    {
+        return;
+    }
+
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_B))
+    {
+        m_showWorkflow = !m_showWorkflow;
+    }
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_L))
+    {
+        m_showActivityLog = !m_showActivityLog;
+    }
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Equal))
     {
         ChangeFontScale(+1);
