@@ -21,8 +21,8 @@ endif()
 # So editors and clang tooling can find the vendored headers.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# OFF builds only the core, hardware, CLI, and test targets. This lets the
-# DAQ hosts build fidget_cli without X11 or OpenGL development packages.
+# OFF builds only the core, hardware, CLI, bridge, and test targets. This lets
+# DAQ hosts build fidget_cli and fidget_bridge without GUI dependencies.
 option(FIDGET_BUILD_GUI "Build the desktop application" ON)
 
 # Native File Dialog Extended uses Objective-C for the macOS GUI backend.

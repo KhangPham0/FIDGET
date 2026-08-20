@@ -1,6 +1,7 @@
 add_subdirectory(core)
 add_subdirectory(hardware)
 add_subdirectory(cli)
+add_subdirectory(bridge)
 
 if(NOT FIDGET_BUILD_GUI)
     return()

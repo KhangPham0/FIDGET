@@ -2,6 +2,7 @@ find_package(Threads REQUIRED)
 
 add_library(fidget_hardware STATIC
     AcquisitionReceiver.cpp
+    BridgeRelay.cpp
     CommandWorker.cpp
     DeterministicStartupOperation.cpp
     DiagnosticAcquisitionOperation.cpp
