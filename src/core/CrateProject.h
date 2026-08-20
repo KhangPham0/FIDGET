@@ -9,8 +9,14 @@
 
 namespace fidget {
 
-inline constexpr std::uint32_t CrateProjectFormatVersion = 1U;
+inline constexpr std::uint32_t CrateProjectFormatVersion = 2U;
 inline constexpr std::size_t CrateProjectMaximumModules = 16U;
+
+enum class CrateProjectEndpointKind : std::uint16_t
+{
+    Direct = 0U,
+    SshBridge = 1U,
+};
 
 enum class MdppBackend : std::uint16_t
 {
@@ -29,6 +35,10 @@ struct CrateProjectModule
 struct CrateProject
 {
     std::uint32_t formatVersion = CrateProjectFormatVersion;
+    CrateProjectEndpointKind endpointKind =
+        CrateProjectEndpointKind::Direct;
+    std::string sshDestination;
+    std::string remoteBridgeCommand = "fidget_bridge";
     std::string mvlcHost;
     std::uint16_t mvlcCommandPort = 32768U;
     std::string streamHost;
@@ -78,6 +88,8 @@ struct CrateProjectModuleTargetResult
 
 [[nodiscard]] const char* MdppBackendName(MdppBackend backend) noexcept;
 [[nodiscard]] bool MdppBackendImplemented(MdppBackend backend) noexcept;
+[[nodiscard]] const char* CrateProjectEndpointKindName(
+    CrateProjectEndpointKind kind) noexcept;
 
 [[nodiscard]] CrateProjectValidationResult ValidateCrateProject(
     const CrateProject& project);

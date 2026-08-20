@@ -70,6 +70,10 @@ TEST_CASE("a crate project round-trips through its string format")
     REQUIRE(parsed.success);
     REQUIRE(parsed.project.has_value());
     CHECK(parsed.project->mvlcHost == project.mvlcHost);
+    CHECK(parsed.project->endpointKind
+          == CrateProjectEndpointKind::Direct);
+    CHECK(parsed.project->sshDestination.empty());
+    CHECK(parsed.project->remoteBridgeCommand == "fidget_bridge");
     CHECK(parsed.project->mvlcCommandPort == project.mvlcCommandPort);
     CHECK(parsed.project->streamHost == project.streamHost);
     CHECK(parsed.project->streamPort == project.streamPort);
@@ -89,6 +93,30 @@ TEST_CASE("a crate project round-trips through its string format")
     CHECK_FALSE(MdppBackendImplemented(MdppBackend::Qdc));
 }
 
+TEST_CASE("an SSH bridge endpoint round-trips through the project format")
+{
+    using namespace fidget;
+
+    auto project = MakeProject();
+    project.endpointKind = CrateProjectEndpointKind::SshBridge;
+    project.sshDestination = "daq-via-bastion";
+    project.remoteBridgeCommand = "/opt/fidget/bin/fidget_bridge";
+
+    const auto serialized = SerializeCrateProject(project);
+    REQUIRE(serialized.success);
+    CHECK(serialized.text.find("ENDPOINT 1 \"daq-via-bastion\"")
+          != std::string::npos);
+
+    const auto parsed = ParseCrateProject(serialized.text);
+    REQUIRE(parsed.success);
+    REQUIRE(parsed.project.has_value());
+    CHECK(parsed.project->endpointKind
+          == CrateProjectEndpointKind::SshBridge);
+    CHECK(parsed.project->sshDestination == "daq-via-bastion");
+    CHECK(parsed.project->remoteBridgeCommand
+          == "/opt/fidget/bin/fidget_bridge");
+}
+
 TEST_CASE("the real-hardware crate project remains compatible")
 {
     using namespace fidget;
@@ -98,6 +126,14 @@ TEST_CASE("the real-hardware crate project remains compatible")
     REQUIRE(parsed.success);
     REQUIRE(parsed.project.has_value());
     CHECK(parsed.project->mvlcHost == "mvlc-test");
+    CHECK(parsed.project->formatVersion == CrateProjectFormatVersion);
+    CHECK(parsed.project->endpointKind
+          == CrateProjectEndpointKind::Direct);
+    CHECK(parsed.project->sshDestination.empty());
+    CHECK(parsed.project->remoteBridgeCommand == "fidget_bridge");
+    const auto migrated = SerializeCrateProject(*parsed.project);
+    REQUIRE(migrated.success);
+    CHECK(migrated.text.find("MWW_CRATE_PROJECT 2\nENDPOINT 0") == 0U);
     CHECK(parsed.project->mvlcCommandPort == 32768U);
     CHECK(parsed.project->streamHost ==
           "stream-test");
@@ -149,6 +185,21 @@ TEST_CASE("crate validation rejects ambiguous or unsafe targets")
           != std::string::npos);
 
     project = MakeProject();
+    project.endpointKind =
+        static_cast<CrateProjectEndpointKind>(99U);
+    const auto unknownEndpoint = ValidateCrateProject(project);
+    CHECK_FALSE(unknownEndpoint.success);
+    CHECK(unknownEndpoint.message.find("endpoint kind")
+          != std::string::npos);
+
+    project = MakeProject();
+    project.endpointKind = CrateProjectEndpointKind::SshBridge;
+    const auto missingSshDestination = ValidateCrateProject(project);
+    CHECK_FALSE(missingSshDestination.success);
+    CHECK(missingSshDestination.message.find("SSH bridge")
+          != std::string::npos);
+
+    project = MakeProject();
     project.modules.clear();
     const auto emptyInventory = ValidateCrateProject(project);
     CHECK_FALSE(emptyInventory.success);
@@ -164,9 +215,9 @@ TEST_CASE("crate parsing rejects version, corruption, trailing data, and unknown
     REQUIRE(serialized.success);
 
     std::string unsupportedVersion = serialized.text;
-    const auto version = unsupportedVersion.find("MWW_CRATE_PROJECT 1");
+    const auto version = unsupportedVersion.find("MWW_CRATE_PROJECT 2");
     REQUIRE(version != std::string::npos);
-    unsupportedVersion[version + 18U] = '2';
+    unsupportedVersion[version + 18U] = '9';
     const auto versionFailure = ParseCrateProject(unsupportedVersion);
     CHECK_FALSE(versionFailure.success);
     CHECK(versionFailure.message.find("Unsupported crate-project")

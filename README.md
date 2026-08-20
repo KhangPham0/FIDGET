@@ -75,6 +75,29 @@ standard library automatically at the final link sites. Please note that a
 CMake newer than the distribution base package may be required because FIDGET
 requires CMake 3.24.
 
+## SSH bridge mode
+
+A crate project can connect to its MVLC directly or through an SSH bridge.
+Bridge mode keeps the GUI or CLI on the local machine while
+`fidget_bridge` runs beside the remote MVLC and relays the command and data
+UDP datagrams over SSH. All ownership checks, transaction policies,
+acquisition decoding, and recovery behavior remain in the normal FIDGET
+client.
+
+Build the headless tree on the remote host, then set these fields in the
+Project stage:
+
++ Controller connection: `SSH bridge`
++ SSH destination: an OpenSSH configuration alias, including any
+  `ProxyJump` configuration
++ Remote bridge command: `fidget_bridge` or its full path on the remote host
+
+The CLI reads the same settings from the `.mwwcrate` file and needs no SSH
+flags. Authentication must be non-interactive through a key and agent.
+FIDGET invokes SSH with `BatchMode=yes`, so password and host-key prompts are
+refused instead of waiting invisibly behind the GUI. Establish trust with the
+remote host in a terminal before using bridge mode.
+
 ## The guided workflow
 
 The GUI presents seven ordered stages:

@@ -88,6 +88,48 @@ void ProjectStage::Draw(
 void ProjectStage::DrawEndpoints()
 {
     ImGui::TextUnformatted("Endpoints");
+    int endpointKind = m_draft.endpointKind
+            == CrateProjectEndpointKind::SshBridge
+        ? 1
+        : 0;
+    ImGui::SetNextItemWidth(240.0F);
+    if (ImGui::Combo(
+            "Controller connection",
+            &endpointKind,
+            "Direct\0SSH bridge\0"))
+    {
+        m_draft.endpointKind = endpointKind == 0
+            ? CrateProjectEndpointKind::Direct
+            : CrateProjectEndpointKind::SshBridge;
+    }
+    if (m_draft.endpointKind == CrateProjectEndpointKind::SshBridge)
+    {
+        if (m_draft.remoteBridgeCommand.empty())
+        {
+            m_draft.remoteBridgeCommand = "fidget_bridge";
+        }
+        if (ImGui::BeginTable(
+                "ssh_bridge_endpoint",
+                2,
+                ImGuiTableFlags_SizingStretchProp
+                    | ImGuiTableFlags_BordersInnerV))
+        {
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1.0F);
+            ImGui::InputText(
+                "SSH destination", &m_draft.sshDestination);
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1.0F);
+            ImGui::InputText(
+                "Remote bridge command",
+                &m_draft.remoteBridgeCommand);
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled(
+            "SSH authentication must use a key or agent; password prompts "
+            "are disabled.");
+    }
     if (ImGui::BeginTable(
             "project_endpoints",
             2,

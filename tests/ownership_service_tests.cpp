@@ -7,6 +7,7 @@
 #include "core/ScpRegistry.h"
 #include "core/StartupAudit.h"
 #include "fake_command_transport.h"
+#include "fake_transport_factory.h"
 #include "hardware/OwnershipService.h"
 
 #include <algorithm>
@@ -980,7 +981,8 @@ TEST_CASE("recovery is refused without a journal even on a busy crate")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseCrateProjectCommand use;
     use.projectPath = files.projectPath;
     use.project = MakeProject();
@@ -1022,7 +1024,8 @@ TEST_CASE("malformed recovery journals are surfaced and retained")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseCrateProjectCommand use;
     use.projectPath = files.projectPath;
     use.project = MakeProject();
@@ -1054,7 +1057,8 @@ TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseCrateProjectCommand use;
     use.projectPath = files.projectPath;
     use.project = MakeProject();
@@ -1123,7 +1127,9 @@ TEST_CASE("an idle check permits a confirmed session and release")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
 
@@ -1158,6 +1164,80 @@ TEST_CASE("an idle check permits a confirmed session and release")
     CheckOnlyReadRequests(*transport);
 }
 
+TEST_CASE("transport sessions are created lazily for each controller probe")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    auto ownedFactory = std::make_unique<FakeTransportFactory>(
+        std::move(ownedTransport));
+    auto* factory = ownedFactory.get();
+    OwnershipService service(
+        std::move(ownedFactory), std::chrono::hours(1));
+
+    UseProject(service);
+    CHECK(factory->CreateCount() == 0U);
+
+    CheckIdle(service, *transport);
+    CHECK(factory->CreateCount() == 1U);
+    CHECK_FALSE(transport->IsOpen());
+
+    ConfirmHandoffAndOpen(service, *transport);
+    CHECK(factory->CreateCount() == 2U);
+    CHECK(transport->IsOpen());
+
+    service.Submit(ReleaseSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership
+            == GuidedTunerOwnershipState::Disconnected;
+    }));
+    CHECK_FALSE(transport->IsOpen());
+}
+
+TEST_CASE("SSH bridge stderr is published and persisted in session activity")
+{
+    using namespace fidget;
+
+    TemporaryRecoveryProject files;
+    const std::string missingPath =
+        "/fidget-test-missing-bridge-input";
+    auto transportFactory = std::make_unique<MvlcTransportFactory>(
+        [&](const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::uint16_t) {
+            return SshBridgeProcess::StartProgram(
+                {"/bin/cat", missingPath});
+        });
+    OwnershipService service(
+        std::move(transportFactory), std::chrono::hours(1));
+
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    use.project.endpointKind = CrateProjectEndpointKind::SshBridge;
+    use.project.sshDestination = "daq-through-bastion";
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.projectActive;
+    }));
+
+    service.Submit(CheckStatusCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.ownership == GuidedTunerOwnershipState::Failed;
+    }));
+
+    const auto failed = service.CurrentSnapshot();
+    REQUIRE_FALSE(failed->statusMessages.empty());
+    CHECK(failed->statusMessages.back().detail.find(missingPath)
+          != std::string::npos);
+    REQUIRE_FALSE(failed->activityLog.Empty());
+    CHECK(failed->activityLog.Entries().back().summary.find(missingPath)
+          != std::string::npos);
+}
+
 TEST_CASE("an active DAQ refuses ownership without reading the hardware ID")
 {
     using namespace fidget;
@@ -1165,7 +1245,9 @@ TEST_CASE("an active DAQ refuses ownership without reading the hardware ID")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
 
     QueueRead(*transport, FirmwareRevisionRegister, 1U, 0x0046U);
@@ -1188,7 +1270,9 @@ TEST_CASE("a stale local-read reply is skipped before the matching reply")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
 
     transport->QueueExchange({
@@ -1225,7 +1309,8 @@ TEST_CASE("the idle watchdog passively releases a foreign takeover")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), 10ms);
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)), 10ms);
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1248,7 +1333,8 @@ TEST_CASE("the watchdog reports uncertainty and later recovery")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), 100ms);
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)), 100ms);
     UseProject(service);
     CheckIdle(service, *transport);
 
@@ -1307,7 +1393,9 @@ TEST_CASE("the pre-write gate blocks when DAQ mode changed")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1333,7 +1421,9 @@ TEST_CASE("the startup audit reads all 37 registers without a VME write")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1371,7 +1461,9 @@ TEST_CASE("a blocked startup audit publishes the prototype counts")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1404,7 +1496,9 @@ TEST_CASE("the startup audit requires an open ownership session")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
 
     service.Submit(RunStartupAuditCommand{});
@@ -1425,7 +1519,9 @@ TEST_CASE("the startup audit gate stops before its first VME transaction")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1457,7 +1553,9 @@ TEST_CASE("the service captures eight distinct banks and clears on release")
     constexpr std::uint32_t Base = 0x11000000U;
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1557,7 +1655,9 @@ TEST_CASE("foreign DAQ activity mid-capture detaches without parking")
     constexpr std::uint32_t Base = 0x11000000U;
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1611,7 +1711,9 @@ TEST_CASE("a capture read failure parks after a final certain gate")
     constexpr std::uint32_t Base = 0x11000000U;
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1676,7 +1778,9 @@ TEST_CASE("the service applies one row and makes the capture stale")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1752,7 +1856,9 @@ TEST_CASE("the service applies the planned banked differences and stales")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1818,7 +1924,9 @@ TEST_CASE("the service exposes the planner reason for a global mismatch")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1859,7 +1967,9 @@ TEST_CASE("the service publishes the startup recipe and requires confirmation")
 
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
-    OwnershipService service(std::move(ownedTransport), std::chrono::hours(1));
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1918,7 +2028,8 @@ TEST_CASE("direct acquisition refuses to bypass deterministic startup")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1948,7 +2059,8 @@ TEST_CASE("diagnostic tune commands refuse to run outside acquisition")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
     CheckIdle(service, *transport);
     ConfirmHandoffAndOpen(service, *transport);
@@ -1983,7 +2095,8 @@ TEST_CASE("typed service operations publish one categorized completion")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
     UseProject(service);
 
     const auto expectCompletion = [&service](
@@ -2052,7 +2165,8 @@ TEST_CASE("project activity persists while host-only activity does not")
     TemporaryRecoveryProject files;
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
 
     UseCrateProjectCommand use;
     use.projectPath = files.projectPath;
@@ -2079,7 +2193,8 @@ TEST_CASE("project activity persists while host-only activity does not")
     std::remove(hostOnlyCandidate.c_str());
     auto hostOnlyTransport = std::make_unique<FakeCommandTransport>();
     OwnershipService hostOnly(
-        std::move(hostOnlyTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(hostOnlyTransport)),
+        std::chrono::hours(1));
     hostOnly.Submit(RunStartupAuditCommand{});
     REQUIRE(WaitFor(hostOnly, [](const TunerSnapshot& snapshot) {
         return !snapshot.activityLog.Empty();
@@ -2101,7 +2216,8 @@ TEST_CASE("profile export is offline and records project activity")
     auto ownedTransport = std::make_unique<FakeCommandTransport>();
     auto* transport = ownedTransport.get();
     OwnershipService service(
-        std::move(ownedTransport), std::chrono::hours(1));
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
 
     UseCrateProjectCommand use;
     use.projectPath = files.projectPath;

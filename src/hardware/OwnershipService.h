@@ -13,6 +13,7 @@
 #include "hardware/ScpBulkApplyOperation.h"
 #include "hardware/ScpSingleRepairOperation.h"
 #include "hardware/Transport.h"
+#include "hardware/TransportFactory.h"
 
 #include <atomic>
 #include <chrono>
@@ -42,12 +43,7 @@ class OwnershipService final : public ITunerControl
 {
 public:
     explicit OwnershipService(
-        std::unique_ptr<ICommandTransport> transport,
-        std::chrono::milliseconds watchdogInterval =
-            std::chrono::seconds(1));
-    OwnershipService(
-        std::unique_ptr<ICommandTransport> transport,
-        std::unique_ptr<IDataReceiver> dataReceiver,
+        std::unique_ptr<ITransportFactory> transportFactory,
         std::chrono::milliseconds watchdogInterval =
             std::chrono::seconds(1));
     ~OwnershipService() override;
@@ -152,8 +148,15 @@ private:
         TunerSnapshot& snapshot,
         const ScpBulkApplyResult& result);
 
-    std::unique_ptr<ICommandTransport> transport_;
-    std::unique_ptr<IDataReceiver> dataReceiver_;
+    [[nodiscard]] bool CreateTransportSession(
+        const CrateProject& project,
+        std::string& error);
+    [[nodiscard]] std::string ResetTransportSession() noexcept;
+
+    std::unique_ptr<ITransportFactory> transportFactory_;
+    std::unique_ptr<TransportSession> transportSession_;
+    ICommandTransport* transport_ = nullptr;
+    IDataReceiver* dataReceiver_ = nullptr;
     std::unique_ptr<AcquisitionReceiver> acquisitionReceiver_;
     std::optional<DiagnosticAcquisitionPreparationResult>
         acquisitionSession_;

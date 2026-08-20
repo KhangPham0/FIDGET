@@ -204,19 +204,31 @@ SshBridgeProcess::~SshBridgeProcess()
     Stop();
 }
 
+std::vector<std::string> BuildSshBridgeProcessArguments(
+    const std::string& destination,
+    const std::string& remoteCommand,
+    const std::string& mvlcHost,
+    const std::uint16_t commandPort)
+{
+    return {
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        destination,
+        remoteCommand,
+        mvlcHost,
+        std::to_string(commandPort),
+    };
+}
+
 SshBridgeProcessStartResult SshBridgeProcess::StartSsh(
     const std::string& destination,
     const std::string& remoteCommand,
     const std::string& mvlcHost,
     const std::uint16_t commandPort)
 {
-    return StartProgram({
-        "ssh",
-        destination,
-        remoteCommand,
-        mvlcHost,
-        std::to_string(commandPort),
-    });
+    return StartProgram(BuildSshBridgeProcessArguments(
+        destination, remoteCommand, mvlcHost, commandPort));
 }
 
 SshBridgeProcessStartResult SshBridgeProcess::StartProgram(

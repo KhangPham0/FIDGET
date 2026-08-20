@@ -76,7 +76,7 @@ struct TemporaryCrateProject
 {
     std::string path;
 
-    TemporaryCrateProject()
+    explicit TemporaryCrateProject(bool sshBridge = false)
     {
         const auto unique = std::chrono::steady_clock::now()
                                 .time_since_epoch()
@@ -88,6 +88,14 @@ struct TemporaryCrateProject
         project.mvlcCommandPort = 32768U;
         project.streamHost = "stream-test";
         project.streamPort = 42333U;
+        if (sshBridge)
+        {
+            project.endpointKind =
+                fidget::CrateProjectEndpointKind::SshBridge;
+            project.sshDestination = "daq-through-bastion";
+            project.remoteBridgeCommand =
+                "/opt/fidget/bin/fidget_bridge";
+        }
         project.modules.push_back({
             "MDPP-32 SCP",
             0x11000000U,
@@ -294,6 +302,10 @@ public:
                 std::get_if<fidget::UseCrateProjectCommand>(&command))
         {
             ++projectCommands;
+            projectEndpointKind = project->project.endpointKind;
+            projectSshDestination = project->project.sshDestination;
+            projectRemoteBridgeCommand =
+                project->project.remoteBridgeCommand;
             next.projectActive = true;
             next.mvlcHost = project->project.mvlcHost;
             next.mvlcCommandPort = project->project.mvlcCommandPort;
@@ -769,6 +781,10 @@ public:
     int recoveryStatusCommands = 0;
     int recoveryCommands = 0;
     int releaseCommands = 0;
+    fidget::CrateProjectEndpointKind projectEndpointKind =
+        fidget::CrateProjectEndpointKind::Direct;
+    std::string projectSshDestination;
+    std::string projectRemoteBridgeCommand;
     fidget::RecoveryJournalStatus recoveryJournalStatus =
         fidget::RecoveryJournalStatus::None;
     fidget::DiagnosticOrphanRecoveryState recoveryOutcome =
@@ -1137,6 +1153,27 @@ TEST_CASE("status prints idle readings and exits successfully")
           != std::string::npos);
     CHECK(output.str().find("mvlc_daq_mode: 0x00000000\n")
           != std::string::npos);
+}
+
+TEST_CASE("status preserves an SSH bridge endpoint loaded from a project")
+{
+    TemporaryCrateProject project(true);
+    fidget::CliOptions options;
+    options.projectPath = project.path;
+    FakeTunerControl control;
+    std::ostringstream output;
+    std::ostringstream errors;
+
+    const int exitCode = fidget::RunCliStatus(
+        options, control, output, errors, [] { return false; });
+
+    CHECK(exitCode == 0);
+    CHECK(control.projectCommands == 1);
+    CHECK(control.projectEndpointKind
+          == fidget::CrateProjectEndpointKind::SshBridge);
+    CHECK(control.projectSshDestination == "daq-through-bastion");
+    CHECK(control.projectRemoteBridgeCommand
+          == "/opt/fidget/bin/fidget_bridge");
 }
 
 TEST_CASE("status classifies an active DAQ as a failure exit")

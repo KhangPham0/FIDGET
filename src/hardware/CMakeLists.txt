@@ -22,6 +22,7 @@ add_library(fidget_hardware STATIC
     SshBridgeProcess.cpp
     StartupPreparationOperation.cpp
     Transport.cpp
+    TransportFactory.cpp
     VmeTransaction.cpp
 )
 

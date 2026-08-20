@@ -31,6 +31,27 @@ std::vector<std::byte> Bytes(
 
 } // namespace
 
+TEST_CASE("SSH bridge arguments enforce non-interactive authentication")
+{
+    using namespace fidget;
+
+    const auto arguments = BuildSshBridgeProcessArguments(
+        "daq-through-bastion",
+        "/opt/fidget/bin/fidget_bridge",
+        "mvlc-test",
+        32768U);
+    const std::vector<std::string> expected{
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "daq-through-bastion",
+        "/opt/fidget/bin/fidget_bridge",
+        "mvlc-test",
+        "32768",
+    };
+    CHECK(arguments == expected);
+}
+
 TEST_CASE("cat provides a complete bridge process loopback")
 {
     using namespace fidget;

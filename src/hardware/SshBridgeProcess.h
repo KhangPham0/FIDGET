@@ -22,6 +22,12 @@ struct SshBridgeProcessStartResult
     std::string error;
 };
 
+[[nodiscard]] std::vector<std::string> BuildSshBridgeProcessArguments(
+    const std::string& destination,
+    const std::string& remoteCommand,
+    const std::string& mvlcHost,
+    std::uint16_t commandPort);
+
 class SshBridgeProcess
 {
 public:

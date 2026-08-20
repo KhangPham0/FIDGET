@@ -47,32 +47,20 @@ const char* DisconnectedMessage = "No tuner session";
 } // namespace
 
 OwnershipService::OwnershipService(
-    std::unique_ptr<ICommandTransport> transport,
+    std::unique_ptr<ITransportFactory> transportFactory,
     std::chrono::milliseconds watchdogInterval)
-    : OwnershipService(
-        std::move(transport),
-        nullptr,
-        watchdogInterval)
-{
-}
-
-OwnershipService::OwnershipService(
-    std::unique_ptr<ICommandTransport> transport,
-    std::unique_ptr<IDataReceiver> dataReceiver,
-    std::chrono::milliseconds watchdogInterval)
-    : transport_(std::move(transport))
-    , dataReceiver_(std::move(dataReceiver))
+    : transportFactory_(std::move(transportFactory))
     , snapshot_(std::make_shared<const TunerSnapshot>())
     , watchdogInterval_(watchdogInterval)
 {
-    if (!transport_)
+    if (!transportFactory_)
     {
         TunerSnapshot snapshot;
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishStatus(
             std::move(snapshot),
             TunerStatusLevel::Error,
-            "The ownership service has no command transport.");
+            "The ownership service has no transport factory.");
     }
 }
 
@@ -80,11 +68,11 @@ OwnershipService::~OwnershipService()
 {
     StopWatchdog();
 
-    if (transport_ && worker_.IsAcceptingTasks())
+    if (worker_.IsAcceptingTasks())
     {
         auto close = worker_.Post([this] {
             static_cast<void>(StopDiagnosticAcquisition());
-            transport_->Close();
+            static_cast<void>(ResetTransportSession());
         });
         try
         {
@@ -267,10 +255,7 @@ void OwnershipService::UseProject(UseCrateProjectCommand command)
     {
         return;
     }
-    if (transport_)
-    {
-        transport_->Close();
-    }
+    static_cast<void>(ResetTransportSession());
     activityLogPath_.clear();
 
     const auto validation = ValidateCrateProject(command.project);
@@ -365,10 +350,7 @@ void OwnershipService::ClearProject()
     {
         return;
     }
-    if (transport_)
-    {
-        transport_->Close();
-    }
+    static_cast<void>(ResetTransportSession());
     const auto previousActivityLogPath = activityLogPath_;
     project_ = {};
     activeModuleIndex_ = 0U;
@@ -388,14 +370,14 @@ void OwnershipService::ClearProject()
 void OwnershipService::CheckStatus()
 {
     auto snapshot = *CurrentSnapshot();
-    if (!transport_)
+    if (!transportFactory_)
     {
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            "The ownership service has no command transport.");
+            "The ownership service has no transport factory.");
         return;
     }
     if (snapshot.recoveryRecordAvailable)
@@ -452,14 +434,14 @@ void OwnershipService::SetHandoffConfirmed(bool confirmed)
 void OwnershipService::OpenSession()
 {
     auto snapshot = *CurrentSnapshot();
-    if (!transport_)
+    if (!transportFactory_)
     {
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            "The ownership service has no command transport.");
+            "The ownership service has no transport factory.");
         return;
     }
     if (snapshot.recoveryRecordAvailable)
@@ -1548,20 +1530,35 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
         return;
     }
 
-    transport_->Close();
+    CrateProject recoveryProject = project_;
+    recoveryProject.mvlcHost = pendingRecoveryRecord_->host;
+    recoveryProject.mvlcCommandPort = pendingRecoveryRecord_->commandPort;
+    std::string createError;
+    if (!CreateTransportSession(recoveryProject, createError))
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Recovery,
+            TunerStatusLevel::Error,
+            "Could not create the project transport for recovery status: "
+                + createError);
+        return;
+    }
     const auto opened = transport_->Open(
         pendingRecoveryRecord_->host,
         pendingRecoveryRecord_->commandPort);
     if (!opened.success)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
             "Could not open the journaled MVLC endpoint for recovery status: "
-                + opened.error);
+                + opened.error,
+            bridgeDetails);
         return;
     }
 
@@ -1578,7 +1575,7 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
         TunerRecoveryMvlcHardwareIdRegister,
         nextReadReference_++,
         serviceStopRequested_);
-    transport_->Close();
+    const auto bridgeDetails = ResetTransportSession();
 
     if (!firmware.success || !daq.success || !hardware.success)
     {
@@ -1592,7 +1589,8 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
             ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
             "Could not read recovery status from the journaled MVLC: "
-                + error);
+                + error,
+            bridgeDetails);
         return;
     }
 
@@ -1633,13 +1631,14 @@ void OwnershipService::RecoverDiagnosticOrphan(
             snapshot.recoveryJournalMessage);
         return;
     }
-    if (!transport_)
+    if (!transportFactory_)
     {
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Recovery,
             TunerStatusLevel::Error,
-            "Recovery refused: the ownership service has no command transport.");
+            "Recovery refused: the ownership service has no transport "
+            "factory.");
         return;
     }
 
@@ -1654,26 +1653,41 @@ void OwnershipService::RecoverDiagnosticOrphan(
         TunerStatusLevel::Information,
         "Starting fingerprint-gated diagnostic orphan recovery.");
 
-    transport_->Close();
-    const auto opened = transport_->Open(
-        pendingRecoveryRecord_->host,
-        pendingRecoveryRecord_->commandPort);
+    CrateProject recoveryProject = project_;
+    recoveryProject.mvlcHost = pendingRecoveryRecord_->host;
+    recoveryProject.mvlcCommandPort = pendingRecoveryRecord_->commandPort;
+    std::string createError;
+    const bool transportCreated = CreateTransportSession(
+        recoveryProject, createError);
     DiagnosticOrphanRecoveryResult result;
-    if (!opened.success)
+    if (!transportCreated)
     {
         result.state = DiagnosticOrphanRecoveryState::Failed;
         result.message =
-            "Could not open the journaled MVLC endpoint for recovery: "
-            + opened.error;
+            "Could not create the project transport for recovery: "
+            + createError;
     }
     else
     {
-        result = fidget::RecoverDiagnosticOrphan(
-            *transport_,
-            {*pendingRecoveryRecord_, recoveryJournalPath_},
-            serviceStopRequested_);
+        const auto opened = transport_->Open(
+            pendingRecoveryRecord_->host,
+            pendingRecoveryRecord_->commandPort);
+        if (!opened.success)
+        {
+            result.state = DiagnosticOrphanRecoveryState::Failed;
+            result.message =
+                "Could not open the journaled MVLC endpoint for recovery: "
+                + opened.error;
+        }
+        else
+        {
+            result = fidget::RecoverDiagnosticOrphan(
+                *transport_,
+                {*pendingRecoveryRecord_, recoveryJournalPath_},
+                serviceStopRequested_);
+        }
     }
-    transport_->Close();
+    const auto bridgeDetails = ResetTransportSession();
 
     snapshot = *CurrentSnapshot();
     snapshot.activeOperation = GuidedTunerOperation::None;
@@ -1724,10 +1738,19 @@ void OwnershipService::RecoverDiagnosticOrphan(
                 step.name + ": " + step.message);
         }
     }
+    if (!bridgeDetails.empty())
+    {
+        AppendActivity(
+            snapshot,
+            ActivityLogCategory::Recovery,
+            TunerStatusLevel::Error,
+            bridgeDetails);
+    }
     PublishStatus(
         std::move(snapshot),
         completed ? TunerStatusLevel::Success : TunerStatusLevel::Error,
-        result.message);
+        result.message,
+        bridgeDetails);
 }
 
 bool OwnershipService::RestoreDiagnosticSource(
@@ -1986,19 +2009,29 @@ void OwnershipService::ProbeController(
     TunerSnapshot snapshot,
     bool retainSession)
 {
-
-    transport_->Close();
-    const auto opened = transport_->Open(
-        snapshot.mvlcHost, snapshot.mvlcCommandPort);
-    if (!opened.success)
+    std::string createError;
+    if (!CreateTransportSession(project_, createError))
     {
-        transport_->Close();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            opened.error);
+            "Could not create the project transport: " + createError);
+        return;
+    }
+    const auto opened = transport_->Open(
+        snapshot.mvlcHost, snapshot.mvlcCommandPort);
+    if (!opened.success)
+    {
+        const auto bridgeDetails = ResetTransportSession();
+        snapshot.ownership = GuidedTunerOwnershipState::Failed;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Session,
+            TunerStatusLevel::Error,
+            opened.error,
+            bridgeDetails);
         return;
     }
 
@@ -2009,13 +2042,14 @@ void OwnershipService::ProbeController(
         serviceStopRequested_);
     if (!firmware.success)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            firmware.error);
+            firmware.error,
+            bridgeDetails);
         return;
     }
     snapshot.mvlcFirmwareRevision = firmware.value;
@@ -2024,25 +2058,27 @@ void OwnershipService::ProbeController(
         DaqModeRegister, nextReadReference_++, serviceStopRequested_);
     if (!daq.success)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            daq.error);
+            daq.error,
+            bridgeDetails);
         return;
     }
     snapshot.mvlcDaqMode = daq.value;
     if (daq.value != 0U)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::InUse;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
-            InUseMessage);
+            InUseMessage,
+            bridgeDetails);
         return;
     }
 
@@ -2050,33 +2086,37 @@ void OwnershipService::ProbeController(
         HardwareIdRegister,
         nextReadReference_++,
         serviceStopRequested_);
-    if (!retainSession)
-    {
-        transport_->Close();
-    }
     if (!hardware.success)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            hardware.error);
+            hardware.error,
+            bridgeDetails);
         return;
     }
     snapshot.mvlcHardwareId = hardware.value;
     snapshot.controllerReadingsValid = true;
     if (hardware.value != ExpectedMvlcHardwareId)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         snapshot.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
-            InvalidHardwareMessage);
+            InvalidHardwareMessage,
+            bridgeDetails);
         return;
+    }
+
+    std::string bridgeDetails;
+    if (!retainSession)
+    {
+        bridgeDetails = ResetTransportSession();
     }
 
     snapshot.ownership = retainSession
@@ -2087,7 +2127,8 @@ void OwnershipService::ProbeController(
         std::move(snapshot),
         ActivityLogCategory::Session,
         TunerStatusLevel::Success,
-        retainSession ? SessionOpenMessage : IdleMessage);
+        retainSession ? SessionOpenMessage : IdleMessage,
+        bridgeDetails);
     if (!retainSession)
     {
         return;
@@ -2100,7 +2141,7 @@ void OwnershipService::ProbeController(
     }
     catch (const std::system_error& error)
     {
-        transport_->Close();
+        const auto bridgeDetails = ResetTransportSession();
         auto failed = *CurrentSnapshot();
         failed.ownership = GuidedTunerOwnershipState::Failed;
         PublishActivityStatus(
@@ -2108,7 +2149,10 @@ void OwnershipService::ProbeController(
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The ownership watchdog could not start.",
-            error.what());
+            std::string(error.what())
+                + (bridgeDetails.empty()
+                       ? std::string{}
+                       : "\n" + bridgeDetails));
     }
 }
 
@@ -2127,14 +2171,7 @@ void OwnershipService::ReleaseSession()
         {
             acquisitionReceiver_->StopAndJoin();
         }
-        if (dataReceiver_)
-        {
-            dataReceiver_->Close();
-        }
-        if (transport_)
-        {
-            transport_->Close();
-        }
+        const auto bridgeDetails = ResetTransportSession();
         acquisitionReceiver_.reset();
         acquisitionSession_.reset();
         acquisitionRequest_ = {};
@@ -2149,13 +2186,11 @@ void OwnershipService::ReleaseSession()
             ActivityLogCategory::Session,
             TunerStatusLevel::Warning,
             "The local tuner session was released. The recovery journal "
-            "was retained because verified hardware cleanup was not safe.");
+            "was retained because verified hardware cleanup was not safe.",
+            bridgeDetails);
         return;
     }
-    if (transport_)
-    {
-        transport_->Close();
-    }
+    const auto bridgeDetails = ResetTransportSession();
     watchdogCommunicationUncertain_ = false;
 
     auto snapshot = *CurrentSnapshot();
@@ -2196,7 +2231,8 @@ void OwnershipService::ReleaseSession()
         std::move(snapshot),
         ActivityLogCategory::Session,
         TunerStatusLevel::Information,
-        DisconnectedMessage);
+        DisconnectedMessage,
+        bridgeDetails);
 }
 
 void OwnershipService::RunStartupAudit()
@@ -2884,7 +2920,7 @@ void OwnershipService::DetachForForeignDaq(
     std::string message)
 {
     RequestWatchdogStop();
-    transport_->Close();
+    const auto bridgeDetails = ResetTransportSession();
 
     auto snapshot = *CurrentSnapshot();
     snapshot.ownership = GuidedTunerOwnershipState::OwnershipLost;
@@ -2906,7 +2942,8 @@ void OwnershipService::DetachForForeignDaq(
         std::move(snapshot),
         category,
         TunerStatusLevel::Error,
-        std::move(message));
+        std::move(message),
+        bridgeDetails);
 }
 
 void OwnershipService::DetachForForeignDiagnosticFingerprint(
@@ -2918,14 +2955,7 @@ void OwnershipService::DetachForForeignDiagnosticFingerprint(
     {
         acquisitionReceiver_->StopAndJoin();
     }
-    if (dataReceiver_)
-    {
-        dataReceiver_->Close();
-    }
-    if (transport_)
-    {
-        transport_->Close();
-    }
+    const auto bridgeDetails = ResetTransportSession();
 
     if (acquisitionSession_)
     {
@@ -2969,7 +2999,64 @@ void OwnershipService::DetachForForeignDiagnosticFingerprint(
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Error,
-        std::move(message));
+        std::move(message),
+        bridgeDetails);
+}
+
+bool OwnershipService::CreateTransportSession(
+    const CrateProject& project,
+    std::string& error)
+{
+    static_cast<void>(ResetTransportSession());
+    if (!transportFactory_)
+    {
+        error = "The ownership service has no transport factory.";
+        return false;
+    }
+
+    auto created = transportFactory_->Create(project);
+    if (!created.session)
+    {
+        error = created.error.empty()
+            ? "The transport factory returned no session."
+            : std::move(created.error);
+        return false;
+    }
+    transportSession_ = std::move(created.session);
+    transport_ = transportSession_->CommandTransport();
+    dataReceiver_ = transportSession_->DataReceiver();
+    if (!transport_ || !dataReceiver_)
+    {
+        error =
+            "The transport factory returned an incomplete transport pair.";
+        static_cast<void>(ResetTransportSession());
+        return false;
+    }
+    return true;
+}
+
+std::string OwnershipService::ResetTransportSession() noexcept
+{
+    std::string bridgeDetails;
+    if (transportSession_)
+    {
+        transportSession_->Close();
+        try
+        {
+            const auto captured = transportSession_->CapturedBridgeStderr();
+            if (!captured.empty())
+            {
+                bridgeDetails = "SSH bridge stderr:\n" + captured;
+            }
+        }
+        catch (const std::exception&)
+        {
+        }
+    }
+    transportSession_.reset();
+    transport_ = nullptr;
+    dataReceiver_ = nullptr;
+    return bridgeDetails;
 }
 
 void OwnershipService::Publish(TunerSnapshot snapshot)
@@ -3002,11 +3089,16 @@ void OwnershipService::PublishActivityStatus(
     std::string detail,
     std::optional<ActivityParameterChange> parameterChange)
 {
+    std::string activitySummary = summary;
+    if (detail.find("SSH bridge stderr:") == 0U)
+    {
+        activitySummary += " | " + detail;
+    }
     AppendActivity(
         snapshot,
         category,
         level,
-        summary,
+        std::move(activitySummary),
         std::move(parameterChange));
     PublishStatus(
         std::move(snapshot), level, std::move(summary), std::move(detail));

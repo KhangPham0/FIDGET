@@ -1,8 +1,7 @@
 #include "cli/CliApp.h"
 
-#include "hardware/MvlcCommandTransport.h"
-#include "hardware/MvlcDataReceiver.h"
 #include "hardware/OwnershipService.h"
+#include "hardware/TransportFactory.h"
 
 #include <cerrno>
 #include <csignal>
@@ -70,11 +69,10 @@ int main(int argc, char** argv)
     sigemptyset(&interruptAction.sa_mask);
     interruptAction.sa_flags = 0;
     (void)sigaction(SIGINT, &interruptAction, nullptr);
-    auto transport = std::make_unique<fidget::MvlcCommandTransport>();
-    auto dataReceiver = std::make_unique<fidget::MvlcDataReceiver>();
+    auto transportFactory =
+        std::make_unique<fidget::MvlcTransportFactory>();
     fidget::OwnershipService tunerControl(
-        std::move(transport),
-        std::move(dataReceiver));
+        std::move(transportFactory));
     const auto interrupted = [] { return InterruptRequested != 0; };
     if (parsed.options.command == fidget::CliCommand::Status)
     {

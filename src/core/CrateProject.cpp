@@ -45,10 +45,33 @@ void HashText(std::uint64_t& hash, const std::string& value)
     }
 }
 
+std::uint64_t LegacyProjectChecksum(const CrateProject& project)
+{
+    std::uint64_t hash = FnvOffsetBasis;
+    HashValue(hash, project.formatVersion);
+    HashText(hash, project.mvlcHost);
+    HashValue(hash, project.mvlcCommandPort);
+    HashText(hash, project.streamHost);
+    HashValue(hash, project.streamPort);
+    HashValue(hash, static_cast<std::uint32_t>(project.modules.size()));
+    for (const auto& module : project.modules)
+    {
+        HashText(hash, module.name);
+        HashValue(hash, module.baseAddress);
+        HashValue(hash, static_cast<std::uint16_t>(module.backend));
+        HashText(hash, module.profilePath);
+    }
+    return hash;
+}
+
 std::uint64_t ProjectChecksum(const CrateProject& project)
 {
     std::uint64_t hash = FnvOffsetBasis;
     HashValue(hash, project.formatVersion);
+    HashValue(
+        hash, static_cast<std::uint16_t>(project.endpointKind));
+    HashText(hash, project.sshDestination);
+    HashText(hash, project.remoteBridgeCommand);
     HashText(hash, project.mvlcHost);
     HashValue(hash, project.mvlcCommandPort);
     HashText(hash, project.streamHost);
@@ -91,6 +114,20 @@ bool ValidDisplayText(const std::string& text, std::size_t maximum)
         text.end(),
         [](const unsigned char character) {
             return character >= 0x20U && character != 0x7FU;
+        });
+}
+
+bool ValidSingleArgument(const std::string& text, std::size_t maximum)
+{
+    if (text.empty() || text.size() > maximum)
+    {
+        return false;
+    }
+    return std::all_of(
+        text.begin(),
+        text.end(),
+        [](const unsigned char character) {
+            return character > 0x20U && character != 0x7FU;
         });
 }
 
@@ -169,6 +206,20 @@ std::optional<MdppBackend> BackendFromValue(std::uint16_t value)
     }
 }
 
+std::optional<CrateProjectEndpointKind> EndpointKindFromValue(
+    std::uint16_t value)
+{
+    switch (value)
+    {
+    case static_cast<std::uint16_t>(CrateProjectEndpointKind::Direct):
+        return CrateProjectEndpointKind::Direct;
+    case static_cast<std::uint16_t>(CrateProjectEndpointKind::SshBridge):
+        return CrateProjectEndpointKind::SshBridge;
+    default:
+        return std::nullopt;
+    }
+}
+
 } // namespace
 
 const char* MdppBackendName(MdppBackend backend) noexcept
@@ -188,12 +239,40 @@ bool MdppBackendImplemented(MdppBackend backend) noexcept
     return backend == MdppBackend::Scp;
 }
 
+const char* CrateProjectEndpointKindName(
+    CrateProjectEndpointKind kind) noexcept
+{
+    switch (kind)
+    {
+    case CrateProjectEndpointKind::Direct:
+        return "Direct";
+    case CrateProjectEndpointKind::SshBridge:
+        return "SSH bridge";
+    }
+    return "Unknown";
+}
+
 CrateProjectValidationResult ValidateCrateProject(const CrateProject& project)
 {
     CrateProjectValidationResult result;
     if (project.formatVersion != CrateProjectFormatVersion)
     {
         result.message = "Unsupported crate-project format version.";
+        return result;
+    }
+    if (!EndpointKindFromValue(
+            static_cast<std::uint16_t>(project.endpointKind)))
+    {
+        result.message = "The controller endpoint kind is unknown.";
+        return result;
+    }
+    if (project.endpointKind == CrateProjectEndpointKind::SshBridge
+        && (!ValidSingleArgument(project.sshDestination, 255U)
+            || !ValidSingleArgument(
+                project.remoteBridgeCommand, 511U)))
+    {
+        result.message =
+            "The SSH bridge destination or remote command is invalid.";
         return result;
     }
     if (!ValidEndpointHost(project.mvlcHost)
@@ -325,6 +404,10 @@ CrateProjectSerializationResult SerializeCrateProject(
 
     std::ostringstream output;
     output << ProjectMagic << ' ' << project.formatVersion << '\n';
+    output << "ENDPOINT "
+           << static_cast<std::uint16_t>(project.endpointKind) << ' '
+           << std::quoted(project.sshDestination) << ' '
+           << std::quoted(project.remoteBridgeCommand) << '\n';
     output << "MVLC " << std::quoted(project.mvlcHost) << ' '
            << project.mvlcCommandPort << '\n';
     output << "STREAM " << std::quoted(project.streamHost) << ' '
@@ -359,10 +442,52 @@ CrateProjectParseResult ParseCrateProject(const std::string& text)
     std::string error;
     std::size_t moduleCount = 0U;
     std::uint64_t storedChecksum = 0U;
+    std::uint16_t endpointKindValue = 0U;
 
     if (!ExpectToken(input, ProjectMagic, error)
-        || !ReadUnsigned(input, project.formatVersion, "format version", error)
-        || !ExpectToken(input, "MVLC", error)
+        || !ReadUnsigned(
+            input, project.formatVersion, "format version", error))
+    {
+        result.message = "Invalid crate project: " + error;
+        return result;
+    }
+
+    const bool legacyVersion = project.formatVersion == 1U;
+    if (!legacyVersion && project.formatVersion != CrateProjectFormatVersion)
+    {
+        result.message = "Invalid crate project: Unsupported crate-project "
+            "format version.";
+        return result;
+    }
+
+    if (!legacyVersion)
+    {
+        if (!ExpectToken(input, "ENDPOINT", error)
+            || !ReadUnsigned(
+                input, endpointKindValue, "endpoint kind", error)
+            || !ReadQuotedText(
+                input, project.sshDestination, "SSH destination", error)
+            || !ReadQuotedText(
+                input,
+                project.remoteBridgeCommand,
+                "remote bridge command",
+                error))
+        {
+            result.message = "Invalid crate project: " + error;
+            return result;
+        }
+        const auto endpointKind = EndpointKindFromValue(endpointKindValue);
+        if (!endpointKind)
+        {
+            result.message =
+                "Invalid crate project: unknown endpoint kind value "
+                + std::to_string(endpointKindValue) + '.';
+            return result;
+        }
+        project.endpointKind = *endpointKind;
+    }
+
+    if (!ExpectToken(input, "MVLC", error)
         || !ReadQuotedText(input, project.mvlcHost, "MVLC host", error)
         || !ReadUnsigned(
             input, project.mvlcCommandPort, "MVLC command port", error)
@@ -428,16 +553,27 @@ CrateProjectParseResult ParseCrateProject(const std::string& text)
         return result;
     }
 
+    const std::uint64_t expectedChecksum = legacyVersion
+        ? LegacyProjectChecksum(project)
+        : ProjectChecksum(project);
+    if (storedChecksum != expectedChecksum)
+    {
+        result.message = "Invalid crate project: checksum mismatch; the file "
+            "is damaged or was modified outside the workbench.";
+        return result;
+    }
+
+    if (legacyVersion)
+    {
+        project.formatVersion = CrateProjectFormatVersion;
+        project.endpointKind = CrateProjectEndpointKind::Direct;
+        project.sshDestination.clear();
+        project.remoteBridgeCommand = "fidget_bridge";
+    }
     const auto validation = ValidateCrateProject(project);
     if (!validation.success)
     {
         result.message = "Invalid crate project: " + validation.message;
-        return result;
-    }
-    if (storedChecksum != ProjectChecksum(project))
-    {
-        result.message = "Invalid crate project: checksum mismatch; the file "
-            "is damaged or was modified outside the workbench.";
         return result;
     }
 

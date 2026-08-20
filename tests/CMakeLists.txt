@@ -128,6 +128,14 @@ target_link_libraries(transport_interface_tests PRIVATE
 
 add_test(NAME transport_interface_tests COMMAND transport_interface_tests)
 
+add_executable(transport_factory_tests transport_factory_tests.cpp)
+target_link_libraries(transport_factory_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME transport_factory_tests COMMAND transport_factory_tests)
+
 add_executable(vme_transaction_tests vme_transaction_tests.cpp)
 target_link_libraries(vme_transaction_tests PRIVATE
     fidget_hardware
