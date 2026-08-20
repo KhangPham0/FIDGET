@@ -19,6 +19,14 @@ target_link_libraries(bridge_relay_tests PRIVATE
 
 add_test(NAME bridge_relay_tests COMMAND bridge_relay_tests)
 
+add_executable(bridge_transport_tests bridge_transport_tests.cpp)
+target_link_libraries(bridge_transport_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(NAME bridge_transport_tests COMMAND bridge_transport_tests)
+
 add_executable(mvme_export_tests mvme_export_tests.cpp)
 target_link_libraries(mvme_export_tests PRIVATE fidget_core doctest::doctest)
 target_compile_definitions(mvme_export_tests PRIVATE

@@ -2,6 +2,9 @@ find_package(Threads REQUIRED)
 
 add_library(fidget_hardware STATIC
     AcquisitionReceiver.cpp
+    BridgeCommandTransport.cpp
+    BridgeConnection.cpp
+    BridgeDataReceiver.cpp
     BridgeRelay.cpp
     CommandWorker.cpp
     DeterministicStartupOperation.cpp
