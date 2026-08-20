@@ -35,6 +35,18 @@ target_link_libraries(ssh_bridge_process_tests PRIVATE
 
 add_test(NAME ssh_bridge_process_tests COMMAND ssh_bridge_process_tests)
 
+add_executable(ssh_bridge_lifecycle_tests ssh_bridge_lifecycle_tests.cpp)
+target_link_libraries(ssh_bridge_lifecycle_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+target_compile_definitions(ssh_bridge_lifecycle_tests PRIVATE
+    FIDGET_BRIDGE_BINARY_PATH="$<TARGET_FILE:fidget_bridge>"
+)
+add_dependencies(ssh_bridge_lifecycle_tests fidget_bridge)
+
+add_test(NAME ssh_bridge_lifecycle_tests COMMAND ssh_bridge_lifecycle_tests)
+
 add_executable(mvme_export_tests mvme_export_tests.cpp)
 target_link_libraries(mvme_export_tests PRIVATE fidget_core doctest::doctest)
 target_compile_definitions(mvme_export_tests PRIVATE
