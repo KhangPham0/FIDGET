@@ -3,6 +3,14 @@ target_link_libraries(activity_log_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME activity_log_tests COMMAND activity_log_tests)
 
+add_executable(bridge_protocol_tests bridge_protocol_tests.cpp)
+target_link_libraries(bridge_protocol_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME bridge_protocol_tests COMMAND bridge_protocol_tests)
+
 add_executable(mvme_export_tests mvme_export_tests.cpp)
 target_link_libraries(mvme_export_tests PRIVATE fidget_core doctest::doctest)
 target_compile_definitions(mvme_export_tests PRIVATE
