@@ -11,6 +11,7 @@
 #include "ui/StartupAuditStage.h"
 #include "ui/StartupStage.h"
 #include "ui/Theme.h"
+#include "ui/UiDialogs.h"
 
 #include <array>
 #include <cstddef>
@@ -39,6 +40,7 @@ private:
     void DrawFrame();
     void DrawMainMenu();
     void DrawAboutWindow();
+    void DrawErrorPopup();
     void DrawStatusStrip(float height, const TunerSnapshot& snapshot);
     void DrawWorkflowPanel(const TunerSnapshot& snapshot);
     void DrawStagePanel(const TunerSnapshot& snapshot);
@@ -54,6 +56,8 @@ private:
 
     GLFWwindow* m_window = nullptr;
     ITunerControl& m_tunerControl;
+    std::string m_errorMessage;
+    UiDialogs m_dialogs;
     Theme m_theme;
     Fonts m_fonts;
     ProjectStage m_projectStage;

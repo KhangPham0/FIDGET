@@ -11,3 +11,7 @@
 [submodule "vendor/doctest"]
 	path = vendor/doctest
 	url = https://github.com/doctest/doctest.git
+[submodule "vendor/nfd"]
+	path = vendor/nfd
+	url = https://github.com/btzy/nativefiledialog-extended.git
+	shallow = true

@@ -1,5 +1,7 @@
 #include "ui/ProjectStage.h"
 
+#include "ui/fonts/IconsFontAwesome5.h"
+
 #include "imgui.h"
 #include "imgui_stdlib.h"
 
@@ -9,6 +11,17 @@
 
 namespace fidget {
 namespace {
+
+constexpr UiDialogFilter CrateProjectFilter{
+    "Crate project",
+    "mwwcrate",
+};
+constexpr UiDialogFilter ScpProfileFilter{
+    "SCP profile",
+    "mwwscp",
+};
+constexpr const char* BrowseButtonLabel =
+    ICON_FA_FOLDER_OPEN "  Browse...";
 
 ImVec4 StatusColor(TunerStatusLevel level, const Theme& theme)
 {
@@ -45,7 +58,8 @@ ProjectStage::ProjectStage()
 void ProjectStage::Draw(
     ITunerControl& tunerControl,
     const TunerSnapshot& snapshot,
-    const Theme& theme)
+    const Theme& theme,
+    UiDialogs& dialogs)
 {
     if (snapshot.projectActive)
     {
@@ -62,8 +76,8 @@ void ProjectStage::Draw(
     DrawEndpoints();
     ImGui::Spacing();
     DrawActiveModuleSelector();
-    DrawModuleTable(theme);
-    DrawOperations(tunerControl);
+    DrawModuleTable(theme, dialogs);
+    DrawOperations(tunerControl, dialogs);
 
     ImGui::Spacing();
     ImGui::TextWrapped("Project file: %s", m_projectPath.c_str());
@@ -136,7 +150,8 @@ void ProjectStage::DrawActiveModuleSelector()
     }
 }
 
-void ProjectStage::DrawModuleTable(const Theme& theme)
+void ProjectStage::DrawModuleTable(
+    const Theme& theme, UiDialogs& dialogs)
 {
     ImGui::TextUnformatted("Modules");
     const auto flags = ImGuiTableFlags_Borders
@@ -188,8 +203,20 @@ void ProjectStage::DrawModuleTable(const Theme& theme)
             }
 
             ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(-1.0F);
+            const float browseWidth =
+                ImGui::CalcTextSize(BrowseButtonLabel).x
+                + 2.0F * ImGui::GetStyle().FramePadding.x;
+            ImGui::SetNextItemWidth(
+                -browseWidth - ImGui::GetStyle().ItemSpacing.x);
             ImGui::InputText("##profile", &module.profilePath);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(BrowseButtonLabel))
+            {
+                if (const auto path = dialogs.OpenFile(ScpProfileFilter))
+                {
+                    module.profilePath = *path;
+                }
+            }
 
             ImGui::TableNextColumn();
             if (MdppBackendImplemented(module.backend))
@@ -241,11 +268,20 @@ void ProjectStage::DrawModuleTable(const Theme& theme)
     }
 }
 
-void ProjectStage::DrawOperations(ITunerControl& tunerControl)
+void ProjectStage::DrawOperations(
+    ITunerControl& tunerControl, UiDialogs& dialogs)
 {
     ImGui::Spacing();
     ImGui::SetNextItemWidth(420.0F);
     ImGui::InputText("Project path", &m_projectPath);
+    ImGui::SameLine();
+    if (ImGui::Button(BrowseButtonLabel))
+    {
+        if (const auto path = dialogs.OpenFile(CrateProjectFilter))
+        {
+            m_projectPath = *path;
+        }
+    }
 
     if (ImGui::Button("Validate"))
     {
@@ -265,6 +301,10 @@ void ProjectStage::DrawOperations(ITunerControl& tunerControl)
                 ? TunerStatusLevel::Success
                 : TunerStatusLevel::Error,
             result.message);
+        if (!result.success)
+        {
+            dialogs.ShowError(result.message);
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Load"))
@@ -280,6 +320,10 @@ void ProjectStage::DrawOperations(ITunerControl& tunerControl)
                 ? TunerStatusLevel::Success
                 : TunerStatusLevel::Error,
             result.message);
+        if (!result.success)
+        {
+            dialogs.ShowError(result.message);
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Use"))

@@ -18,6 +18,7 @@ add_executable(fidget
     ui/StartupAuditStage.cpp
     ui/StartupStage.cpp
     ui/Theme.cpp
+    ui/UiDialogs.cpp
     ui/WorkflowRail.cpp
 )
 
@@ -30,6 +31,7 @@ find_package(OpenGL REQUIRED)
 target_link_libraries(fidget PRIVATE
     fidget_hardware
     implot
+    nfd
     OpenGL::GL
 )
 

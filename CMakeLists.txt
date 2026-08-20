@@ -25,6 +25,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # DAQ hosts build fidget_cli without X11 or OpenGL development packages.
 option(FIDGET_BUILD_GUI "Build the desktop application" ON)
 
+# Native File Dialog Extended uses Objective-C for the macOS GUI backend.
+if(APPLE AND FIDGET_BUILD_GUI)
+    enable_language(OBJC)
+endif()
+
 add_subdirectory(vendor)
 add_subdirectory(src)
 

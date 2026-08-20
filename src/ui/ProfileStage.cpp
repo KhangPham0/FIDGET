@@ -1,18 +1,34 @@
 #include "ui/ProfileStage.h"
 
 #include "core/ScpConfiguration.h"
+#include "ui/fonts/IconsFontAwesome5.h"
 
 #include "imgui.h"
 #include "imgui_stdlib.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
 
 namespace fidget {
+namespace {
+
+constexpr UiDialogFilter ScpProfileFilter{
+    "SCP profile",
+    "mwwscp",
+};
+constexpr UiDialogFilter MvmeSettingsFilter{
+    "MVME settings",
+    "mvme",
+};
+
+} // namespace
 
 void ProfileStage::Draw(
     ITunerControl& tunerControl,
     const TunerSnapshot& snapshot,
-    const Theme& theme)
+    const Theme& theme,
+    UiDialogs& dialogs)
 {
     AdoptActiveProfilePath(snapshot);
     AdoptLoadedProfilePath(snapshot);
@@ -24,12 +40,22 @@ void ProfileStage::Draw(
     ImGui::Spacing();
     ImGui::SetNextItemWidth(520.0F);
     ImGui::InputText("Profile path", &m_profilePath);
+    ImGui::SameLine();
+    if (ImGui::Button(
+            ICON_FA_FOLDER_OPEN "  Browse...##profile_path"))
+    {
+        if (const auto path = dialogs.OpenFile(ScpProfileFilter))
+        {
+            m_profilePath = *path;
+        }
+    }
 
     const bool mayLoad = snapshot.projectActive && snapshot.targetSupported &&
         !m_profilePath.empty();
     ImGui::BeginDisabled(!mayLoad);
     if (ImGui::Button("Load profile"))
     {
+        BeginFileOperation(FileOperation::LoadProfile);
         tunerControl.Submit(LoadProfileCommand{m_profilePath});
     }
     ImGui::EndDisabled();
@@ -40,6 +66,7 @@ void ProfileStage::Draw(
     ImGui::BeginDisabled(!maySave);
     if (ImGui::Button("Save fresh capture"))
     {
+        BeginFileOperation(FileOperation::SaveProfile);
         tunerControl.Submit(SaveProfileCommand{m_profilePath});
     }
     ImGui::EndDisabled();
@@ -132,6 +159,22 @@ void ProfileStage::Draw(
         "the MVME installation.");
     ImGui::SetNextItemWidth(520.0F);
     ImGui::InputText("Export path", &m_exportPath);
+    ImGui::SameLine();
+    if (ImGui::Button(
+            ICON_FA_FOLDER_OPEN "  Browse...##export_path"))
+    {
+        const std::filesystem::path profilePath(
+            snapshot.loadedProfilePath);
+        const std::string defaultDirectory =
+            profilePath.parent_path().string();
+        const std::string defaultName =
+            profilePath.stem().string() + ".mvme";
+        if (const auto path = dialogs.SaveFile(
+                MvmeSettingsFilter, defaultDirectory, defaultName))
+        {
+            m_exportPath = *path;
+        }
+    }
     ImGui::Checkbox(
         "Allow replacing an existing export", &m_allowExportOverwrite);
 
@@ -140,6 +183,7 @@ void ProfileStage::Draw(
     ImGui::BeginDisabled(!mayExport);
     if (ImGui::Button("Export MVME settings"))
     {
+        BeginFileOperation(FileOperation::ExportMvme);
         tunerControl.Submit(ExportMvmeScriptCommand{
             m_exportPath,
             m_allowExportOverwrite,
@@ -156,6 +200,46 @@ void ProfileStage::Draw(
             "%s",
             snapshot.mvmeExportMessage.c_str());
     }
+}
+
+void ProfileStage::ReportFileOperationResult(
+    const TunerSnapshot& snapshot, UiDialogs& dialogs)
+{
+    if (m_pendingFileOperation == FileOperation::None)
+    {
+        return;
+    }
+
+    const ActivityLogCategory expectedCategory =
+        m_pendingFileOperation == FileOperation::ExportMvme
+            ? ActivityLogCategory::Export
+            : ActivityLogCategory::Capture;
+    const auto& entries = snapshot.activityLog.Entries();
+    const auto result = std::find_if(
+        entries.rbegin(),
+        entries.rend(),
+        [&](const ActivityLogEntry& entry) {
+            return entry.timestamp >= m_fileOperationSubmittedAt
+                && entry.category == expectedCategory;
+        });
+    if (result == entries.rend())
+    {
+        return;
+    }
+
+    const bool failed = result->severity == TunerStatusLevel::Error
+        || (m_pendingFileOperation == FileOperation::ExportMvme
+            && result->severity == TunerStatusLevel::Warning);
+    if (failed)
+    {
+        const std::string& message =
+            m_pendingFileOperation == FileOperation::ExportMvme
+                && !snapshot.mvmeExportMessage.empty()
+            ? snapshot.mvmeExportMessage
+            : result->summary;
+        dialogs.ShowError(message);
+    }
+    m_pendingFileOperation = FileOperation::None;
 }
 
 void ProfileStage::AdoptActiveProfilePath(
@@ -192,8 +276,17 @@ void ProfileStage::AdoptLoadedProfilePath(
     }
 
     m_exportSourcePath = snapshot.loadedProfilePath;
-    m_exportPath = snapshot.loadedProfilePath + ".mvme";
+    const std::filesystem::path profilePath(snapshot.loadedProfilePath);
+    m_exportPath = (
+        profilePath.parent_path()
+        / (profilePath.stem().string() + ".mvme")).string();
     m_allowExportOverwrite = false;
+}
+
+void ProfileStage::BeginFileOperation(const FileOperation operation)
+{
+    m_pendingFileOperation = operation;
+    m_fileOperationSubmittedAt = std::chrono::system_clock::now();
 }
 
 } // namespace fidget

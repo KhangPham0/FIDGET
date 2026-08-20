@@ -31,6 +31,12 @@ if(FIDGET_BUILD_GUI)
     )
     target_include_directories(implot PUBLIC implot)
     target_link_libraries(implot PUBLIC imgui)
+
+    # Native File Dialog Extended: platform-native open/save dialogs. A future
+    # Linux GUI build needs GTK development packages or NFD's portal backend;
+    # headless builds never enter this block.
+    set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(nfd)
 endif()
 
 # doctest: the test framework. Only the tests link it.

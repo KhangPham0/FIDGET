@@ -19,6 +19,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "implot.h"
+#include "nfd.h"
 
 #define GL_SILENCE_DEPRECATION
 #include <GLFW/glfw3.h>
@@ -192,7 +193,8 @@ void WriteLayoutVersion(const std::string& path)
 } // namespace
 
 App::App(ITunerControl& tunerControl)
-    : m_tunerControl(tunerControl)
+    : m_tunerControl(tunerControl),
+      m_dialogs(m_errorMessage)
 {
 }
 
@@ -288,6 +290,14 @@ bool App::Init()
     glfwMakeContextCurrent(m_window);
     glfwSwapInterval(1); // vsync
 
+    if (NFD_Init() != NFD_OKAY)
+    {
+        std::fprintf(stderr, "could not initialize the file dialog library\n");
+        glfwDestroyWindow(m_window);
+        glfwTerminate();
+        return false;
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
@@ -329,6 +339,7 @@ void App::DrawFrame()
     // The status strip is fixed chrome above the dockspace; everything
     // else docks below it.
     const auto snapshot = m_tunerControl.CurrentSnapshot();
+    m_profileStage.ReportFileOperationResult(*snapshot, m_dialogs);
     const float stripHeight = ImGui::GetFrameHeight() + 8.0f;
     DrawStatusStrip(stripHeight, *snapshot);
 
@@ -365,6 +376,7 @@ void App::DrawFrame()
         DrawActivityLogPanel(*snapshot);
     }
     DrawAboutWindow();
+    DrawErrorPopup();
 }
 
 void App::DrawMainMenu()
@@ -466,6 +478,28 @@ void App::DrawAboutWindow()
     ImGui::End();
 }
 
+void App::DrawErrorPopup()
+{
+    if (!m_errorMessage.empty())
+    {
+        ImGui::OpenPopup("Error");
+    }
+    if (ImGui::BeginPopupModal(
+            "Error", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0F);
+        ImGui::TextWrapped("%s", m_errorMessage.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button("OK", ImVec2(120.0F, 0.0F)))
+        {
+            m_errorMessage.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void App::DrawStatusStrip(float height, const TunerSnapshot& snapshot)
 {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -536,7 +570,8 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     ImGui::Spacing();
     if (decision.step == 1U)
     {
-        m_projectStage.Draw(m_tunerControl, snapshot, m_theme);
+        m_projectStage.Draw(
+            m_tunerControl, snapshot, m_theme, m_dialogs);
     }
     else if (decision.step == 2U)
     {
@@ -544,7 +579,8 @@ void App::DrawStagePanel(const TunerSnapshot& snapshot)
     }
     else if (decision.step == 3U)
     {
-        m_profileStage.Draw(m_tunerControl, snapshot, m_theme);
+        m_profileStage.Draw(
+            m_tunerControl, snapshot, m_theme, m_dialogs);
     }
     else if (decision.step == 4U)
     {
@@ -826,6 +862,7 @@ void App::Shutdown()
     ImGui_ImplGlfw_Shutdown();
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
+    NFD_Quit();
     glfwDestroyWindow(m_window);
     glfwTerminate();
 }

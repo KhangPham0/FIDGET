@@ -4,6 +4,7 @@
 #include "core/CrateProject.h"
 #include "core/TunerControl.h"
 #include "ui/Theme.h"
+#include "ui/UiDialogs.h"
 
 #include <cstddef>
 #include <string>
@@ -18,13 +19,15 @@ public:
     void Draw(
         ITunerControl& tunerControl,
         const TunerSnapshot& snapshot,
-        const Theme& theme);
+        const Theme& theme,
+        UiDialogs& dialogs);
 
 private:
     void DrawEndpoints();
     void DrawActiveModuleSelector();
-    void DrawModuleTable(const Theme& theme);
-    void DrawOperations(ITunerControl& tunerControl);
+    void DrawModuleTable(const Theme& theme, UiDialogs& dialogs);
+    void DrawOperations(
+        ITunerControl& tunerControl, UiDialogs& dialogs);
     void SetStatus(TunerStatusLevel level, std::string message);
 
     CrateProject m_draft;
