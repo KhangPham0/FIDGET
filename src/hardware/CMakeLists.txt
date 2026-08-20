@@ -19,6 +19,7 @@ add_library(fidget_hardware STATIC
     ScpBulkApplyOperation.cpp
     ScpCaptureOperation.cpp
     ScpSingleRepairOperation.cpp
+    SshBridgeProcess.cpp
     StartupPreparationOperation.cpp
     Transport.cpp
     VmeTransaction.cpp
