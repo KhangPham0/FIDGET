@@ -76,6 +76,10 @@ std::uint64_t RecordChecksum(const TunerRecoveryRecord& record)
         HashValue(hash, record.sourceQuad);
         HashValue(hash, record.sourceOriginalConfiguration);
     }
+    if (record.formatVersion >= 4U)
+    {
+        HashValue(hash, record.sourceAppliedConfiguration);
+    }
     HashValue(hash, record.previewRestoreRequired ? 1U : 0U);
     HashValue(hash, record.previewQuad);
     HashValue(hash, record.previewRegisterOffset);
@@ -187,6 +191,39 @@ bool ValidateRecord(const TunerRecoveryRecord& record, std::string& error)
         error = "Invalid waveform-source recovery record.";
         return false;
     }
+    if (record.formatVersion < 4U
+        && record.sourceAppliedConfigurationAvailable)
+    {
+        error =
+            "A legacy recovery journal cannot contain an applied waveform-source configuration.";
+        return false;
+    }
+    if (record.formatVersion >= 4U && record.sourceRestoreRequired
+        && !record.sourceAppliedConfigurationAvailable)
+    {
+        error =
+            "The waveform-source recovery record lacks its applied configuration.";
+        return false;
+    }
+    if (record.sourceAppliedConfigurationAvailable
+        && (record.sourceAppliedConfiguration
+                == record.sourceOriginalConfiguration
+            || ((record.sourceAppliedConfiguration
+                     ^ record.sourceOriginalConfiguration)
+                & 0xFFFCU)
+                != 0U))
+    {
+        error =
+            "The applied waveform-source configuration is inconsistent with its original.";
+        return false;
+    }
+    if (!record.sourceRestoreRequired
+        && record.sourceAppliedConfigurationAvailable)
+    {
+        error =
+            "An inactive waveform-source recovery record cannot contain an applied configuration.";
+        return false;
+    }
     return true;
 }
 
@@ -269,7 +306,12 @@ void WriteRecord(std::ostream& output, const TunerRecoveryRecord& record)
         output << "SOURCE "
                << (record.sourceRestoreRequired ? 1U : 0U) << ' '
                << record.sourceQuad << ' '
-               << record.sourceOriginalConfiguration << '\n';
+               << record.sourceOriginalConfiguration;
+        if (record.formatVersion >= 4U)
+        {
+            output << ' ' << record.sourceAppliedConfiguration;
+        }
+        output << '\n';
     }
     output << "STATE " << static_cast<std::uint16_t>(record.phase) << ' '
            << (record.previewRestoreRequired ? 1U : 0U) << ' '
@@ -420,7 +462,13 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
                 input,
                 record.sourceOriginalConfiguration,
                 "source original configuration",
-                error)))
+                error)
+            || (record.formatVersion >= 4U
+                && !ReadUnsigned(
+                    input,
+                    record.sourceAppliedConfiguration,
+                    "source applied configuration",
+                    error))))
     {
         result.message = error;
         return result;
@@ -460,6 +508,8 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
         return result;
     }
     record.sourceRestoreRequired = sourceRequired == 1U;
+    record.sourceAppliedConfigurationAvailable =
+        record.formatVersion >= 4U && record.sourceRestoreRequired;
     if (previewRequired > 1U)
     {
         result.message = "Invalid preview state in tuner recovery journal.";

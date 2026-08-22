@@ -141,6 +141,8 @@ fidget::TunerRecoveryRecord MakeRecoveryRecord()
     record.sourceRestoreRequired = true;
     record.sourceQuad = 7U;
     record.sourceOriginalConfiguration = 0x0040U;
+    record.sourceAppliedConfigurationAvailable = true;
+    record.sourceAppliedConfiguration = 0x0043U;
     return record;
 }
 

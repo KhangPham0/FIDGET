@@ -93,6 +93,14 @@ TEST_CASE("source change preserves every non-source configuration bit")
     CHECK(session.recoveryRecord.sourceRestoreRequired);
     CHECK(session.recoveryRecord.sourceQuad == 1U);
     CHECK(session.recoveryRecord.sourceOriginalConfiguration == 0x00C1U);
+    CHECK(session.recoveryRecord.sourceAppliedConfigurationAvailable);
+    CHECK(session.recoveryRecord.sourceAppliedConfiguration == 0x00C2U);
+
+    const auto loaded = LoadTunerRecoveryJournal(journalPath);
+    REQUIRE(loaded.success);
+    REQUIRE(loaded.record.has_value());
+    CHECK(loaded.record->sourceAppliedConfigurationAvailable);
+    CHECK(loaded.record->sourceAppliedConfiguration == 0x00C2U);
 
     std::string removeError;
     CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
@@ -177,6 +185,9 @@ TEST_CASE("source readback mismatch restores the exact captured word")
     CHECK(result.daqModeResumed);
     CHECK_FALSE(result.sourceRestoreRequired);
     CHECK_FALSE(session.recoveryRecord.sourceRestoreRequired);
+    CHECK_FALSE(
+        session.recoveryRecord.sourceAppliedConfigurationAvailable);
+    CHECK(session.recoveryRecord.sourceAppliedConfiguration == 0U);
 
     std::string removeError;
     CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
@@ -193,6 +204,47 @@ TEST_CASE("source readback mismatch restores the exact captured word")
         }
     }
     CHECK(sourceWrites == std::vector<std::uint16_t>{0x00C2U, 0x00C1U});
+}
+
+TEST_CASE("another temporary source requires restoring the original first")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    FakeCommandTransport transport;
+    Open(transport);
+    auto session = MakeRunningDiagnosticSession();
+    session.recoveryRecord.sourceRestoreRequired = true;
+    session.recoveryRecord.sourceQuad = 1U;
+    session.recoveryRecord.sourceOriginalConfiguration = 0x00C1U;
+    session.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    session.recoveryRecord.sourceAppliedConfiguration = 0x00C2U;
+    const auto journalPath = MakeJournalPath();
+    REQUIRE(SaveTunerRecoveryJournal(
+        session.recoveryRecord, journalPath).success);
+
+    const std::atomic<bool> cancelled{false};
+    const auto result = ChangeDiagnosticWaveformSource(
+        transport, session, {1U, 3U}, journalPath, cancelled);
+
+    CHECK(result.state == DiagnosticSourceChangeState::Failed);
+    CHECK_FALSE(result.writeAttempted);
+    CHECK(result.sourceRestoreRequired);
+    CHECK(result.message.find("Restore the original waveform source")
+          != std::string::npos);
+    CHECK(transport.SentRequests().empty());
+    CHECK(session.recoveryRecord.sourceOriginalConfiguration == 0x00C1U);
+    CHECK(session.recoveryRecord.sourceAppliedConfigurationAvailable);
+    CHECK(session.recoveryRecord.sourceAppliedConfiguration == 0x00C2U);
+    const auto loaded = LoadTunerRecoveryJournal(journalPath);
+    REQUIRE(loaded.success);
+    REQUIRE(loaded.record.has_value());
+    CHECK(loaded.record->sourceOriginalConfiguration == 0x00C1U);
+    CHECK(loaded.record->sourceAppliedConfigurationAvailable);
+    CHECK(loaded.record->sourceAppliedConfiguration == 0x00C2U);
+
+    std::string removeError;
+    CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
 }
 
 TEST_CASE("invalid source requests issue no wire traffic")
@@ -278,6 +330,8 @@ TEST_CASE("switching back to the original source clears its recovery state")
     session.recoveryRecord.sourceRestoreRequired = true;
     session.recoveryRecord.sourceQuad = 1U;
     session.recoveryRecord.sourceOriginalConfiguration = 0x00C1U;
+    session.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    session.recoveryRecord.sourceAppliedConfiguration = 0x00C2U;
     const auto journalPath = MakeJournalPath();
     REQUIRE(SaveTunerRecoveryJournal(
         session.recoveryRecord, journalPath).success);
@@ -327,6 +381,8 @@ TEST_CASE("switching back to the original source clears its recovery state")
     REQUIRE(loaded.success);
     REQUIRE(loaded.record.has_value());
     CHECK_FALSE(loaded.record->sourceRestoreRequired);
+    CHECK_FALSE(loaded.record->sourceAppliedConfigurationAvailable);
+    CHECK(loaded.record->sourceAppliedConfiguration == 0U);
 
     std::string removeError;
     CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
@@ -399,6 +455,8 @@ TEST_CASE("stop-time source restore is exact and clears the journal field")
     session.recoveryRecord.sourceRestoreRequired = true;
     session.recoveryRecord.sourceQuad = 7U;
     session.recoveryRecord.sourceOriginalConfiguration = 0x0040U;
+    session.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    session.recoveryRecord.sourceAppliedConfiguration = 0x0043U;
     const auto journalPath = MakeJournalPath();
     REQUIRE(SaveTunerRecoveryJournal(
         session.recoveryRecord, journalPath).success);
@@ -443,10 +501,15 @@ TEST_CASE("stop-time source restore is exact and clears the journal field")
     CHECK_FALSE(result.acquisitionResumed);
     CHECK_FALSE(result.sourceRestoreRequired);
     CHECK_FALSE(session.recoveryRecord.sourceRestoreRequired);
+    CHECK_FALSE(
+        session.recoveryRecord.sourceAppliedConfigurationAvailable);
+    CHECK(session.recoveryRecord.sourceAppliedConfiguration == 0U);
     const auto loaded = LoadTunerRecoveryJournal(journalPath);
     REQUIRE(loaded.success);
     REQUIRE(loaded.record.has_value());
     CHECK_FALSE(loaded.record->sourceRestoreRequired);
+    CHECK_FALSE(loaded.record->sourceAppliedConfigurationAvailable);
+    CHECK(loaded.record->sourceAppliedConfiguration == 0U);
 
     std::string removeError;
     CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
@@ -463,6 +526,8 @@ TEST_CASE("failed stop-time source restore retains recovery evidence")
     session.recoveryRecord.sourceRestoreRequired = true;
     session.recoveryRecord.sourceQuad = 7U;
     session.recoveryRecord.sourceOriginalConfiguration = 0x0040U;
+    session.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    session.recoveryRecord.sourceAppliedConfiguration = 0x0043U;
     const auto journalPath = MakeJournalPath();
     REQUIRE(SaveTunerRecoveryJournal(
         session.recoveryRecord, journalPath).success);
@@ -508,6 +573,8 @@ TEST_CASE("failed stop-time source restore retains recovery evidence")
     REQUIRE(loaded.success);
     REQUIRE(loaded.record.has_value());
     CHECK(loaded.record->sourceRestoreRequired);
+    CHECK(loaded.record->sourceAppliedConfigurationAvailable);
+    CHECK(loaded.record->sourceAppliedConfiguration == 0x0043U);
 
     std::string removeError;
     CHECK(RemoveTunerRecoveryJournal(journalPath, removeError));
@@ -529,6 +596,8 @@ TEST_CASE("stop restores a preview before restoring its source deviation")
     session.recoveryRecord.sourceRestoreRequired = true;
     session.recoveryRecord.sourceQuad = 7U;
     session.recoveryRecord.sourceOriginalConfiguration = 0x0040U;
+    session.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    session.recoveryRecord.sourceAppliedConfiguration = 0x0043U;
     const auto journalPath = MakeJournalPath();
     REQUIRE(SaveTunerRecoveryJournal(
         session.recoveryRecord, journalPath).success);

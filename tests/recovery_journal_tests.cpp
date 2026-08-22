@@ -33,6 +33,8 @@ fidget::TunerRecoveryRecord MakeRecord()
     record.sourceRestoreRequired = true;
     record.sourceQuad = 7U;
     record.sourceOriginalConfiguration = 0x0040U;
+    record.sourceAppliedConfigurationAvailable = true;
+    record.sourceAppliedConfiguration = 0x0043U;
     record.previewRestoreRequired = true;
     record.previewQuad = 7U;
     record.previewRegisterOffset = 0x611AU;
@@ -76,6 +78,30 @@ constexpr const char* LegacyV2Journal =
     "CHECKSUM 1388001408713401195\n"
     "END\n";
 
+constexpr const char* LegacyV3Journal =
+    "MWW_TUNER_RECOVERY 3\n"
+    "ENDPOINT mvlc-test 32768\n"
+    "MVLC 20488 70\n"
+    "MDPP 285212672 20487 1 24\n"
+    "ISOLATED 2 858980352 1145307136\n"
+    "STACK 4356 64 4612 512 8732 305441741\n"
+    "SOURCE 1 7 64\n"
+    "STATE 2 1 7 24858 200 510\n"
+    "CHECKSUM 16597571028148822462\n"
+    "END\n";
+
+constexpr const char* CurrentV4Journal =
+    "MWW_TUNER_RECOVERY 4\n"
+    "ENDPOINT mvlc-test 32768\n"
+    "MVLC 20488 70\n"
+    "MDPP 285212672 20487 1 24\n"
+    "ISOLATED 2 858980352 1145307136\n"
+    "STACK 4356 64 4612 512 8732 305441741\n"
+    "SOURCE 1 7 64 67\n"
+    "STATE 2 1 7 24858 200 510\n"
+    "CHECKSUM 15109459991863664248\n"
+    "END\n";
+
 } // namespace
 
 TEST_CASE("recovery journal strings round-trip every owned value")
@@ -86,6 +112,7 @@ TEST_CASE("recovery journal strings round-trip every owned value")
     const auto serialized = SerializeTunerRecoveryJournal(record);
     INFO(serialized.message);
     REQUIRE(serialized.success);
+    CHECK(serialized.text == CurrentV4Journal);
 
     const auto parsed = ParseTunerRecoveryJournal(serialized.text);
     INFO(parsed.message);
@@ -100,6 +127,8 @@ TEST_CASE("recovery journal strings round-trip every owned value")
     CHECK(roundTrip.sourceRestoreRequired);
     CHECK(roundTrip.sourceQuad == 7U);
     CHECK(roundTrip.sourceOriginalConfiguration == 0x0040U);
+    CHECK(roundTrip.sourceAppliedConfigurationAvailable);
+    CHECK(roundTrip.sourceAppliedConfiguration == 0x0043U);
     CHECK(roundTrip.previewRestoreRequired);
     CHECK(roundTrip.previewOriginalValue == 200U);
     CHECK(roundTrip.previewAppliedValue == 510U);
@@ -136,6 +165,18 @@ TEST_CASE("recovery journal parsing rejects corruption and incomplete records")
     CHECK(corruptResult.message.find("checksum mismatch")
           != std::string::npos);
 
+    auto appliedCorruption = serialized.text;
+    const auto sourcePosition = appliedCorruption.find("SOURCE 1 7 64 67");
+    REQUIRE(sourcePosition != std::string::npos);
+    appliedCorruption.replace(
+        sourcePosition, std::string("SOURCE 1 7 64 67").size(),
+        "SOURCE 1 7 64 66");
+    const auto appliedCorruptResult =
+        ParseTunerRecoveryJournal(appliedCorruption);
+    CHECK_FALSE(appliedCorruptResult.success);
+    CHECK(appliedCorruptResult.message.find("checksum mismatch")
+          != std::string::npos);
+
     const auto checksumPosition = serialized.text.find("CHECKSUM");
     REQUIRE(checksumPosition != std::string::npos);
     CHECK_FALSE(ParseTunerRecoveryJournal(
@@ -155,6 +196,7 @@ TEST_CASE("literal legacy v1 recovery journals remain readable")
     CHECK(parsed.record->mvlcFirmwareRevision == 0x0046U);
     CHECK(parsed.record->ownershipTokenValue == 0x1234ABCDU);
     CHECK_FALSE(parsed.record->sourceRestoreRequired);
+    CHECK_FALSE(parsed.record->sourceAppliedConfigurationAvailable);
 }
 
 TEST_CASE("version 2 recovery journals import without a source deviation")
@@ -169,6 +211,58 @@ TEST_CASE("version 2 recovery journals import without a source deviation")
     CHECK_FALSE(parsed.record->sourceRestoreRequired);
     CHECK(parsed.record->sourceQuad == 0U);
     CHECK(parsed.record->sourceOriginalConfiguration == 0U);
+    CHECK_FALSE(parsed.record->sourceAppliedConfigurationAvailable);
+}
+
+TEST_CASE("version 3 recovery journals import without guessed source evidence")
+{
+    using namespace fidget;
+
+    const auto parsed = ParseTunerRecoveryJournal(LegacyV3Journal);
+    INFO(parsed.message);
+    REQUIRE(parsed.success);
+    REQUIRE(parsed.record.has_value());
+    CHECK(parsed.record->formatVersion == 3U);
+    CHECK(parsed.record->sourceRestoreRequired);
+    CHECK(parsed.record->sourceQuad == 7U);
+    CHECK(parsed.record->sourceOriginalConfiguration == 0x0040U);
+    CHECK_FALSE(parsed.record->sourceAppliedConfigurationAvailable);
+    CHECK(parsed.record->sourceAppliedConfiguration == 0U);
+
+    const auto reserialized =
+        SerializeTunerRecoveryJournal(*parsed.record);
+    INFO(reserialized.message);
+    REQUIRE(reserialized.success);
+    CHECK(reserialized.text == LegacyV3Journal);
+}
+
+TEST_CASE("version 4 source recovery refuses missing applied evidence")
+{
+    using namespace fidget;
+
+    auto record = MakeRecord();
+    record.sourceAppliedConfigurationAvailable = false;
+    const auto serialized = SerializeTunerRecoveryJournal(record);
+    CHECK_FALSE(serialized.success);
+    CHECK(serialized.message.find("lacks its applied configuration")
+          != std::string::npos);
+
+    record = MakeRecord();
+    record.sourceAppliedConfiguration =
+        record.sourceOriginalConfiguration;
+    const auto unchanged = SerializeTunerRecoveryJournal(record);
+    CHECK_FALSE(unchanged.success);
+    CHECK(unchanged.message.find("inconsistent with its original")
+          != std::string::npos);
+
+    record = MakeRecord();
+    record.sourceAppliedConfiguration = 0x00C3U;
+    const auto changedNonSourceBits =
+        SerializeTunerRecoveryJournal(record);
+    CHECK_FALSE(changedNonSourceBits.success);
+    CHECK(changedNonSourceBits.message.find(
+              "inconsistent with its original")
+          != std::string::npos);
 }
 
 TEST_CASE("recovery journal file wrappers save load remove and report missing")

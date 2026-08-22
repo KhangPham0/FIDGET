@@ -49,6 +49,7 @@ bool SaveSourceRecoveryState(
     const bool active,
     const std::uint16_t quad,
     const std::uint16_t originalConfiguration,
+    const std::uint16_t appliedConfiguration,
     std::string& error)
 {
     auto record = session.recoveryRecord;
@@ -56,6 +57,10 @@ bool SaveSourceRecoveryState(
     record.sourceQuad = active ? quad : 0U;
     record.sourceOriginalConfiguration = active
         ? originalConfiguration
+        : 0U;
+    record.sourceAppliedConfigurationAvailable = active;
+    record.sourceAppliedConfiguration = active
+        ? appliedConfiguration
         : 0U;
     const auto saved = SaveTunerRecoveryJournal(record, path);
     if (!saved.success)
@@ -80,6 +85,8 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
     result.state = DiagnosticSourceChangeState::Applying;
     result.selectedQuad = request.selectedQuad;
     result.requestedSource = request.requestedSource;
+    result.sourceRestoreRequired =
+        acquisitionSession.recoveryRecord.sourceRestoreRequired;
     result.message =
         "Pausing direct acquisition and applying the waveform source...";
 
@@ -117,6 +124,23 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         result.state = DiagnosticSourceChangeState::Failed;
         result.message =
             "Restore the active waveform-source deviation before changing another quad.";
+        return result;
+    }
+    if (acquisitionSession.recoveryRecord.sourceRestoreRequired
+        && request.requestedSource
+            != (acquisitionSession.recoveryRecord
+                    .sourceOriginalConfiguration
+                & 0x0003U)
+        && (!acquisitionSession.recoveryRecord
+                 .sourceAppliedConfigurationAvailable
+            || request.requestedSource
+                != (acquisitionSession.recoveryRecord
+                        .sourceAppliedConfiguration
+                    & 0x0003U)))
+    {
+        result.state = DiagnosticSourceChangeState::Failed;
+        result.message =
+            "Restore the original waveform source before selecting another temporary source.";
         return result;
     }
 
@@ -240,21 +264,24 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
         }
         else
         {
-            if (!sourceWasAlreadyActive)
+            if (!sourceWasAlreadyActive || !returnsToOriginal)
             {
                 std::string journalError;
-                recoveryRestoreArmed = SaveSourceRecoveryState(
+                const auto recoveryStateSaved = SaveSourceRecoveryState(
                     acquisitionSession,
                     recoveryJournalPath,
                     true,
                     request.selectedQuad,
-                    result.originalConfiguration,
+                    restoreConfiguration,
+                    result.requestedConfiguration,
                     journalError);
-                if (!recoveryRestoreArmed)
+                recoveryRestoreArmed = !sourceWasAlreadyActive
+                    && recoveryStateSaved;
+                if (!recoveryStateSaved)
                 {
                     AppendFailure(
                         failure,
-                        "The original waveform-source configuration could not be journaled, so no source write was allowed: "
+                        "The waveform-source recovery state could not be journaled, so no source write was allowed: "
                             + journalError);
                 }
             }
@@ -398,6 +425,7 @@ DiagnosticSourceChangeResult ChangeDiagnosticWaveformSource(
                 false,
                 request.selectedQuad,
                 restoreConfiguration,
+                0U,
                 journalError))
         {
             AppendFailure(
@@ -662,6 +690,7 @@ DiagnosticSourceChangeResult RestoreDiagnosticWaveformSource(
                 false,
                 result.selectedQuad,
                 result.originalConfiguration,
+                0U,
                 journalError))
         {
             AppendFailure(

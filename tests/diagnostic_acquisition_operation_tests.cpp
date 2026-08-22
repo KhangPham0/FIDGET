@@ -1016,6 +1016,8 @@ TEST_CASE("cleanup retains the journal when automatic source restore failed")
     prepared.recoveryRecord.sourceRestoreRequired = true;
     prepared.recoveryRecord.sourceQuad = 7U;
     prepared.recoveryRecord.sourceOriginalConfiguration = 0x0040U;
+    prepared.recoveryRecord.sourceAppliedConfigurationAvailable = true;
+    prepared.recoveryRecord.sourceAppliedConfiguration = 0x0043U;
     REQUIRE(SaveTunerRecoveryJournal(
         prepared.recoveryRecord, journal.Get()).success);
 

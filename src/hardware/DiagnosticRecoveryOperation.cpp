@@ -414,6 +414,8 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
         record.sourceRestoreRequired = false;
         record.sourceQuad = 0U;
         record.sourceOriginalConfiguration = 0U;
+        record.sourceAppliedConfigurationAvailable = false;
+        record.sourceAppliedConfiguration = 0U;
         const auto saved = SaveTunerRecoveryJournal(
             record, request.recoveryJournalPath);
         if (!saved.success)

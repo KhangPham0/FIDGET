@@ -8,7 +8,7 @@
 
 namespace fidget {
 
-inline constexpr std::uint32_t TunerRecoveryJournalFormatVersion = 3U;
+inline constexpr std::uint32_t TunerRecoveryJournalFormatVersion = 4U;
 
 enum class TunerRecoveryPhase : std::uint16_t
 {
@@ -38,6 +38,8 @@ struct TunerRecoveryRecord
     bool sourceRestoreRequired = false;
     std::uint16_t sourceQuad = 0U;
     std::uint16_t sourceOriginalConfiguration = 0U;
+    bool sourceAppliedConfigurationAvailable = false;
+    std::uint16_t sourceAppliedConfiguration = 0U;
     bool previewRestoreRequired = false;
     std::uint16_t previewQuad = 0U;
     std::uint16_t previewRegisterOffset = 0U;

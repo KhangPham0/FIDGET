@@ -186,6 +186,8 @@ TEST_CASE("confirmed orphans execute the complete verified recovery sequence")
     record.sourceRestoreRequired = true;
     record.sourceQuad = 7U;
     record.sourceOriginalConfiguration = 0x0040U;
+    record.sourceAppliedConfigurationAvailable = true;
+    record.sourceAppliedConfiguration = 0x0043U;
     REQUIRE(SaveTunerRecoveryJournal(record, journal.Get()).success);
 
     FakeCommandTransport transport;
