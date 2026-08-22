@@ -357,6 +357,7 @@ TEST_CASE("a token mismatch refuses every recovery write")
     CHECK_FALSE(result.hardwareWriteSent);
     CHECK_FALSE(ContainsAnyWrite(transport));
     CHECK(std::filesystem::exists(journal.Get()));
+    CHECK(transport.SentRequests().size() == 2U);
 }
 
 TEST_CASE("a target MDPP identity mismatch refuses every recovery write")
@@ -413,6 +414,39 @@ TEST_CASE("DAQ-idle recovery removes a stale journal without writes")
     CHECK_FALSE(result.hardwareWriteSent);
     CHECK_FALSE(ContainsAnyWrite(transport));
     CHECK_FALSE(std::filesystem::exists(journal.Get()));
+}
+
+TEST_CASE("DAQ-idle recovery retains a journal with pending restoration")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    auto record = MakeRecord();
+    record.previewRestoreRequired = true;
+    record.previewQuad = 7U;
+    record.previewRegisterOffset = 0x611AU;
+    record.previewOriginalValue = 200U;
+    record.previewAppliedValue = 250U;
+    REQUIRE(SaveTunerRecoveryJournal(record, journal.Get()).success);
+
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueRecoveryFingerprint(
+        transport, references, record, FingerprintValues(record, 0U));
+    const std::atomic<bool> cancelled{false};
+    const auto result = RecoverDiagnosticOrphan(
+        transport, {record, journal.Get()}, cancelled);
+
+    CHECK(result.state == DiagnosticOrphanRecoveryState::Failed);
+    CHECK(result.fingerprint.verdict
+          == TunerRecoveryFingerprintVerdict::IdleWithRestoration);
+    CHECK_FALSE(result.journalRemoved);
+    CHECK_FALSE(result.hardwareWriteSent);
+    CHECK_FALSE(ContainsAnyWrite(transport));
+    CHECK(std::filesystem::exists(journal.Get()));
+    CHECK(transport.SentRequests().size() == 2U);
 }
 
 TEST_CASE("unexpected preview values are parked but never overwritten")

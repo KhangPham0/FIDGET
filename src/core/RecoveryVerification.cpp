@@ -96,9 +96,21 @@ TunerRecoveryFingerprintEvaluation EvaluateTunerRecoveryFingerprint(
     TunerRecoveryFingerprintEvaluation result;
     if (live.values[0] == 0U)
     {
-        result.verdict = TunerRecoveryFingerprintVerdict::AlreadyClean;
-        result.message =
-            "MVLC DAQ mode is zero. The recovery journal is stale and may be removed without a hardware write; compare the module afterward.";
+        if (record.previewRestoreRequired
+            || record.sourceRestoreRequired)
+        {
+            result.verdict =
+                TunerRecoveryFingerprintVerdict::IdleWithRestoration;
+            result.message =
+                "MVLC DAQ mode is zero, but the recovery journal records a pending restoration. The journal must be retained until the original module value is verified or restored.";
+        }
+        else
+        {
+            result.verdict =
+                TunerRecoveryFingerprintVerdict::AlreadyClean;
+            result.message =
+                "MVLC DAQ mode is zero and no restoration is pending. The stale recovery journal may be removed without a hardware write; compare the module afterward.";
+        }
         return result;
     }
 

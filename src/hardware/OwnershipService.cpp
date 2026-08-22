@@ -1599,13 +1599,30 @@ void OwnershipService::CheckDiagnosticRecoveryStatus()
     snapshot.mvlcHardwareId = hardware.value;
     snapshot.controllerReadingsValid = true;
     snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+    const bool restorationPending =
+        pendingRecoveryRecord_->previewRestoreRequired
+        || pendingRecoveryRecord_->sourceRestoreRequired;
+    std::string recoveryStatus;
+    if (daq.value != 0U)
+    {
+        recoveryStatus =
+            "The journaled MVLC is active. Only fingerprint-gated orphan recovery is allowed.";
+    }
+    else if (restorationPending)
+    {
+        recoveryStatus =
+            "The journaled MVLC is DAQ-idle, but restoration evidence remains. The recovery journal must be retained until the original module value is verified or restored.";
+    }
+    else
+    {
+        recoveryStatus =
+            "The journaled MVLC is already DAQ-idle; recovery can remove the stale journal without a hardware write.";
+    }
     PublishActivityStatus(
         std::move(snapshot),
         ActivityLogCategory::Recovery,
         TunerStatusLevel::Warning,
-        daq.value == 0U
-            ? "The journaled MVLC is already DAQ-idle; recovery can remove the stale journal without a hardware write."
-            : "The journaled MVLC is active. Only fingerprint-gated orphan recovery is allowed.");
+        std::move(recoveryStatus));
 }
 
 void OwnershipService::RecoverDiagnosticOrphan(

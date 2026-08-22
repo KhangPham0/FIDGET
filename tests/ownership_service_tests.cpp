@@ -1120,6 +1120,59 @@ TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
     }
 }
 
+TEST_CASE("recovery status retains DAQ-idle restoration evidence")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryRecoveryProject files;
+    auto record = MakeRecoveryRecord();
+    record.previewRestoreRequired = true;
+    record.previewQuad = 7U;
+    record.previewRegisterOffset = 0x611AU;
+    record.previewOriginalValue = 200U;
+    record.previewAppliedValue = 250U;
+    REQUIRE(SaveTunerRecoveryJournal(record, files.journalPath).success);
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
+    UseCrateProjectCommand use;
+    use.projectPath = files.projectPath;
+    use.project = MakeProject();
+    service.Submit(std::move(use));
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.recoveryJournalStatus
+            == RecoveryJournalStatus::Pending;
+    }));
+
+    QueueRead(*transport, TunerRecoveryMvlcFirmwareRegister, 1U, 0x0046U);
+    QueueRead(*transport, TunerRecoveryDaqModeRegister, 2U, 0U);
+    QueueRead(
+        *transport,
+        TunerRecoveryMvlcHardwareIdRegister,
+        3U,
+        ExpectedMvlcHardwareId);
+    service.Submit(RecoverDiagnosticOrphanCommand{false});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.controllerReadingsValid;
+    }));
+
+    const auto status = service.CurrentSnapshot();
+    REQUIRE_FALSE(status->statusMessages.empty());
+    CHECK(status->statusMessages.back().summary.find(
+              "restoration evidence remains")
+          != std::string::npos);
+    CHECK(status->statusMessages.back().summary.find(
+              "must be retained")
+          != std::string::npos);
+    CHECK(status->statusMessages.back().summary.find("stale")
+          == std::string::npos);
+    CHECK(std::filesystem::exists(files.journalPath));
+    CheckOnlyReadRequests(*transport);
+}
+
 TEST_CASE("an idle check permits a confirmed session and release")
 {
     using namespace fidget;

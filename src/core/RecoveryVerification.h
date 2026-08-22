@@ -39,6 +39,7 @@ enum class TunerRecoveryFingerprintVerdict
     OrphanConfirmed,
     ForeignOrMismatched,
     AlreadyClean,
+    IdleWithRestoration,
 };
 
 struct TunerRecoveryFingerprintEvaluation

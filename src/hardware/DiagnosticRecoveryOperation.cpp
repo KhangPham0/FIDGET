@@ -143,6 +143,14 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
             "Removed the stale recovery journal without a hardware write.");
         return result;
     }
+    if (result.fingerprint.verdict
+        == TunerRecoveryFingerprintVerdict::IdleWithRestoration)
+    {
+        result.state = DiagnosticOrphanRecoveryState::Failed;
+        result.message = result.fingerprint.message;
+        AddStep(result, "recovery", false, result.message);
+        return result;
+    }
 
     const auto fail = [&](std::string message) {
         result.state = DiagnosticOrphanRecoveryState::Failed;
