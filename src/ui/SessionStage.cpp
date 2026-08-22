@@ -109,10 +109,10 @@ void SessionStage::Draw(
             tunerControl.Submit(RecoverDiagnosticOrphanCommand{false});
         }
         ImGui::Checkbox(
-            "I authorize fingerprint-gated recovery of this tuner-owned orphan",
+            "I authorize journal-gated recovery of this tuner state",
             &m_recoveryConfirmed);
         ImGui::BeginDisabled(!m_recoveryConfirmed);
-        if (ImGui::Button("Recover tuner-owned orphan"))
+        if (ImGui::Button("Recover journaled tuner state"))
         {
             tunerControl.Submit(RecoverDiagnosticOrphanCommand{true});
             m_recoveryConfirmed = false;

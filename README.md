@@ -240,8 +240,10 @@ the module exactly as it found it.
 
 ### Recover
 
-Inspect a project-adjacent recovery journal and offer fingerprint-gated
-orphan cleanup. Closed input and a blank answer mean No:
+Inspect a project-adjacent recovery journal and offer journal-gated recovery.
+An active tuner-owned orphan requires the complete fingerprint to match. An
+idle record with pending temporary values permits only their identity-gated,
+exact restoration. Closed input and a blank answer mean No:
 
 ```sh
 fidget_cli recover --project example-crate.mwwcrate --module 1
@@ -276,11 +278,18 @@ Before entering a hazardous acquisition state, FIDGET atomically writes
 `<project-file>.recovery`. The record contains the endpoint, identities,
 readout fingerprint, isolated modules, and any parameter or source value
 that must be restored, and it is removed only after verified cleanup. If the
-process crashes, `fidget_cli recover` compares the complete live fingerprint
-with the journal before writing anything. A foreign or mismatched
-fingerprint produces zero cleanup writes and retains the journal as
-evidence. An already-idle crate allows the stale journal to be removed
-without a hardware write.
+process crashes, `fidget_cli recover` compares the live controller state with
+the journal before writing anything. An active orphan requires the complete
+fingerprint, including the random token, to match. A foreign or mismatched
+fingerprint produces zero cleanup writes and retains the journal as evidence.
+If DAQ mode is already zero but a preview or source restoration remains, the
+MVLC and MDPP identities, exact FW2051 firmware, stopped module state, live
+temporary value, and DAQ-mode gates must all pass before FIDGET restores only
+that journaled value. An idle journal with no pending restoration is stale and
+may be removed without a hardware write. A version-3 journal can identify an
+original source value but not the applied value, so source restoration from
+that legacy evidence fails closed in either DAQ state and requires manual
+resolution.
 
 Operation history is appended to `<project-file>.activity`. It records
 session, audit, capture, apply, startup, acquisition, source, preview,

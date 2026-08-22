@@ -71,7 +71,7 @@ struct DiagnosticOrphanRecoveryResult
 {
     DiagnosticOrphanRecoveryState state =
         DiagnosticOrphanRecoveryState::NotRun;
-    std::string message = "No orphan recovery has been requested";
+    std::string message = "No diagnostic recovery has been requested";
     TunerRecoveryFingerprintEvaluation fingerprint;
     std::vector<DiagnosticOrphanRecoveryStep> steps;
     std::size_t isolatedModulesRecovered = 0U;

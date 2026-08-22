@@ -2144,6 +2144,8 @@ TEST_CASE("recover defaults to No on closed input with no recovery write")
           != std::string::npos);
     CHECK(output.str().find("recovery_source_restore: required")
           != std::string::npos);
+    CHECK(output.str().find("Recover journaled tuner state [y/N]")
+          != std::string::npos);
     CHECK(output.str().find("recovery: not run") != std::string::npos);
 }
 

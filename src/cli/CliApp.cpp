@@ -2623,7 +2623,7 @@ int RunCliRecover(
         output, "mvlc_firmware_revision", snapshot->mvlcFirmwareRevision);
     PrintHexReading(output, "mvlc_daq_mode", snapshot->mvlcDaqMode);
 
-    output << "Recover tuner-owned orphan [y/N]: " << std::flush;
+    output << "Recover journaled tuner state [y/N]: " << std::flush;
     std::string confirmation;
     if (!ReadPromptResponse(input, confirmation)
         || !TransactionConfirmedByUser(std::move(confirmation)))
@@ -2653,7 +2653,7 @@ int RunCliRecover(
             },
             AcquisitionCompletionTimeout))
     {
-        errorOutput << "error: diagnostic orphan recovery timed out\n";
+        errorOutput << "error: diagnostic recovery timed out\n";
         return 1;
     }
 

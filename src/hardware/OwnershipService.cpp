@@ -1668,7 +1668,7 @@ void OwnershipService::RecoverDiagnosticOrphan(
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
-        "Starting fingerprint-gated diagnostic orphan recovery.");
+        "Starting journal-gated diagnostic recovery.");
 
     CrateProject recoveryProject = project_;
     recoveryProject.mvlcHost = pendingRecoveryRecord_->host;

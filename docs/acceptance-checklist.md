@@ -212,10 +212,26 @@ journal exists and contains the expected endpoint and fingerprint.
 - [ ] Pass if a third, unexpected live value causes refusal with no overwrite of
   that value and retains the journal.
 
+### Armed restoration while DAQ is idle
+
+- [ ] Terminate FIDGET while a preview or source deviation is armed and MVLC
+  DAQ mode is zero. Pass if recovery retains the journal and offers restoration
+  rather than classifying it as stale.
+- [ ] Pass if recovery reverifies MVLC identity and DAQ mode, MDPP identity,
+  exact FW2051 firmware, and the stopped module state before the first write.
+- [ ] Pass if a live value equal to the original clears its restoration flag
+  without rewriting the parameter, a live value equal to the recorded applied
+  value is restored with exact readback, and any third value is not overwritten.
+- [ ] Pass if multiple pending restorations are cleared and journaled one at a
+  time, and the journal is removed only after no restoration remains.
+- [ ] Pass if a version-3 source record without an applied value is retained
+  with a manual-resolution message and causes zero VME-bus recovery writes,
+  whether DAQ mode is active or idle.
+
 ### Stale journal
 
-- [ ] Create an orphan, then use the crate's authorized normal owner to return
-  DAQ mode to zero before invoking FIDGET recovery.
+- [ ] Present a valid recovery journal with DAQ mode zero and no pending preview
+  or source restoration.
 - [ ] Pass if recovery reports the journal already clean, deletes it, performs
   zero cleanup writes, and recommends a fresh comparison.
 

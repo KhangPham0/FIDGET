@@ -2,6 +2,7 @@
 
 #include "core/RecoveryJournal.h"
 #include "core/ScpConfiguration.h"
+#include "core/ScpRegistry.h"
 #include "hardware/DiagnosticAcquisitionOperation.h"
 #include "hardware/VmeTransaction.h"
 
@@ -16,6 +17,7 @@ namespace fidget {
 namespace {
 
 constexpr std::uint16_t SampleConfigurationRegister = 0x614AU;
+constexpr std::uint16_t FirmwareRevisionRegister = 0x600EU;
 constexpr auto SelectorSettleTime = std::chrono::microseconds(50);
 constexpr auto FrontendSettleTime = std::chrono::microseconds(20);
 
@@ -143,15 +145,9 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
             "Removed the stale recovery journal without a hardware write.");
         return result;
     }
-    if (result.fingerprint.verdict
-        == TunerRecoveryFingerprintVerdict::IdleWithRestoration)
-    {
-        result.state = DiagnosticOrphanRecoveryState::Failed;
-        result.message = result.fingerprint.message;
-        AddStep(result, "recovery", false, result.message);
-        return result;
-    }
-
+    const bool idleRestoration = result.fingerprint.verdict
+        == TunerRecoveryFingerprintVerdict::IdleWithRestoration;
+    std::string error;
     const auto fail = [&](std::string message) {
         result.state = DiagnosticOrphanRecoveryState::Failed;
         result.message = std::move(message);
@@ -211,78 +207,229 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
         }
         return true;
     };
+    const auto requireIdleDaqMode = [&](const char* boundary) {
+        const std::array<std::uint16_t, 1> addresses{{
+            TunerRecoveryDaqModeRegister,
+        }};
+        const auto daqMode = ReadLocalRegisters(
+            transport,
+            addresses.data(),
+            addresses.size(),
+            nextSuperReference,
+            cancellationRequested);
+        if (!daqMode.success || daqMode.values.size() != 1U)
+        {
+            error = daqMode.success
+                ? std::string(
+                      "The MVLC DAQ-mode response had the wrong value count ")
+                    + boundary + ". No further recovery write was sent."
+                : std::string("Could not reverify MVLC DAQ mode ")
+                    + boundary + ": " + daqMode.error
+                    + ". No further recovery write was sent.";
+            return false;
+        }
+        if (daqMode.values[0] != 0U)
+        {
+            error = "MVLC DAQ mode changed to "
+                + Hexadecimal32(daqMode.values[0]) + " " + boundary
+                + ". Recovery stopped without another hardware write.";
+            return false;
+        }
+        return true;
+    };
 
-    std::string error;
-    const auto targetIdentity = readVme(
+    if (idleRestoration
+        && !requireIdleDaqMode("before idle restoration"))
+    {
+        return fail(std::move(error));
+    }
+    if (idleRestoration)
+    {
+        AddStep(
+            result,
+            "daq_mode",
+            true,
+            "Reverified that MVLC DAQ mode remains zero.");
+    }
+
+    const auto targetHardwareId = readVme(
         record.mdppBaseAddress, DiagnosticHardwareIdRegister);
-    if (!targetIdentity.success)
+    if (!targetHardwareId.success)
     {
         return fail(
             "Could not verify the journaled MDPP identity before recovery: "
-            + targetIdentity.error);
+            + targetHardwareId.error);
     }
-    if (targetIdentity.value != record.mdppHardwareId)
+    const auto targetFirmware = readVme(
+        record.mdppBaseAddress, FirmwareRevisionRegister);
+    if (!targetFirmware.success)
+    {
+        return fail(
+            "Could not verify the MDPP firmware before recovery: "
+            + targetFirmware.error);
+    }
+    if (targetHardwareId.value != record.mdppHardwareId)
     {
         return fail(
             "Journaled MDPP hardware ID mismatch: expected "
             + Hexadecimal32(record.mdppHardwareId) + ", read "
-            + Hexadecimal32(targetIdentity.value)
+            + Hexadecimal32(targetHardwareId.value)
+            + ". No recovery write was sent.");
+    }
+    if (targetFirmware.value != Mdpp32ScpFirmwareRevisionFw2051)
+    {
+        return fail(
+            "Unsupported MDPP firmware during recovery: expected exact FW2051 "
+            + Hexadecimal32(Mdpp32ScpFirmwareRevisionFw2051)
+            + ", read " + Hexadecimal32(targetFirmware.value)
             + ". No recovery write was sent.");
     }
     AddStep(
         result,
         "target_identity",
         true,
-        "Verified the journaled MDPP hardware identity.");
+        "Verified the journaled MDPP hardware identity and exact FW2051 "
+        "firmware.");
 
-    if (!writeAndVerify(
+    if (record.sourceRestoreRequired
+        && !record.sourceAppliedConfigurationAvailable)
+    {
+        return fail(
+            "The recovery journal predates format version 4 and does not "
+            "record the applied waveform-source value. FIDGET cannot prove "
+            "a safe restoration value. No recovery write was sent; retain "
+            "the journal and resolve the source setting manually.");
+    }
+    const auto* previewDefinition = record.previewRestoreRequired
+        ? FindFw2051ScpSetting(record.previewRegisterOffset)
+        : nullptr;
+    if (record.previewRestoreRequired && previewDefinition == nullptr)
+    {
+        return fail(
+            "The journaled preview register "
+            + Hexadecimal32(record.previewRegisterOffset)
+            + " is not in the FW2051 SCP recovery allowlist. No VME-bus "
+              "recovery write was sent; retain the journal.");
+    }
+
+    if (idleRestoration)
+    {
+        const auto targetState = readVme(
             record.mdppBaseAddress,
-            DiagnosticAcquisitionControlRegister,
-            0U,
-            "selected-module stop",
-            error))
+            DiagnosticAcquisitionControlRegister);
+        if (!targetState.success)
+        {
+            return fail(
+                "Could not verify that the journaled MDPP remains stopped "
+                "before idle restoration: "
+                + targetState.error);
+        }
+        if (targetState.value != 0U)
+        {
+            return fail(
+                "The journaled MDPP acquisition state is "
+                + Hexadecimal32(targetState.value)
+                + ", expected zero. No recovery write was sent; "
+                + "retain the journal.");
+        }
+        AddStep(
+            result,
+            "target_state",
+            true,
+            "Verified that the journaled MDPP remains stopped.");
+    }
+
+    if (!idleRestoration)
+    {
+        for (const auto baseAddress : record.isolatedModuleBaseAddresses)
+        {
+            const auto isolatedHardwareId = readVme(
+                baseAddress, DiagnosticHardwareIdRegister);
+            if (!isolatedHardwareId.success)
+            {
+                return fail(
+                    "Could not verify the isolated MDPP identity at "
+                    + Hexadecimal32(baseAddress)
+                    + " before recovery: " + isolatedHardwareId.error);
+            }
+            if (isolatedHardwareId.value != Mdpp32HardwareId
+                && isolatedHardwareId.value
+                    != Mdpp32AlternateHardwareId)
+            {
+                return fail(
+                    "Unsupported isolated-module hardware ID at "
+                    + Hexadecimal32(baseAddress) + ": read "
+                    + Hexadecimal32(isolatedHardwareId.value)
+                    + ". No recovery write was sent.");
+            }
+            AddStep(
+                result,
+                "isolated_identity",
+                true,
+                "Verified the isolated MDPP identity at "
+                    + Hexadecimal32(baseAddress) + ".");
+        }
+    }
+
+    if (!idleRestoration
+        && !writeAndVerify(
+                record.mdppBaseAddress,
+                DiagnosticAcquisitionControlRegister,
+                0U,
+                "selected-module stop",
+                error))
     {
         return fail(std::move(error));
     }
-    result.targetStopped = true;
-    AddStep(result, "target", true, "Stopped and verified the selected MDPP.");
-
-    for (const auto baseAddress : record.isolatedModuleBaseAddresses)
+    if (!idleRestoration)
     {
-        if (!writeAndVerify(
-                baseAddress,
-                DiagnosticAcquisitionControlRegister,
-                0U,
-                "isolated-module stop",
-                error))
-        {
-            return fail(
-                "Could not recover isolated module "
-                + Hexadecimal32(baseAddress) + ": " + error);
-        }
-        const auto fifo = writeVme(
-            baseAddress, DiagnosticFifoResetRegister, 1U);
-        if (!fifo.success)
-        {
-            return fail(
-                "Could not reset the isolated-module FIFO at "
-                + Hexadecimal32(baseAddress) + ": " + fifo.error);
-        }
-        const auto readout = writeVme(
-            baseAddress, DiagnosticReadoutResetRegister, 1U);
-        if (!readout.success)
-        {
-            return fail(
-                "Could not reset isolated-module readout at "
-                + Hexadecimal32(baseAddress) + ": " + readout.error);
-        }
-        ++result.isolatedModulesRecovered;
+        result.targetStopped = true;
         AddStep(
             result,
-            "isolated",
+            "target",
             true,
-            "Stopped, verified, and reset isolated module "
-                + Hexadecimal32(baseAddress) + ".");
+            "Stopped and verified the selected MDPP.");
+    }
+
+    if (!idleRestoration)
+    {
+        for (const auto baseAddress : record.isolatedModuleBaseAddresses)
+        {
+            if (!writeAndVerify(
+                    baseAddress,
+                    DiagnosticAcquisitionControlRegister,
+                    0U,
+                    "isolated-module stop",
+                    error))
+            {
+                return fail(
+                    "Could not recover isolated module "
+                    + Hexadecimal32(baseAddress) + ": " + error);
+            }
+            const auto fifo = writeVme(
+                baseAddress, DiagnosticFifoResetRegister, 1U);
+            if (!fifo.success)
+            {
+                return fail(
+                    "Could not reset the isolated-module FIFO at "
+                    + Hexadecimal32(baseAddress) + ": " + fifo.error);
+            }
+            const auto readout = writeVme(
+                baseAddress, DiagnosticReadoutResetRegister, 1U);
+            if (!readout.success)
+            {
+                return fail(
+                    "Could not reset isolated-module readout at "
+                    + Hexadecimal32(baseAddress) + ": " + readout.error);
+            }
+            ++result.isolatedModulesRecovered;
+            AddStep(
+                result,
+                "isolated",
+                true,
+                "Stopped, verified, and reset isolated module "
+                    + Hexadecimal32(baseAddress) + ".");
+        }
     }
 
     const auto restoreBanked = [&](const bool preview,
@@ -290,7 +437,14 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
                                    const std::uint16_t registerOffset,
                                    const std::uint16_t originalValue,
                                    const std::uint16_t expectedLiveValue,
-                                   const bool requireExpectedLive) {
+                                   const bool requireExpectedLive,
+                                   const bool requireIdleGate) {
+        error.clear();
+        if (requireIdleGate
+            && !requireIdleDaqMode("before selecting a recovery quad"))
+        {
+            return false;
+        }
         const auto selected = writeVme(
             record.mdppBaseAddress, Fw2051ScpSelectorRegister, quad);
         if (!selected.success)
@@ -300,6 +454,50 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
         }
         std::this_thread::sleep_for(SelectorSettleTime);
         const auto liveValue = readVme(record.mdppBaseAddress, registerOffset);
+        const std::string valueName = preview
+            ? "parameter preview"
+            : "waveform source";
+        std::string dependencyError;
+        if (liveValue.success
+            && preview
+            && (!requireExpectedLive
+                || liveValue.value == expectedLiveValue
+                || liveValue.value == originalValue)
+            && liveValue.value != originalValue
+            && previewDefinition != nullptr
+            && previewDefinition->dependencyRule
+                != Fw2051ScpDependencyRule::None)
+        {
+            const auto dependency = readVme(
+                record.mdppBaseAddress,
+                previewDefinition->dependencyRegister);
+            if (!dependency.success)
+            {
+                dependencyError =
+                    "Could not read the live recovery dependency "
+                    + std::string(previewDefinition->dependencyName)
+                    + ": " + dependency.error;
+            }
+            else if (!Fw2051ScpDependencySatisfied(
+                         *previewDefinition,
+                         originalValue,
+                         dependency.value))
+            {
+                dependencyError = "The original "
+                    + std::string(previewDefinition->name) + " value "
+                    + std::to_string(originalValue) + " must be "
+                    + Fw2051ScpDependencyRelation(
+                        previewDefinition->dependencyRule)
+                    + " the live " + previewDefinition->dependencyName
+                    + " value " + std::to_string(dependency.value)
+                    + "; recovery refused the now-invalid restore.";
+            }
+        }
+        if (requireIdleGate
+            && !requireIdleDaqMode("before restoring or parking the selector"))
+        {
+            return false;
+        }
         if (!liveValue.success)
         {
             error = "Could not read the live recovery value: "
@@ -309,10 +507,14 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
                  && liveValue.value != expectedLiveValue
                  && liveValue.value != originalValue)
         {
-            error = "The live preview value is "
+            error = "The live " + valueName + " value is "
                 + std::to_string(liveValue.value) + ", expected "
                 + std::to_string(expectedLiveValue)
                 + "; recovery refused to overwrite the unexpected value.";
+        }
+        else if (!dependencyError.empty())
+        {
+            error = std::move(dependencyError);
         }
         else if (liveValue.value != originalValue)
         {
@@ -366,11 +568,20 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
             result.sourceRestoreVerified = true;
         }
 
+        if (requireIdleGate
+            && !requireIdleDaqMode("before parking the recovery selector"))
+        {
+            return false;
+        }
         const auto parked = writeVme(
             record.mdppBaseAddress, Fw2051ScpSelectorRegister, 0U);
-        if (!parked.success && error.empty())
+        if (!parked.success)
         {
-            error = "Could not park the recovery selector: " + parked.error;
+            const std::string parkingError =
+                "Could not park the recovery selector: " + parked.error;
+            error = error.empty()
+                ? parkingError
+                : error + " " + parkingError;
         }
         if (parked.success)
         {
@@ -387,7 +598,8 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
                 record.previewRegisterOffset,
                 record.previewOriginalValue,
                 record.previewAppliedValue,
-                true))
+                true,
+                idleRestoration))
         {
             return fail(std::move(error));
         }
@@ -414,8 +626,9 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
                 record.sourceQuad,
                 SampleConfigurationRegister,
                 record.sourceOriginalConfiguration,
-                0U,
-                false))
+                record.sourceAppliedConfiguration,
+                true,
+                idleRestoration))
         {
             return fail(std::move(error));
         }
@@ -429,10 +642,31 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
         if (!saved.success)
         {
             return fail(
-                "The waveform source was restored, but its journal state could not be cleared: "
+                "The waveform source was restored, but its journal state "
+                "could not be cleared: "
                 + saved.message);
         }
         AddStep(result, "source", true, "Restored the waveform source.");
+    }
+
+    if (idleRestoration)
+    {
+        std::string removeError;
+        if (!RemoveTunerRecoveryJournal(
+                request.recoveryJournalPath, removeError))
+        {
+            return fail(
+                "All journaled values were restored, but the recovery "
+                "journal could not be removed: "
+                + removeError);
+        }
+        result.journalRemoved = true;
+        AddStep(result, "journal", true, "Removed the recovery journal.");
+        result.state = DiagnosticOrphanRecoveryState::Recovered;
+        result.message =
+            "Restored and verified the journaled tuner state while MVLC DAQ "
+            "mode remained zero.";
+        return result;
     }
 
     const std::array<MvlcLocalRegisterWrite, 4> cleanupWrites{{
