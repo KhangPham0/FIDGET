@@ -7,8 +7,9 @@ if(NOT FIDGET_BUILD_GUI)
     return()
 endif()
 
-add_executable(fidget
-    main.cpp
+find_package(OpenGL REQUIRED)
+
+add_library(fidget_ui STATIC
     ui/AcquisitionStage.cpp
     ui/App.cpp
     ui/ConfigurationStage.cpp
@@ -24,18 +25,25 @@ add_executable(fidget
 )
 
 # So sources can include project headers relative to src/, e.g. "ui/App.h".
-target_include_directories(fidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-find_package(OpenGL REQUIRED)
+target_include_directories(fidget_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # implot links imgui publicly, so imgui and glfw come with it.
+target_link_libraries(fidget_ui
+    PUBLIC
+        fidget_core
+        implot
+    PRIVATE
+        nfd
+        OpenGL::GL
+)
+
+add_executable(fidget main.cpp)
 target_link_libraries(fidget PRIVATE
+    fidget_ui
     fidget_hardware
-    implot
-    nfd
-    OpenGL::GL
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(fidget_ui PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(fidget PRIVATE -Wall -Wextra -Wpedantic)
 endif()
