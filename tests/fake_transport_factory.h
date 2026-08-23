@@ -113,10 +113,10 @@ public:
     }
 
     [[nodiscard]] TransportFactoryResult Create(
-        const CrateProject& project) override
+        const TransportEndpointRequest& request) override
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        projects_.push_back(project);
+        requests_.push_back(request);
         return {
             std::make_unique<TransportSession>(
                 std::make_unique<SharedFakeCommandTransport>(
@@ -126,10 +126,26 @@ public:
         };
     }
 
+    [[nodiscard]] TransportFactoryResult Create(
+        const CrateProject& project) override
+    {
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            projects_.push_back(project);
+        }
+        return ITransportFactory::Create(project);
+    }
+
     [[nodiscard]] std::size_t CreateCount() const
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        return projects_.size();
+        return requests_.size();
+    }
+
+    [[nodiscard]] std::vector<TransportEndpointRequest> Requests() const
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return requests_;
     }
 
     [[nodiscard]] std::vector<CrateProject> Projects() const
@@ -141,6 +157,7 @@ public:
 private:
     std::shared_ptr<FakeCommandTransport> commandTransport_;
     mutable std::mutex mutex_;
+    std::vector<TransportEndpointRequest> requests_;
     std::vector<CrateProject> projects_;
 };
 

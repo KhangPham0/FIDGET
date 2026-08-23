@@ -5,9 +5,64 @@
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/MvlcDataReceiver.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace fidget {
+namespace {
+
+bool ValidEndpointHost(const std::string& host)
+{
+    if (host.empty() || host.size() > 255U)
+        return false;
+
+    return std::all_of(
+        host.begin(), host.end(),
+        [](const unsigned char character) {
+            return character > 0x20U && character != 0x7FU;
+        });
+}
+
+bool ValidSingleArgument(const std::string& value, const std::size_t maximum)
+{
+    if (value.empty() || value.size() > maximum)
+        return false;
+
+    return std::all_of(
+        value.begin(), value.end(),
+        [](const unsigned char character) {
+            return character > 0x20U && character != 0x7FU;
+        });
+}
+
+std::string ValidateDirectRequest(
+    const DirectEthernetEndpointRequest& request)
+{
+    if (!ValidEndpointHost(request.mvlcHost)
+        || request.mvlcCommandPort == 0U)
+    {
+        return "The direct Ethernet endpoint is invalid.";
+    }
+    return {};
+}
+
+std::string ValidateBridgeRequest(
+    const SshBridgeEndpointRequest& request)
+{
+    if (!ValidEndpointHost(request.mvlcHost)
+        || request.mvlcCommandPort == 0U)
+    {
+        return "The SSH bridge MVLC endpoint is invalid.";
+    }
+    if (!ValidSingleArgument(request.sshDestination, 255U)
+        || !ValidSingleArgument(request.remoteBridgeCommand, 511U))
+    {
+        return "The SSH bridge destination or remote command is invalid.";
+    }
+    return {};
+}
+
+} // namespace
 
 TransportSession::TransportSession(
     std::unique_ptr<ICommandTransport> commandTransport,
@@ -57,6 +112,33 @@ void TransportSession::Close() noexcept
 
 ITransportFactory::~ITransportFactory() = default;
 
+TransportFactoryResult ITransportFactory::Create(
+    const CrateProject& project)
+{
+    const auto validation = ValidateCrateProject(project);
+    if (!validation.success)
+        return {nullptr, validation.message};
+
+    if (project.endpointKind == CrateProjectEndpointKind::Direct)
+    {
+        return Create(TransportEndpointRequest{
+            DirectEthernetEndpointRequest{
+                project.mvlcHost,
+                project.mvlcCommandPort,
+            },
+        });
+    }
+
+    return Create(TransportEndpointRequest{
+        SshBridgeEndpointRequest{
+            project.mvlcHost,
+            project.mvlcCommandPort,
+            project.sshDestination,
+            project.remoteBridgeCommand,
+        },
+    });
+}
+
 MvlcTransportFactory::MvlcTransportFactory()
     : MvlcTransportFactory(
         [](const std::string& destination,
@@ -79,16 +161,14 @@ MvlcTransportFactory::MvlcTransportFactory(
 }
 
 TransportFactoryResult MvlcTransportFactory::Create(
-    const CrateProject& project)
+    const TransportEndpointRequest& request)
 {
-    const auto validation = ValidateCrateProject(project);
-    if (!validation.success)
+    if (const auto* direct =
+            std::get_if<DirectEthernetEndpointRequest>(&request))
     {
-        return {nullptr, validation.message};
-    }
-
-    if (project.endpointKind == CrateProjectEndpointKind::Direct)
-    {
+        const auto error = ValidateDirectRequest(*direct);
+        if (!error.empty())
+            return {nullptr, error};
         return {
             std::make_unique<TransportSession>(
                 std::make_unique<MvlcCommandTransport>(),
@@ -97,15 +177,19 @@ TransportFactoryResult MvlcTransportFactory::Create(
         };
     }
 
+    const auto& bridge = std::get<SshBridgeEndpointRequest>(request);
+    const auto validationError = ValidateBridgeRequest(bridge);
+    if (!validationError.empty())
+        return {nullptr, validationError};
     if (!bridgeStarter_)
     {
         return {nullptr, "The SSH bridge process starter is unavailable."};
     }
     auto started = bridgeStarter_(
-        project.sshDestination,
-        project.remoteBridgeCommand,
-        project.mvlcHost,
-        project.mvlcCommandPort);
+        bridge.sshDestination,
+        bridge.remoteBridgeCommand,
+        bridge.mvlcHost,
+        bridge.mvlcCommandPort);
     if (!started.success || !started.process)
     {
         return {

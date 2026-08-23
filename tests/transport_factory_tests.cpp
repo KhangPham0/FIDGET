@@ -48,6 +48,25 @@ TEST_CASE("the transport factory selects direct UDP transports")
     CHECK(created.session->CapturedBridgeStderr().empty());
 }
 
+TEST_CASE("a direct endpoint request is independent of a crate project")
+{
+    using namespace fidget;
+
+    MvlcTransportFactory factory;
+    const TransportEndpointRequest request =
+        DirectEthernetEndpointRequest{"mvlc-test", 32768U};
+    auto created = factory.Create(request);
+    INFO(created.error);
+    REQUIRE(created.session != nullptr);
+    CHECK(dynamic_cast<MvlcCommandTransport*>(
+              created.session->CommandTransport())
+          != nullptr);
+    CHECK(dynamic_cast<MvlcDataReceiver*>(
+              created.session->DataReceiver())
+          != nullptr);
+    CHECK(created.session->CapturedBridgeStderr().empty());
+}
+
 TEST_CASE("the transport factory selects one shared SSH bridge process")
 {
     using namespace fidget;
@@ -87,4 +106,80 @@ TEST_CASE("the transport factory selects one shared SSH bridge process")
           != nullptr);
     created.session->Close();
     CHECK(created.session->CapturedBridgeStderr().empty());
+}
+
+TEST_CASE("an SSH endpoint request carries only bridge routing fields")
+{
+    using namespace fidget;
+
+    std::string destination;
+    std::string command;
+    std::string host;
+    std::uint16_t port = 0U;
+    MvlcTransportFactory factory(
+        [&](const std::string& nextDestination,
+            const std::string& nextCommand,
+            const std::string& nextHost,
+            const std::uint16_t nextPort) {
+            destination = nextDestination;
+            command = nextCommand;
+            host = nextHost;
+            port = nextPort;
+            return SshBridgeProcess::StartProgram({"/bin/cat"});
+        });
+    const TransportEndpointRequest request = SshBridgeEndpointRequest{
+        "mvlc-test",
+        32768U,
+        "daq-through-bastion",
+        "fidget_bridge",
+    };
+
+    auto created = factory.Create(request);
+    INFO(created.error);
+    REQUIRE(created.session != nullptr);
+    CHECK(destination == "daq-through-bastion");
+    CHECK(command == "fidget_bridge");
+    CHECK(host == "mvlc-test");
+    CHECK(port == 32768U);
+    CHECK(dynamic_cast<BridgeCommandTransport*>(
+              created.session->CommandTransport())
+          != nullptr);
+    CHECK(dynamic_cast<BridgeDataReceiver*>(
+              created.session->DataReceiver())
+          != nullptr);
+    created.session->Close();
+    CHECK(created.session->CapturedBridgeStderr().empty());
+}
+
+TEST_CASE("endpoint requests fail closed before transport creation")
+{
+    using namespace fidget;
+
+    bool bridgeStarted = false;
+    MvlcTransportFactory factory(
+        [&](const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::uint16_t) {
+            bridgeStarted = true;
+            return SshBridgeProcessStartResult{};
+        });
+
+    auto invalidDirect = factory.Create(TransportEndpointRequest{
+        DirectEthernetEndpointRequest{"", 32768U},
+    });
+    CHECK(invalidDirect.session == nullptr);
+    CHECK_FALSE(invalidDirect.error.empty());
+
+    auto invalidBridge = factory.Create(TransportEndpointRequest{
+        SshBridgeEndpointRequest{
+            "mvlc-test",
+            32768U,
+            "",
+            "fidget_bridge",
+        },
+    });
+    CHECK(invalidBridge.session == nullptr);
+    CHECK_FALSE(invalidBridge.error.empty());
+    CHECK_FALSE(bridgeStarted);
 }

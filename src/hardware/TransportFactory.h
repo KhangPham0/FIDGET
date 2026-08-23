@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <variant>
 
 namespace fidget {
 
@@ -40,13 +41,38 @@ struct TransportFactoryResult
     std::string error;
 };
 
+struct DirectEthernetEndpointRequest
+{
+    std::string mvlcHost;
+    std::uint16_t mvlcCommandPort = 32768U;
+};
+
+// Bridge requests contain routing information only. Authentication remains
+// external to FIDGET, so this request has no password, key, or secret field.
+struct SshBridgeEndpointRequest
+{
+    std::string mvlcHost;
+    std::uint16_t mvlcCommandPort = 32768U;
+    std::string sshDestination;
+    std::string remoteBridgeCommand = "fidget_bridge";
+};
+
+using TransportEndpointRequest = std::variant<
+    DirectEthernetEndpointRequest,
+    SshBridgeEndpointRequest>;
+
 class ITransportFactory
 {
 public:
     virtual ~ITransportFactory();
 
     [[nodiscard]] virtual TransportFactoryResult Create(
-        const CrateProject& project) = 0;
+        const TransportEndpointRequest& request) = 0;
+
+    // Compatibility entry point for the project-based CLI and legacy GUI.
+    // It validates the complete project, then delegates to the endpoint seam.
+    [[nodiscard]] virtual TransportFactoryResult Create(
+        const CrateProject& project);
 };
 
 using SshBridgeStarter = std::function<SshBridgeProcessStartResult(
@@ -61,8 +87,10 @@ public:
     MvlcTransportFactory();
     explicit MvlcTransportFactory(SshBridgeStarter bridgeStarter);
 
+    using ITransportFactory::Create;
+
     [[nodiscard]] TransportFactoryResult Create(
-        const CrateProject& project) override;
+        const TransportEndpointRequest& request) override;
 
 private:
     SshBridgeStarter bridgeStarter_;
