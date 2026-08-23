@@ -459,9 +459,14 @@ public:
                 "Applied and retained one profile value.";
             next.singleRepairResult.selectedQuad = apply->quad;
             next.singleRepairResult.registerOffset = apply->registerOffset;
+            next.singleRepairResult.moduleStopSent = true;
+            next.singleRepairResult.moduleStopVerified = true;
             next.singleRepairResult.writeAttempted = true;
             next.singleRepairResult.writeVerified = true;
             next.singleRepairResult.selectorParkedAtQuadZero = true;
+            next.singleRepairResult.fifoResetSent = true;
+            next.singleRepairResult.readoutResetSent = true;
+            next.singleRepairResult.moduleLeftStopped = true;
             next.singleRepairResult.profileValueRetained = true;
             next.configurationFresh = false;
         }
@@ -1619,7 +1624,8 @@ TEST_CASE("apply prints one exact plan and retains the selected value")
           std::string::npos);
     CHECK(output.str().find(
               "transaction_result: state=passed write=verified "
-              "rollback=none retained=profile parked=yes\n") !=
+              "rollback=none retained=profile stop=verified fifo_reset=yes "
+              "readout_reset=yes final_stopped=verified parked=yes\n") !=
           std::string::npos);
     CHECK(output.str().find(
               "stale_reminder: recapture all eight quads before comparing "
@@ -1684,7 +1690,8 @@ TEST_CASE("apply-all prints its count and releases after retained values")
     CHECK(control.releaseCommands == 1);
     CHECK(errors.str().empty());
     CHECK(output.str().find(
-              "Apply 1 banked profile write(s) [y/N]: ") !=
+              "Apply 1 banked profile write(s) and leave the module stopped "
+              "[y/N]: ") !=
           std::string::npos);
     CHECK(output.str().find(
               "transaction_summary: state=passed planned=1 written=1 "

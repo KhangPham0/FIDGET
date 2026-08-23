@@ -282,13 +282,16 @@ void ConfigurationStage::Draw(
         ImGui::TextWrapped("%s", result.message.c_str());
         if (ImGui::BeginTable(
                 "single_apply_outcomes",
-                3,
+                6,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                     ImGuiTableFlags_SizingStretchSame))
         {
             ImGui::TableSetupColumn("Write");
             ImGui::TableSetupColumn("Rollback");
             ImGui::TableSetupColumn("Retained");
+            ImGui::TableSetupColumn("Stop");
+            ImGui::TableSetupColumn("Resets");
+            ImGui::TableSetupColumn("Selector");
             ImGui::TableHeadersRow();
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -304,17 +307,20 @@ void ConfigurationStage::Draw(
                     : result.writeAttempted ? "attempted, not verified"
                                             : "not attempted");
             ImGui::TableNextColumn();
+            const bool rollbackWasRequired = result.writeAttempted &&
+                !result.writeVerified;
             ImGui::TextColored(
                 result.rollbackVerified
                     ? theme.statusGood
-                    : result.rollbackAttempted
+                    : rollbackWasRequired
                         ? theme.statusError
                         : theme.textDisabled,
                 "%s",
                 result.rollbackVerified
                     ? "verified"
                     : result.rollbackAttempted ? "attempted, not verified"
-                                               : "not required");
+                    : rollbackWasRequired ? "required, not attempted"
+                                          : "not required");
             ImGui::TableNextColumn();
             ImGui::TextColored(
                 result.profileValueRetained
@@ -322,6 +328,40 @@ void ConfigurationStage::Draw(
                     : theme.statusWarning,
                 "%s",
                 result.profileValueRetained ? "profile value" : "not profile");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(
+                result.moduleLeftStopped
+                    ? theme.statusGood
+                    : theme.statusError,
+                "%s",
+                result.moduleLeftStopped
+                    ? "stopped, verified"
+                    : result.moduleStopVerified
+                        ? "final state unverified"
+                        : "stop not verified");
+            ImGui::TableNextColumn();
+            const bool resetsRequired = result.writeAttempted;
+            const bool resetsVerified = result.fifoResetSent &&
+                result.readoutResetSent;
+            ImGui::TextColored(
+                !resetsRequired
+                    ? theme.textDisabled
+                    : resetsVerified
+                        ? theme.statusGood
+                        : theme.statusError,
+                "%s",
+                !resetsRequired
+                    ? "not required"
+                    : resetsVerified ? "FIFO + readout" : "incomplete");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(
+                result.selectorParkedAtQuadZero
+                    ? theme.statusGood
+                    : theme.statusError,
+                "%s",
+                result.selectorParkedAtQuadZero
+                    ? "parked at 0"
+                    : "not verified");
             ImGui::EndTable();
         }
     }
@@ -443,9 +483,10 @@ void ConfigurationStage::Draw(
     }
     ImGui::SeparatorText("Parameter application");
     ImGui::TextWrapped(
-        "Every write is ownership-gated and readback-verified. A bulk "
-        "transaction first recaptures all 140 hardware registers, leaves "
-        "the module stopped, and makes this comparison stale.");
+        "Every write is ownership-gated and readback-verified. Both a "
+        "single-row repair and a bulk transaction leave the module stopped "
+        "and make this comparison stale. Bulk first recaptures all 140 "
+        "hardware registers.");
     ImGui::BeginDisabled(!mayApplyBulk);
     ImGui::Checkbox(
         ("I confirm applying " + std::to_string(bankedDifferenceCount) +

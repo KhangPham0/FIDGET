@@ -61,7 +61,8 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
     ScpSingleRepairResult result;
     result.state = ScpSingleRepairState::Applying;
     result.message =
-        "Rechecking the live register and applying one profile value...";
+        "Verifying and stopping the module if needed before applying one "
+        "profile value...";
     result.baseAddress = request.baseAddress;
     result.selectedQuad = request.quad;
     result.registerOffset = request.registerOffset;
@@ -138,6 +139,8 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         {
             return true;
         }
+        result.communicationUnavailable = gate.status ==
+            ScpCaptureGateStatus::CommunicationUnavailable;
         ownershipAvailable = false;
         appendFailure(GateFailureMessage(gate, cancellationRequested));
         return false;
@@ -216,8 +219,70 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
             "the SCP profile value was not applied.");
     }
 
-    bool selectorWasWritten = false;
+    std::uint16_t acquisitionState = 0U;
     if (failure.empty() &&
+        !readRegister(
+            Fw2051AcquisitionControlRegister,
+            acquisitionState,
+            error))
+    {
+        appendFailure(RegisterOperationError(
+            "read",
+            "acquisition enable",
+            Fw2051AcquisitionControlRegister,
+            error));
+    }
+    else if (failure.empty() &&
+             acquisitionState == Fw2051StopAcquisitionValue)
+    {
+        result.moduleStopVerified = true;
+    }
+    else if (failure.empty() &&
+             reverifyOwnership("the SCP profile module stop"))
+    {
+        if (!writeRegister(
+                Fw2051AcquisitionControlRegister,
+                Fw2051StopAcquisitionValue,
+                error))
+        {
+            appendFailure(RegisterOperationError(
+                "write",
+                "stop acquisition",
+                Fw2051AcquisitionControlRegister,
+                error));
+        }
+        else
+        {
+            result.moduleStopSent = true;
+            std::uint16_t stopReadback = 0xFFFFU;
+            if (!readRegister(
+                    Fw2051AcquisitionControlRegister,
+                    stopReadback,
+                    error))
+            {
+                appendFailure(RegisterOperationError(
+                    "verify",
+                    "stopped acquisition",
+                    Fw2051AcquisitionControlRegister,
+                    error));
+            }
+            else if (stopReadback != Fw2051StopAcquisitionValue)
+            {
+                appendFailure(
+                    "Acquisition-enable readback was " +
+                    std::to_string(stopReadback) +
+                    ", expected zero after Stop. No further write was "
+                    "sent.");
+            }
+            else
+            {
+                result.moduleStopVerified = true;
+            }
+        }
+    }
+
+    bool selectorWasWritten = false;
+    if (failure.empty() && result.moduleStopVerified &&
         reverifyOwnership("the SCP profile bank selection"))
     {
         if (!writeRegister(
@@ -396,18 +461,114 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         }
     }
 
+    if (result.writeAttempted && result.moduleStopVerified &&
+        ownershipAvailable &&
+        reverifyOwnership("the SCP profile FIFO reset"))
+    {
+        if (!writeRegister(
+                Fw2051FifoResetRegister,
+                Fw2051ResetCommandValue,
+                error))
+        {
+            appendFailure(RegisterOperationError(
+                "write", "reset FIFO", Fw2051FifoResetRegister, error));
+        }
+        else
+        {
+            result.fifoResetSent = true;
+        }
+    }
+
+    if (result.writeAttempted && result.moduleStopVerified &&
+        ownershipAvailable &&
+        reverifyOwnership("the SCP profile readout reset"))
+    {
+        if (!writeRegister(
+                Fw2051ReadoutResetRegister,
+                Fw2051ResetCommandValue,
+                error))
+        {
+            appendFailure(RegisterOperationError(
+                "write",
+                "reset readout",
+                Fw2051ReadoutResetRegister,
+                error));
+        }
+        else
+        {
+            result.readoutResetSent = true;
+        }
+    }
+
+    if (result.moduleStopVerified && ownershipAvailable &&
+        reverifyOwnership("the SCP profile final stopped-state verification"))
+    {
+        std::uint16_t stoppedReadback = 0xFFFFU;
+        if (!readRegister(
+                Fw2051AcquisitionControlRegister,
+                stoppedReadback,
+                error))
+        {
+            appendFailure(RegisterOperationError(
+                "verify",
+                "final stopped acquisition",
+                Fw2051AcquisitionControlRegister,
+                error));
+        }
+        else if (stoppedReadback != Fw2051StopAcquisitionValue)
+        {
+            appendFailure(
+                "The module did not remain stopped after the SCP profile "
+                "repair.");
+        }
+        else
+        {
+            result.moduleLeftStopped = true;
+        }
+    }
+
     const bool passed = failure.empty() && result.writeVerified &&
-        result.profileValueRetained && result.selectorParkedAtQuadZero;
+        result.profileValueRetained && result.moduleStopVerified &&
+        result.selectorParkedAtQuadZero && result.fifoResetSent &&
+        result.readoutResetSent && result.moduleLeftStopped;
     result.state = passed
         ? ScpSingleRepairState::Passed
         : ScpSingleRepairState::Failed;
-    result.message = passed
-        ? "Applied and retained profile " + result.settingName +
-          " with exact readback. Recapture all eight quads before "
-          "comparing or applying another value."
-        : failure.empty()
-            ? "The SCP profile repair did not complete all safety checks."
-            : failure;
+    if (passed)
+    {
+        result.message =
+            "Applied and retained profile " + result.settingName +
+            " with exact readback. The selector was parked at quad 0, the "
+            "FIFO and readout resets were sent, and the module remains "
+            "stopped; recapture all eight quads before comparing or applying "
+            "another value.";
+    }
+    else if (result.rollbackVerified && result.moduleLeftStopped)
+    {
+        result.message = failure +
+            " The captured live value was restored with exact readback.";
+        if (result.selectorParkedAtQuadZero && result.fifoResetSent &&
+            result.readoutResetSent)
+        {
+            result.message +=
+                " The selector was parked at quad 0 and the FIFO and readout "
+                "resets were sent.";
+        }
+        result.message += " The module remains stopped.";
+    }
+    else if (!failure.empty() && result.moduleLeftStopped)
+    {
+        result.message = failure + " The module remains stopped.";
+    }
+    else if (failure.empty())
+    {
+        result.message =
+            "The SCP profile repair did not complete all safety checks.";
+    }
+    else
+    {
+        result.message = failure;
+    }
     return result;
 }
 

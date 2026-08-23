@@ -44,11 +44,17 @@ struct ScpSingleRepairResult
     std::uint16_t dependencyValue = 0U;
     bool dependencyChecked = false;
     bool liveValueCaptured = false;
+    bool moduleStopSent = false;
+    bool moduleStopVerified = false;
     bool writeAttempted = false;
     bool writeVerified = false;
     bool rollbackAttempted = false;
     bool rollbackVerified = false;
     bool selectorParkedAtQuadZero = false;
+    bool fifoResetSent = false;
+    bool readoutResetSent = false;
+    bool moduleLeftStopped = false;
+    bool communicationUnavailable = false;
     bool profileValueRetained = false;
 };
 

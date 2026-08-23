@@ -792,6 +792,22 @@ void QueueSingleGainApply(
         references,
         Base + 0x600EU,
         Mdpp32ScpFirmwareRevisionFw2051);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        1U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
     QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
     QueueVmeWrite(
         transport, references, Base + Fw2051ScpSelectorRegister, 7U);
@@ -799,9 +815,65 @@ void QueueSingleGainApply(
     QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
     QueueVmeWrite(transport, references, Base + 0x611AU, 200U);
     QueueVmeRead(transport, references, Base + 0x611AU, 200U);
-    QueueRead(transport, DaqModeRegister, nextGateReference, 0U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
     QueueVmeWrite(
         transport, references, Base + Fw2051ScpSelectorRegister, 0U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051FifoResetRegister,
+        Fw2051ResetCommandValue);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport,
+        references,
+        Base + Fw2051ReadoutResetRegister,
+        Fw2051ResetCommandValue);
+    QueueRead(transport, DaqModeRegister, nextGateReference, 0U);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
+}
+
+void QueueSingleGainApplyWithUncertainRollback(
+    fidget::test::FakeCommandTransport& transport,
+    std::uint16_t nextGateReference)
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    constexpr std::uint32_t Base = 0x11000000U;
+    CaptureReferences references{0x3A00U, 0x9D100001U};
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeRead(
+        transport, references, Base + 0x6008U, Mdpp32HardwareId);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + 0x600EU,
+        Mdpp32ScpFirmwareRevisionFw2051);
+    QueueVmeRead(
+        transport,
+        references,
+        Base + Fw2051AcquisitionControlRegister,
+        Fw2051StopAcquisitionValue);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(
+        transport, references, Base + Fw2051ScpSelectorRegister, 7U);
+    QueueVmeRead(transport, references, Base + 0x611AU, 250U);
+    QueueRead(transport, DaqModeRegister, nextGateReference++, 0U);
+    QueueVmeWrite(transport, references, Base + 0x611AU, 200U);
+    QueueVmeRead(transport, references, Base + 0x611AU, 199U);
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        transport.QueueExchange({
+            MakeReadRequest(DaqModeRegister, nextGateReference),
+            {FakeReceiveAction::Timeout()},
+        });
+    }
 }
 
 void QueueBulkApply(
@@ -1865,8 +1937,13 @@ TEST_CASE("the service applies one row and makes the capture stale")
     CHECK(applied->activeOperation == GuidedTunerOperation::None);
     CHECK(applied->singleRepairResult.writeVerified);
     CHECK_FALSE(applied->singleRepairResult.rollbackAttempted);
+    CHECK(applied->singleRepairResult.moduleStopSent);
+    CHECK(applied->singleRepairResult.moduleStopVerified);
     CHECK(applied->singleRepairResult.profileValueRetained);
     CHECK(applied->singleRepairResult.selectorParkedAtQuadZero);
+    CHECK(applied->singleRepairResult.fifoResetSent);
+    CHECK(applied->singleRepairResult.readoutResetSent);
+    CHECK(applied->singleRepairResult.moduleLeftStopped);
     CHECK(applied->configurationCompleteForTarget);
     CHECK_FALSE(applied->configurationFresh);
     CHECK_FALSE(applied->configurationComparison.comparable);
@@ -1900,6 +1977,55 @@ TEST_CASE("the service applies one row and makes the capture stale")
     }));
     CHECK(service.CurrentSnapshot()->singleRepairResult.state ==
           ScpSingleRepairState::NotRun);
+}
+
+TEST_CASE("the service does not invent a parameter result when rollback is uncertain")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    auto ownedTransport = std::make_unique<FakeCommandTransport>();
+    auto* transport = ownedTransport.get();
+    OwnershipService service(
+        MakeFakeTransportFactory(std::move(ownedTransport)),
+        std::chrono::hours(1));
+    UseProject(service);
+    CheckIdle(service, *transport);
+    ConfirmHandoffAndOpen(service, *transport);
+
+    const auto live = MakeValidConfiguration();
+    CaptureValidConfiguration(service, *transport, live);
+    auto profileConfiguration = live;
+    profileConfiguration.quads[7].gain = 200U;
+    const auto profile = SaveTestProfile(profileConfiguration);
+    LoadTestProfile(service, profile.path, 1U);
+
+    const auto ready = service.CurrentSnapshot();
+    const auto activitiesBeforeApply = ready->activityLog.Size();
+    QueueSingleGainApplyWithUncertainRollback(*transport, 13U);
+    service.Submit(ApplyProfileRowCommand{0x611AU, 7U});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+        return snapshot.singleRepairResult.state ==
+            ScpSingleRepairState::Failed;
+    }));
+
+    const auto failed = service.CurrentSnapshot();
+    CHECK(failed->ownership == GuidedTunerOwnershipState::SessionOpen);
+    CHECK(failed->singleRepairResult.writeAttempted);
+    CHECK_FALSE(failed->singleRepairResult.writeVerified);
+    CHECK_FALSE(failed->singleRepairResult.rollbackAttempted);
+    CHECK(failed->singleRepairResult.communicationUnavailable);
+    CHECK_FALSE(failed->singleRepairResult.selectorParkedAtQuadZero);
+    CHECK_FALSE(failed->singleRepairResult.moduleLeftStopped);
+    REQUIRE_FALSE(failed->statusMessages.empty());
+    CHECK(failed->statusMessages.back().level == TunerStatusLevel::Warning);
+    REQUIRE(failed->activityLog.Size() == activitiesBeforeApply + 1U);
+    const auto& activity = failed->activityLog.Entries().back();
+    CHECK(activity.category == ActivityLogCategory::Apply);
+    CHECK(activity.severity == TunerStatusLevel::Warning);
+    CHECK_FALSE(activity.parameterChange.has_value());
+    CHECK(activity.summary.find("temporarily uncertain") !=
+          std::string::npos);
 }
 
 TEST_CASE("the service applies the planned banked differences and stales")

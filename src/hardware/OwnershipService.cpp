@@ -785,7 +785,8 @@ void OwnershipService::ApplyProfileRow(
     snapshot.singleRepairResult = {};
     snapshot.singleRepairResult.state = ScpSingleRepairState::Applying;
     snapshot.singleRepairResult.message =
-        "Rechecking the selected live register before one profile write...";
+        "Verifying and stopping the module if needed before rechecking the "
+        "selected live register...";
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
@@ -808,15 +809,15 @@ void OwnershipService::ApplyProfileRow(
     RefreshProfileComparison(snapshot);
     const auto level = result.state == ScpSingleRepairState::Passed
         ? TunerStatusLevel::Success
-        : TunerStatusLevel::Error;
+        : result.communicationUnavailable
+            ? TunerStatusLevel::Warning
+            : TunerStatusLevel::Error;
     std::optional<ActivityParameterChange> change;
-    if (result.writeAttempted)
+    if (result.profileValueRetained || result.rollbackVerified)
     {
         const auto retainedValue = result.profileValueRetained
             ? result.profileValue
-            : result.rollbackVerified
-                ? result.rollbackReadback
-                : result.appliedReadback;
+            : result.rollbackReadback;
         change = ActivityParameterChange{
             result.registerOffset,
             result.selectedQuad,

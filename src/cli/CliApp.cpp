@@ -561,17 +561,39 @@ void PrintSingleRepairResult(
     std::ostream& output,
     const ScpSingleRepairResult& result)
 {
+    const char* stopResult = "unverified";
+    if (result.moduleStopVerified)
+    {
+        stopResult = result.moduleStopSent ? "verified" : "already-stopped";
+    }
+    const char* rollbackResult = "none";
+    if (result.rollbackVerified)
+    {
+        rollbackResult = "verified";
+    }
+    else if (result.rollbackAttempted)
+    {
+        rollbackResult = "unverified";
+    }
+    else if (result.writeAttempted && !result.writeVerified)
+    {
+        rollbackResult = "required-unattempted";
+    }
     output << "transaction_result: state="
            << (result.state == ScpSingleRepairState::Passed
                    ? "passed"
                    : "failed")
            << " write=" << (result.writeVerified ? "verified" :
                               result.writeAttempted ? "unverified" : "none")
-           << " rollback="
-           << (result.rollbackVerified ? "verified" :
-               result.rollbackAttempted ? "unverified" : "none")
+           << " rollback=" << rollbackResult
            << " retained="
            << (result.profileValueRetained ? "profile" : "not-profile")
+           << " stop=" << stopResult
+           << " fifo_reset=" << (result.fifoResetSent ? "yes" : "no")
+           << " readout_reset="
+           << (result.readoutResetSent ? "yes" : "no")
+           << " final_stopped="
+           << (result.moduleLeftStopped ? "verified" : "unverified")
            << " parked="
            << (result.selectorParkedAtQuadZero ? "yes" : "no")
            << '\n';
@@ -1926,7 +1948,9 @@ int RunCliApply(
             PrintApplicationStep(output, step);
         }
         output << "Apply " << steps.size()
-               << " banked profile write(s) [y/N]: " << std::flush;
+               << " banked profile write(s) and leave the module stopped "
+                  "[y/N]: "
+               << std::flush;
         std::string confirmation;
         if (!ReadPromptResponse(input, confirmation) ||
             !TransactionConfirmedByUser(std::move(confirmation)))
@@ -1993,6 +2017,10 @@ int RunCliApply(
                                 ScpSingleRepairState::Passed &&
                             snapshot->singleRepairResult.writeVerified &&
                             snapshot->singleRepairResult.profileValueRetained &&
+                            snapshot->singleRepairResult.moduleStopVerified &&
+                            snapshot->singleRepairResult.fifoResetSent &&
+                            snapshot->singleRepairResult.readoutResetSent &&
+                            snapshot->singleRepairResult.moduleLeftStopped &&
                             snapshot->singleRepairResult
                                 .selectorParkedAtQuadZero
                         ? 0

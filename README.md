@@ -189,8 +189,11 @@ fidget_cli compare --project example-crate.mwwcrate --module 1 \
 ### Apply one value
 
 Print the plan, require typed confirmation, reject stale live state, verify
-the write by exact readback, and roll back on a readable mismatch. For
-example, to repair the quad-7 gain to its profile value, I would use:
+the write by exact readback, and roll back on a readable mismatch. The
+transaction stops and verifies the module before the banked write, resets
+its readout afterward, and deliberately leaves it stopped, matching bulk
+apply. For example, to repair the quad-7 gain to its profile value, I would
+use:
 
 ```sh
 fidget_cli apply --project example-crate.mwwcrate --module 1 \

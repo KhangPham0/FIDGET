@@ -94,6 +94,9 @@ CHANNEL=29
 - [ ] Run `fidget_cli apply` for that quad and register. Pass if the printed
   one-write plan is correct, closed input means No, typed `y` executes it,
   exact readback is verified, and the selector parks at quad zero.
+- [ ] Pass if the module is stopped with exact zero readback before the row
+  write, FIFO and readout resets are sent afterward, the final acquisition
+  state is verified as zero, and the module is deliberately left stopped.
 - [ ] Pass if the post-apply output marks configuration stale and blocks another
   apply until a complete eight-quad recapture.
 - [ ] Recapture and compare. Pass if the result returns to 141/141 identical.
