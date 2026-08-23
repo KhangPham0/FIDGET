@@ -1,4 +1,5 @@
 add_subdirectory(core)
+add_subdirectory(presentation)
 add_subdirectory(hardware)
 add_subdirectory(cli)
 add_subdirectory(bridge)
@@ -33,6 +34,7 @@ target_link_libraries(fidget_ui
         fidget_core
         implot
     PRIVATE
+        fidget_gui_presentation
         nfd
         OpenGL::GL
 )

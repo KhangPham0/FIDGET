@@ -96,6 +96,14 @@ target_link_libraries(guided_workflow_tests PRIVATE fidget_core doctest::doctest
 
 add_test(NAME guided_workflow_tests COMMAND guided_workflow_tests)
 
+add_executable(gui_presentation_tests gui_presentation_tests.cpp)
+target_link_libraries(gui_presentation_tests PRIVATE
+    fidget_gui_presentation
+    doctest::doctest
+)
+
+add_test(NAME gui_presentation_tests COMMAND gui_presentation_tests)
+
 add_executable(scp_transaction_plan_tests scp_transaction_plan_tests.cpp)
 target_link_libraries(scp_transaction_plan_tests PRIVATE
     fidget_core
