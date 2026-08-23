@@ -1,4 +1,5 @@
 build/
+fidget-state/
 imgui.ini
 layout.version
 window.ini

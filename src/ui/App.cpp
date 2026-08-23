@@ -1,6 +1,7 @@
 #include "App.h"
 
 #include "core/ActivityLog.h"
+#include "core/ApplicationStorage.h"
 #include "core/GuidedWorkflow.h"
 #include "core/TunerSnapshot.h"
 #include "ui/WorkflowRail.h"
@@ -23,10 +24,6 @@
 
 #define GL_SILENCE_DEPRECATION
 #include <GLFW/glfw3.h>
-
-#ifdef __APPLE__
-#include <mach-o/dyld.h>
-#endif
 
 // Shortcut labels use the platform's conventional modifier name. ImGui
 // maps the Ctrl modifier to Command on macOS.
@@ -145,29 +142,6 @@ void GlfwErrorCallback(int error, const char* description)
     std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
 
-// The directory holding the running executable; the current directory as
-// a fallback. Keeps FIDGET's own files (the window layout) next to the
-// binary, wherever it is launched from.
-std::filesystem::path ExecutableDirectory()
-{
-#ifdef __APPLE__
-    char buffer[4096];
-    uint32_t size = sizeof(buffer);
-    if (_NSGetExecutablePath(buffer, &size) == 0)
-    {
-        return std::filesystem::weakly_canonical(buffer).parent_path();
-    }
-#else
-    std::error_code error;
-    std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", error);
-    if (!error)
-    {
-        return self.parent_path();
-    }
-#endif
-    return std::filesystem::current_path();
-}
-
 int ReadLayoutVersion(const std::string& path)
 {
     std::ifstream file(path);
@@ -251,6 +225,18 @@ bool App::Init()
         return false;
     }
 
+    const auto storagePaths = DefaultApplicationStoragePaths();
+    const auto storageReady =
+        EnsureApplicationStorageDirectories(storagePaths);
+    if (!storageReady.success)
+    {
+        std::fprintf(
+            stderr, "could not initialize application storage: %s\n",
+            storageReady.message.c_str());
+        glfwTerminate();
+        return false;
+    }
+
     // OpenGL 3.2 core profile: the newest version macOS still supports.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
@@ -274,8 +260,7 @@ bool App::Init()
     int posX = workX + (workWidth - width) / 2;
     int posY = workY + (workHeight - height) / 2;
 
-    const std::filesystem::path executableDirectory = ExecutableDirectory();
-    m_windowStateFilePath = (executableDirectory / "window.ini").string();
+    m_windowStateFilePath = storagePaths.windowStateFile.string();
     LoadWindowState(width, height, posX, posY);
 
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
@@ -308,10 +293,10 @@ bool App::Init()
     io.ConfigDpiScaleFonts = true;
     io.ConfigDpiScaleViewports = true;
 
-    // The layout files live next to the executable. A missing layout or a
-    // version mismatch rebuilds the default before normal persistence resumes.
-    m_layoutFilePath = (executableDirectory / "imgui.ini").string();
-    m_layoutVersionFilePath = (executableDirectory / "layout.version").string();
+    // A missing layout or a version mismatch rebuilds the default before
+    // normal persistence resumes in the self-contained state directory.
+    m_layoutFilePath = storagePaths.imguiIniFile.string();
+    m_layoutVersionFilePath = storagePaths.layoutVersionFile.string();
     io.IniFilename = m_layoutFilePath.c_str();
     const int storedLayoutVersion = ReadLayoutVersion(m_layoutVersionFilePath);
     m_needDefaultLayout = !std::filesystem::exists(m_layoutFilePath)

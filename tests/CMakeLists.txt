@@ -3,6 +3,14 @@ target_link_libraries(activity_log_tests PRIVATE fidget_core doctest::doctest)
 
 add_test(NAME activity_log_tests COMMAND activity_log_tests)
 
+add_executable(application_storage_tests application_storage_tests.cpp)
+target_link_libraries(application_storage_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME application_storage_tests COMMAND application_storage_tests)
+
 add_executable(bridge_protocol_tests bridge_protocol_tests.cpp)
 target_link_libraries(bridge_protocol_tests PRIVATE
     fidget_core

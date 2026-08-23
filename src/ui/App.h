@@ -89,8 +89,7 @@ private:
     // layout version.
     bool m_needDefaultLayout = false;
 
-    // The layout file lives next to the executable: FIDGET keeps its files
-    // with itself instead of scattering them over the user's machine.
+    // GUI state lives in the self-contained application state directory.
     std::string m_layoutFilePath;
     std::string m_layoutVersionFilePath;
     std::string m_windowStateFilePath;
