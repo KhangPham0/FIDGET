@@ -16,6 +16,7 @@ add_library(fidget_core STATIC
     StartupAudit.cpp
     StartupPreparation.cpp
     StreamDecoder.cpp
+    TargetModuleAddress.cpp
     TunerControl.cpp
     TunerSnapshot.cpp
     VmeProtocol.cpp

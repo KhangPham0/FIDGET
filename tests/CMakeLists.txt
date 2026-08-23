@@ -219,6 +219,14 @@ target_link_libraries(startup_preparation_tests PRIVATE
 
 add_test(NAME startup_preparation_tests COMMAND startup_preparation_tests)
 
+add_executable(target_module_address_tests target_module_address_tests.cpp)
+target_link_libraries(target_module_address_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME target_module_address_tests COMMAND target_module_address_tests)
+
 add_executable(
     startup_preparation_operation_tests
     startup_preparation_operation_tests.cpp
