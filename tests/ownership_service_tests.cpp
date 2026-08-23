@@ -1169,6 +1169,12 @@ TEST_CASE("recovery status bypasses idle refusal and clears an idle orphan")
     CHECK_FALSE(recovered->recoveryRecordAvailable);
     CHECK(recovered->recoveryJournalStatus == RecoveryJournalStatus::None);
     CHECK(recovered->ownership == GuidedTunerOwnershipState::Disconnected);
+    CHECK(recovered->acquisition == GuidedTunerAcquisitionState::NotRun);
+    CHECK(recovered->diagnosticAcquisition.state
+          == DiagnosticAcquisitionState::NotRun);
+    CHECK_FALSE(recovered->cleanupVerified);
+    CHECK(PlanGuidedTunerWorkflow(MakeGuidedTunerInputs(*recovered)).stage
+          == GuidedTunerStage::CheckController);
     CHECK_FALSE(std::filesystem::exists(files.journalPath));
     REQUIRE_FALSE(recovered->diagnosticRecovery.steps.empty());
     CHECK(recovered->activityLog.Size()

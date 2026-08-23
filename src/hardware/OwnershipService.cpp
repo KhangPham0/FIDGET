@@ -1121,7 +1121,9 @@ void OwnershipService::StartDiagnosticAcquisition(
         [this](const std::string& operationName) {
             return CheckStartupOwnershipGate(operationName);
         });
-    if (prepared.acquisition.state == DiagnosticAcquisitionState::Starting)
+    const bool preparationCompleted =
+        prepared.acquisition.state == DiagnosticAcquisitionState::Starting;
+    if (preparationCompleted)
     {
         prepared = StartPreparedDiagnosticAcquisition(
             *transport_,
@@ -1146,16 +1148,31 @@ void OwnershipService::StartDiagnosticAcquisition(
         pendingRecoveryRecord_ = acquisitionSession_->recoveryRecord;
         snapshot.recoveryJournalStatus = RecoveryJournalStatus::Pending;
         snapshot.recoveryRecord = pendingRecoveryRecord_;
+        snapshot.recoveryJournalMessage =
+            acquisitionSession_->acquisition.message;
     }
     if (acquisitionSession_->acquisition.state
         != DiagnosticAcquisitionState::Running)
     {
         snapshot.acquisition = GuidedTunerAcquisitionState::Failed;
+        if (acquisitionSession_->acquisition.orphanRecoveryRequired
+            && !acquisitionSession_->acquisition.foreignControllerDetected)
+        {
+            snapshot.ownership =
+                GuidedTunerOwnershipState::RecoveryRequired;
+            RequestWatchdogStop();
+        }
+        const auto message = acquisitionSession_->acquisition.message;
+        if (!preparationCompleted)
+        {
+            acquisitionSession_.reset();
+            acquisitionRequest_ = {};
+        }
         PublishActivityStatus(
             std::move(snapshot),
             ActivityLogCategory::Acquisition,
             TunerStatusLevel::Error,
-            acquisitionSession_->acquisition.message);
+            message);
         return;
     }
 
@@ -1721,6 +1738,15 @@ void OwnershipService::RecoverDiagnosticOrphan(
         snapshot.recoveryJournalMessage.clear();
         snapshot.recoveryRecord.reset();
         snapshot.ownership = GuidedTunerOwnershipState::Disconnected;
+        snapshot.acquisition = GuidedTunerAcquisitionState::NotRun;
+        snapshot.cleanupVerified = false;
+        snapshot.diagnosticAcquisition = {};
+        snapshot.diagnosticStream = {};
+        snapshot.diagnosticSourceChange = {};
+        snapshot.diagnosticParameterPreview = {};
+        acquisitionReceiver_.reset();
+        acquisitionSession_.reset();
+        acquisitionRequest_ = {};
     }
     else
     {
@@ -2656,8 +2682,7 @@ ScpCaptureGateResult OwnershipService::CheckStartupOwnershipGate(
         const std::string message =
             "Deterministic startup stopped because MVLC command "
             "communication is temporarily uncertain before " +
-            operationName + ". No further hardware write was sent. The "
-            "session remains open and the watchdog will retry: " +
+            operationName + ". No further hardware write was sent: " +
             daq.error;
         PublishStatus(
             std::move(snapshot), TunerStatusLevel::Warning, message);

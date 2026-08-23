@@ -72,7 +72,8 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
     ICommandTransport& transport,
     const DiagnosticAcquisitionPreparationRequest& request,
     const std::atomic<bool>& cancellationRequested,
-    const ScpCaptureOwnershipGate& ownershipGate)
+    const ScpCaptureOwnershipGate& ownershipGate,
+    const DiagnosticAcquisitionJournalSaver& journalSaver)
 {
     DiagnosticAcquisitionPreparationResult prepared;
     auto& result = prepared.acquisition;
@@ -124,6 +125,12 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
                 gate.status == ScpCaptureGateStatus::OwnershipLost;
             result.cleanupSkippedToProtectForeignRun =
                 result.foreignControllerDetected;
+            result.communicationUncertain =
+                gate.status == ScpCaptureGateStatus::CommunicationUnavailable;
+            if (result.communicationUncertain)
+            {
+                ++result.commandPathFailures;
+            }
         }
     }
     if (!failure.empty())
@@ -309,6 +316,67 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
 
     if (failure.empty())
     {
+        auto& record = prepared.recoveryRecord;
+        record.phase = TunerRecoveryPhase::Prepared;
+        record.host = request.host;
+        record.commandPort = request.commandPort;
+        record.mvlcHardwareId = request.mvlcHardwareId;
+        record.mvlcFirmwareRevision = request.mvlcFirmwareRevision;
+        record.mdppBaseAddress = request.targetBaseAddress;
+        record.mdppHardwareId = result.hardwareId;
+        record.mdppIrqLevel = result.irqLevel;
+        record.mdppOutputFormat = result.outputFormat;
+        record.stackTriggerRegister = prepared.readoutPlan.stackTriggerRegister;
+        record.stackTriggerValue = prepared.readoutPlan.triggerValue;
+        record.stackOffsetRegister = prepared.readoutPlan.stackOffsetRegister;
+        record.stackOffsetValue = prepared.readoutPlan.stackMemoryOffset;
+        record.ownershipTokenRegister = static_cast<std::uint16_t>(
+            prepared.readoutPlan.stackUploadWrites.back().address + 4U);
+        record.ownershipTokenValue = request.ownershipTokenValue == 0U
+            ? MakeOwnershipToken()
+            : request.ownershipTokenValue;
+        for (const auto& isolation : result.moduleIsolation)
+        {
+            record.isolatedModuleBaseAddresses.push_back(
+                isolation.baseAddress);
+        }
+
+        const auto saved = journalSaver
+            ? journalSaver(record, request.recoveryJournalPath)
+            : SaveTunerRecoveryJournal(
+                record, request.recoveryJournalPath);
+        if (!saved.success)
+        {
+            fail("Could not prepare crash recovery before changing any "
+                 "configured module state: " + saved.message);
+        }
+        else
+        {
+            result.recoveryJournalPrepared = true;
+        }
+    }
+
+    if (failure.empty())
+    {
+        const auto gate = ownershipGate("non-target MDPP quiescence");
+        if (gate.status != ScpCaptureGateStatus::Allowed)
+        {
+            fail(GateFailureMessage(gate, cancellationRequested));
+            result.foreignControllerDetected =
+                gate.status == ScpCaptureGateStatus::OwnershipLost;
+            result.cleanupSkippedToProtectForeignRun =
+                result.foreignControllerDetected;
+            result.communicationUncertain =
+                gate.status == ScpCaptureGateStatus::CommunicationUnavailable;
+            if (result.communicationUncertain)
+            {
+                ++result.commandPathFailures;
+            }
+        }
+    }
+
+    if (failure.empty())
+    {
         result.message =
             "Quiescing configured non-target MDPP modules so only the "
             "selected module can drive the diagnostic IRQ stack...";
@@ -404,56 +472,21 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
         }
     }
 
-    if (failure.empty())
-    {
-        auto& record = prepared.recoveryRecord;
-        record.phase = TunerRecoveryPhase::Prepared;
-        record.host = request.host;
-        record.commandPort = request.commandPort;
-        record.mvlcHardwareId = request.mvlcHardwareId;
-        record.mvlcFirmwareRevision = request.mvlcFirmwareRevision;
-        record.mdppBaseAddress = request.targetBaseAddress;
-        record.mdppHardwareId = result.hardwareId;
-        record.mdppIrqLevel = result.irqLevel;
-        record.mdppOutputFormat = result.outputFormat;
-        record.stackTriggerRegister = prepared.readoutPlan.stackTriggerRegister;
-        record.stackTriggerValue = prepared.readoutPlan.triggerValue;
-        record.stackOffsetRegister = prepared.readoutPlan.stackOffsetRegister;
-        record.stackOffsetValue = prepared.readoutPlan.stackMemoryOffset;
-        record.ownershipTokenRegister = static_cast<std::uint16_t>(
-            prepared.readoutPlan.stackUploadWrites.back().address + 4U);
-        record.ownershipTokenValue = request.ownershipTokenValue == 0U
-            ? MakeOwnershipToken()
-            : request.ownershipTokenValue;
-        for (const auto& isolation : result.moduleIsolation)
-        {
-            record.isolatedModuleBaseAddresses.push_back(
-                isolation.baseAddress);
-        }
-
-        const auto saved = SaveTunerRecoveryJournal(
-            record, request.recoveryJournalPath);
-        if (!saved.success)
-        {
-            fail("Could not prepare crash recovery before installing the "
-                 "diagnostic stack: " + saved.message);
-        }
-        else
-        {
-            result.recoveryJournalPrepared = true;
-        }
-    }
-
     if (!failure.empty())
     {
+        if (result.recoveryJournalPrepared)
+        {
+            result.orphanRecoveryRequired = true;
+            failure += " The Prepared recovery journal was retained.";
+        }
         result.state = DiagnosticAcquisitionState::Failed;
         result.message = failure;
         return prepared;
     }
 
     result.message =
-        "Non-target isolation is complete and tuner ownership is journaled "
-        "before the first diagnostic-stack write.";
+        "Tuner ownership was journaled before non-target isolation, and "
+        "isolation is complete before the first diagnostic-stack write.";
     return prepared;
 }
 

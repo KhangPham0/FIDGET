@@ -32,6 +32,7 @@ namespace fidget {
 namespace test {
 
 inline constexpr std::uint32_t TargetBase = 0x11000000U;
+inline constexpr std::uint32_t IsolatedBase = 0x22000000U;
 inline constexpr std::uint32_t OwnershipToken = 0xA55A1234U;
 
 class JournalPath
@@ -136,6 +137,13 @@ public:
         vmeRegisters_[
             TargetBase + fidget::DiagnosticAcquisitionControlRegister]
             = 0U;
+        vmeRegisters_[IsolatedBase + fidget::DiagnosticHardwareIdRegister]
+            = 0x5007U;
+        vmeRegisters_[IsolatedBase + fidget::DiagnosticIrqLevelRegister]
+            = 0U;
+        vmeRegisters_[
+            IsolatedBase + fidget::DiagnosticAcquisitionControlRegister]
+            = 1U;
         localRegisters_[0x6008U] = 0x5008U;
         localRegisters_[0x600EU] = 0x0046U;
         localRegisters_[0x1300U] = 0U;
@@ -197,6 +205,16 @@ public:
     [[nodiscard]] bool FirstStackWriteSeen() const noexcept
     {
         return firstStackWriteSeen_.load();
+    }
+
+    [[nodiscard]] bool FirstIsolationWriteSeen() const noexcept
+    {
+        return firstIsolationWriteSeen_.load();
+    }
+
+    [[nodiscard]] bool FirstIsolationWriteSawPreparedJournal() const noexcept
+    {
+        return firstIsolationWriteSawPreparedJournal_.load();
     }
 
 private:
@@ -500,11 +518,29 @@ private:
             {
                 readValue = vmeRegisters_[operation.address];
             }
-            else if (operation.kind == PendingVmeKind::Write)
-            {
-                vmeRegisters_[operation.address] = operation.value;
-            }
             pendingVme_ = {};
+        }
+
+        if (operation.kind == PendingVmeKind::Write
+            && operation.address >= IsolatedBase
+            && operation.address < IsolatedBase + 0x10000U
+            && !firstIsolationWriteSeen_.exchange(true))
+        {
+            const auto loaded = LoadTunerRecoveryJournal(journalPath_);
+            firstIsolationWriteSawPreparedJournal_.store(
+                loaded.success
+                && loaded.record.has_value()
+                && loaded.record->phase == TunerRecoveryPhase::Prepared
+                && std::find(
+                       loaded.record->isolatedModuleBaseAddresses.begin(),
+                       loaded.record->isolatedModuleBaseAddresses.end(),
+                       IsolatedBase)
+                    != loaded.record->isolatedModuleBaseAddresses.end());
+        }
+        if (operation.kind == PendingVmeKind::Write)
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            vmeRegisters_[operation.address] = operation.value;
         }
 
         if (operation.kind == PendingVmeKind::Read)
@@ -584,6 +620,8 @@ private:
     std::map<std::uint16_t, std::uint32_t> localRegisters_;
     std::map<std::uint32_t, std::uint16_t> vmeRegisters_;
     PendingVmeOperation pendingVme_;
+    std::atomic<bool> firstIsolationWriteSeen_{false};
+    std::atomic<bool> firstIsolationWriteSawPreparedJournal_{false};
     std::atomic<bool> firstStackWriteSeen_{false};
     std::atomic<bool> firstStackWriteSawJournal_{false};
     std::atomic<bool> stop_{false};
@@ -601,7 +639,7 @@ inline fidget::DiagnosticAcquisitionPreparationRequest MakeRequest(
     request.mvlcFirmwareRevision = 0x0046U;
     request.targetBaseAddress = TargetBase;
     request.requestedChannel = 29U;
-    request.configuredModuleBaseAddresses = {TargetBase};
+    request.configuredModuleBaseAddresses = {TargetBase, IsolatedBase};
     request.recoveryJournalPath = journalPath;
     request.ownershipTokenValue = OwnershipToken;
     return request;
@@ -624,6 +662,20 @@ inline void RunDiagnosticAcquisitionLifecycle(
     REQUIRE(prepared.acquisition.state
             == fidget::DiagnosticAcquisitionState::Starting);
     REQUIRE(std::filesystem::exists(journal.Get()));
+    REQUIRE(prepared.acquisition.moduleIsolation.size() == 1U);
+    CHECK(prepared.acquisition.nonTargetModulesQuiesced == 1U);
+    CHECK(emulator.FirstIsolationWriteSeen());
+    CHECK(emulator.FirstIsolationWriteSawPreparedJournal());
+    CHECK(emulator.VmeRegister(
+              IsolatedBase
+              + fidget::DiagnosticAcquisitionControlRegister)
+          == 0U);
+    CHECK(emulator.VmeRegister(
+              IsolatedBase + fidget::DiagnosticFifoResetRegister)
+          == 1U);
+    CHECK(emulator.VmeRegister(
+              IsolatedBase + fidget::DiagnosticReadoutResetRegister)
+          == 1U);
 
     prepared = fidget::StartPreparedDiagnosticAcquisition(
         commandTransport,
@@ -696,6 +748,10 @@ inline void RunDiagnosticAcquisitionLifecycle(
     CHECK_FALSE(std::filesystem::exists(journal.Get()));
     CHECK(emulator.VmeRegister(
               TargetBase + fidget::DiagnosticAcquisitionControlRegister)
+          == 0U);
+    CHECK(emulator.VmeRegister(
+              IsolatedBase
+              + fidget::DiagnosticAcquisitionControlRegister)
           == 0U);
     CHECK(emulator.LocalRegister(fidget::DiagnosticDaqModeRegister) == 0U);
     CHECK(emulator.LocalRegister(

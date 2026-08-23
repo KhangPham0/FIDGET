@@ -277,13 +277,14 @@ replies temporarily freeze writes while the receiver continues draining
 data. A proven fingerprint mismatch causes passive detach: FIDGET closes its
 sockets and does not write cleanup into a run that is no longer its own.
 
-Before entering a hazardous acquisition state, FIDGET atomically writes
-`<project-file>.recovery`. The record contains the endpoint, identities,
-readout fingerprint, isolated modules, and any parameter or source value
-that must be restored, and it is removed only after verified cleanup. If the
-process crashes, `fidget_cli recover` compares the live controller state with
-the journal before writing anything. An active orphan requires the complete
-fingerprint, including the random token, to match. A foreign or mismatched
+Before any non-target stop or reset and before installing the diagnostic
+stack, FIDGET atomically writes `<project-file>.recovery`. The record contains
+the endpoint, identities, readout fingerprint, isolated modules, and any
+parameter or source value that must be restored, and it is removed only after
+verified cleanup. If the process crashes, `fidget_cli recover` compares the
+live controller state with the journal before writing anything. An active
+orphan requires the complete fingerprint, including the random token, to
+match. A foreign or mismatched
 fingerprint produces zero cleanup writes and retains the journal as evidence.
 If DAQ mode is already zero but a preview or source restoration remains, the
 MVLC and MDPP identities, exact FW2051 firmware, stopped module state, live

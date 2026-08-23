@@ -341,11 +341,33 @@ TEST_CASE("an active IRQ-zero non-target is isolated and journaled")
     QueueIsolationWrites(transport, references, true);
 
     const std::atomic<bool> cancelled{false};
+    std::vector<std::string> gateNames;
+    bool journalReadyBeforeQuiescence = false;
+    std::size_t requestsBeforeQuiescence = 0U;
+    const ScpCaptureOwnershipGate ownershipGate =
+        [&](const std::string& operationName) {
+            gateNames.push_back(operationName);
+            if (gateNames.size() == 2U)
+            {
+                const auto loaded = LoadTunerRecoveryJournal(journal.Get());
+                journalReadyBeforeQuiescence = loaded.success
+                    && loaded.record.has_value()
+                    && loaded.record->phase == TunerRecoveryPhase::Prepared
+                    && loaded.record->isolatedModuleBaseAddresses
+                        == std::vector<std::uint32_t>{OtherBase};
+                requestsBeforeQuiescence =
+                    transport.SentRequests().size();
+            }
+            return ScpCaptureGateResult{
+                ScpCaptureGateStatus::Allowed,
+                {},
+            };
+        };
     const auto prepared = PrepareDiagnosticAcquisition(
         transport,
         MakeRequest(journal.Get()),
         cancelled,
-        AllowOwnership());
+        ownershipGate);
 
     const auto& result = prepared.acquisition;
     CHECK(result.state == DiagnosticAcquisitionState::Starting);
@@ -363,6 +385,12 @@ TEST_CASE("an active IRQ-zero non-target is isolated and journaled")
     CHECK(isolated.stopVerified);
     CHECK(isolated.fifoResetSent);
     CHECK(isolated.readoutResetSent);
+    CHECK(gateNames == std::vector<std::string>{
+        "direct diagnostic acquisition",
+        "non-target MDPP quiescence",
+    });
+    CHECK(journalReadyBeforeQuiescence);
+    CHECK(requestsBeforeQuiescence == 12U);
 
     const auto loaded = LoadTunerRecoveryJournal(journal.Get());
     REQUIRE(loaded.success);
@@ -473,35 +501,230 @@ TEST_CASE("acquisition cannot begin when recovery journaling is unavailable")
     using namespace fidget;
     using namespace fidget::test;
 
+    JournalPath journal;
     FakeCommandTransport transport;
     Open(transport);
     TransactionReferences references{0x5000U, 0x9E000001U};
     QueueTargetValidation(transport, references);
     QueueIsolationCapture(transport, references, 0U, 0U);
-    QueueIsolationWrites(transport, references, false);
 
-    auto request = MakeRequest("/dev/null/fidget.recovery");
+    auto request = MakeRequest(journal.Get());
+    std::size_t saveCalls = 0U;
+    TunerRecoveryRecord attemptedRecord;
+    const DiagnosticAcquisitionJournalSaver rejectSave =
+        [&](const TunerRecoveryRecord& record, const std::string& path) {
+            ++saveCalls;
+            attemptedRecord = record;
+            CHECK(path == journal.Get());
+            return TunerRecoverySaveResult{
+                false,
+                "injected recovery-journal save failure",
+            };
+        };
     const std::atomic<bool> cancelled{false};
     const auto prepared = PrepareDiagnosticAcquisition(
-        transport, request, cancelled, AllowOwnership());
+        transport,
+        request,
+        cancelled,
+        AllowOwnership(),
+        rejectSave);
 
     CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
     CHECK_FALSE(prepared.acquisition.recoveryJournalPrepared);
+    CHECK(saveCalls == 1U);
+    CHECK(attemptedRecord.phase == TunerRecoveryPhase::Prepared);
+    CHECK(attemptedRecord.mdppBaseAddress == TargetBase);
+    CHECK(attemptedRecord.isolatedModuleBaseAddresses
+          == std::vector<std::uint32_t>{OtherBase});
     CHECK(prepared.acquisition.message.find(
-              "Could not prepare crash recovery before installing the "
-              "diagnostic stack:")
+              "Could not prepare crash recovery before changing any "
+              "configured module state:")
           == 0U);
+    CHECK(prepared.acquisition.message.find(
+              "injected recovery-journal save failure")
+          != std::string::npos);
+    REQUIRE(prepared.acquisition.moduleIsolation.size() == 1U);
+    CHECK(prepared.acquisition.moduleIsolation.front().validated);
+    CHECK_FALSE(
+        prepared.acquisition.moduleIsolation.front().quiescenceAttempted);
 
     const auto operations = DecodeWireOperations(transport);
+    REQUIRE(operations.size() == 6U);
     for (const auto& operation : operations)
     {
-        if (!operation.write)
+        CHECK_FALSE(operation.write);
+    }
+    CHECK(transport.SentRequests().size() == 12U);
+    CHECK_FALSE(std::filesystem::exists(journal.Get()));
+}
+
+TEST_CASE("the fresh ownership gate runs after journaling and before quiescence")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(transport, references);
+    QueueIsolationCapture(transport, references, 0U, 1U);
+
+    std::size_t gateCalls = 0U;
+    const ScpCaptureOwnershipGate gate =
+        [&gateCalls](const std::string&) {
+            ++gateCalls;
+            return gateCalls == 2U
+                ? ScpCaptureGateResult{
+                    ScpCaptureGateStatus::CommunicationUnavailable,
+                    "The fresh DAQ-idle check was unavailable.",
+                }
+                : ScpCaptureGateResult{
+                    ScpCaptureGateStatus::Allowed,
+                    {},
+                };
+        };
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport,
+        MakeRequest(journal.Get()),
+        cancelled,
+        gate);
+
+    CHECK(prepared.acquisition.state
+          == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.recoveryJournalPrepared);
+    CHECK(prepared.acquisition.orphanRecoveryRequired);
+    CHECK(prepared.acquisition.communicationUncertain);
+    CHECK(prepared.acquisition.commandPathFailures == 1U);
+    CHECK(prepared.acquisition.message.find(
+              "The fresh DAQ-idle check was unavailable.")
+          != std::string::npos);
+    CHECK(prepared.acquisition.message.find(
+              "The Prepared recovery journal was retained.")
+          != std::string::npos);
+    REQUIRE(prepared.acquisition.moduleIsolation.size() == 1U);
+    CHECK_FALSE(
+        prepared.acquisition.moduleIsolation.front().quiescenceAttempted);
+    CHECK(gateCalls == 2U);
+
+    const auto loaded = LoadTunerRecoveryJournal(journal.Get());
+    REQUIRE(loaded.success);
+    REQUIRE(loaded.record.has_value());
+    CHECK(loaded.record->phase == TunerRecoveryPhase::Prepared);
+    CHECK(loaded.record->isolatedModuleBaseAddresses
+          == std::vector<std::uint32_t>{OtherBase});
+
+    const auto operations = DecodeWireOperations(transport);
+    REQUIRE(operations.size() == 6U);
+    for (const auto& operation : operations)
+    {
+        CHECK_FALSE(operation.write);
+    }
+}
+
+TEST_CASE("the prepared journal survives every interrupted isolation write")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    struct Interruption
+    {
+        const char* name = nullptr;
+        std::size_t executeSend = 0U;
+        std::size_t expectedOperationCount = 0U;
+    };
+    const std::vector<Interruption> interruptions{
+        {"module stop", 14U, 7U},
+        {"FIFO reset", 18U, 9U},
+        {"readout reset", 20U, 10U},
+    };
+    const std::vector<WireOperation> expectedOperations{
+        {false, TargetBase + DiagnosticHardwareIdRegister, 0U},
+        {false, TargetBase + DiagnosticOutputFormatRegister, 0U},
+        {false, TargetBase + DiagnosticIrqLevelRegister, 0U},
+        {false, OtherBase + DiagnosticHardwareIdRegister, 0U},
+        {false, OtherBase + DiagnosticIrqLevelRegister, 0U},
+        {false, OtherBase + DiagnosticAcquisitionControlRegister, 0U},
+        {true, OtherBase + DiagnosticAcquisitionControlRegister, 0U},
+        {false, OtherBase + DiagnosticAcquisitionControlRegister, 0U},
+        {true, OtherBase + DiagnosticFifoResetRegister, 1U},
+        {true, OtherBase + DiagnosticReadoutResetRegister, 1U},
+    };
+
+    for (const auto& interruption : interruptions)
+    {
+        INFO("interrupt " << interruption.name
+                           << " after send "
+                           << interruption.executeSend);
+        JournalPath journal;
+        FakeCommandTransport transport;
+        Open(transport);
+        TransactionReferences references{0x5000U, 0x9E000001U};
+        QueueTargetValidation(transport, references);
+        QueueIsolationCapture(transport, references, 0U, 1U);
+        QueueIsolationWrites(transport, references, true);
+
+        std::atomic<bool> cancelled{false};
+        std::size_t sends = 0U;
+        bool journalReadyBeforeWrite = false;
+        transport.SetSendHook([&](const std::vector<std::byte>&) {
+            ++sends;
+            if (sends + 1U == interruption.executeSend)
+            {
+                const auto loaded =
+                    LoadTunerRecoveryJournal(journal.Get());
+                journalReadyBeforeWrite = loaded.success
+                    && loaded.record.has_value()
+                    && loaded.record->phase == TunerRecoveryPhase::Prepared
+                    && loaded.record->isolatedModuleBaseAddresses
+                        == std::vector<std::uint32_t>{OtherBase};
+            }
+            if (sends == interruption.executeSend)
+            {
+                cancelled.store(true);
+            }
+        });
+
+        const auto prepared = PrepareDiagnosticAcquisition(
+            transport,
+            MakeRequest(journal.Get()),
+            cancelled,
+            AllowOwnership());
+
+        CHECK(prepared.acquisition.state
+              == DiagnosticAcquisitionState::Failed);
+        CHECK(prepared.acquisition.recoveryJournalPrepared);
+        CHECK(prepared.acquisition.orphanRecoveryRequired);
+        CHECK(prepared.acquisition.message.find(
+                  "The Prepared recovery journal was retained.")
+              != std::string::npos);
+        CHECK(journalReadyBeforeWrite);
+        CHECK(sends == interruption.executeSend);
+
+        const auto loaded = LoadTunerRecoveryJournal(journal.Get());
+        REQUIRE(loaded.success);
+        REQUIRE(loaded.record.has_value());
+        CHECK(loaded.record->phase == TunerRecoveryPhase::Prepared);
+        CHECK(loaded.record->isolatedModuleBaseAddresses
+              == std::vector<std::uint32_t>{OtherBase});
+
+        const auto operations = DecodeWireOperations(transport);
+        REQUIRE(operations.size() == interruption.expectedOperationCount);
+        REQUIRE(operations.size() <= expectedOperations.size());
+        for (std::size_t index = 0U;
+             index < operations.size();
+             ++index)
         {
-            continue;
+            CHECK(operations[index].write
+                  == expectedOperations[index].write);
+            CHECK(operations[index].address
+                  == expectedOperations[index].address);
+            CHECK(operations[index].value
+                  == expectedOperations[index].value);
         }
-        CHECK(operation.address != 0x2200U);
-        CHECK(operation.address != 0x1104U);
-        CHECK(operation.address != 0x1204U);
+        CHECK(transport.SentRequests().size()
+              == interruption.executeSend);
     }
 }
 

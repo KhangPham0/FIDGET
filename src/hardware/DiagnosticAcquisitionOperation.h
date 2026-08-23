@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -60,12 +61,17 @@ enum class DiagnosticStopOwnershipCheck
     VerifiedImmediatelyBeforePreviewRestore,
 };
 
+using DiagnosticAcquisitionJournalSaver =
+    std::function<TunerRecoverySaveResult(
+        const TunerRecoveryRecord&, const std::string&)>;
+
 [[nodiscard]] DiagnosticAcquisitionPreparationResult
 PrepareDiagnosticAcquisition(
     ICommandTransport& transport,
     const DiagnosticAcquisitionPreparationRequest& request,
     const std::atomic<bool>& cancellationRequested,
-    const ScpCaptureOwnershipGate& ownershipGate);
+    const ScpCaptureOwnershipGate& ownershipGate,
+    const DiagnosticAcquisitionJournalSaver& journalSaver = {});
 
 [[nodiscard]] DiagnosticAcquisitionPreparationResult
 StartPreparedDiagnosticAcquisition(

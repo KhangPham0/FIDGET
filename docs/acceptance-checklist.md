@@ -154,8 +154,9 @@ CHANNEL=29
   the test. Run `acquire` on the target signal channel.
 - [ ] Pass if startup reports every non-target module with its base, identity,
   IRQ, prior acquisition state, verified stop, FIFO reset, and readout reset.
-- [ ] Pass if the recovery journal exists before the first readout-stack write
-  and changes from Prepared to Active only after acquisition starts.
+- [ ] Pass if the recovery journal exists before any non-target stop or reset
+  and before the first readout-stack write, then changes from Prepared to
+  Active only after acquisition starts.
 - [ ] Observe at least 30 status intervals. Pass if packet and waveform counts
   advance, the requested channel appears in the per-channel breakdown, packet
   loss and decode errors remain zero, and the fingerprint remains matching.
