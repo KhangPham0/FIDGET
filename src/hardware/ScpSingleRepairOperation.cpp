@@ -55,7 +55,8 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
     ICommandTransport& transport,
     const ScpSingleRepairRequest& request,
     const std::atomic<bool>& cancellationRequested,
-    const ScpCaptureOwnershipGate& ownershipGate)
+    const ScpCaptureOwnershipGate& ownershipGate,
+    const ScpSingleRepairDelay& settleDelay)
 {
     ScpSingleRepairResult result;
     result.state = ScpSingleRepairState::Applying;
@@ -79,6 +80,16 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
             failure += ' ';
         }
         failure += std::move(message);
+    };
+    const auto waitForSettle = [&](const std::chrono::microseconds duration) {
+        if (settleDelay)
+        {
+            settleDelay(duration);
+        }
+        else
+        {
+            std::this_thread::sleep_for(duration);
+        }
     };
 
     if ((request.baseAddress & 0xFFFFU) != 0U)
@@ -221,7 +232,7 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         else
         {
             selectorWasWritten = true;
-            std::this_thread::sleep_for(SelectorSettleTime);
+            waitForSettle(SelectorSettleTime);
         }
     }
 
@@ -296,7 +307,7 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         }
         else
         {
-            std::this_thread::sleep_for(FrontendSettleTime);
+            waitForSettle(FrontendSettleTime);
             if (!readRegister(
                     request.registerOffset, result.appliedReadback, error))
             {
@@ -336,26 +347,34 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
                 request.registerOffset,
                 error));
         }
-        else if (!readRegister(
-                     request.registerOffset, result.rollbackReadback, error))
-        {
-            appendFailure(RegisterOperationError(
-                "verify rollback",
-                result.settingName,
-                request.registerOffset,
-                error));
-        }
-        else if (result.rollbackReadback != result.capturedLiveValue)
-        {
-            appendFailure(
-                "The rollback readback was " +
-                std::to_string(result.rollbackReadback) + ", expected " +
-                std::to_string(result.capturedLiveValue) + '.');
-        }
         else
         {
-            result.rollbackVerified = true;
-            result.profileValueRetained = false;
+            waitForSettle(FrontendSettleTime);
+            if (!readRegister(
+                    request.registerOffset,
+                    result.rollbackReadback,
+                    error))
+            {
+                appendFailure(RegisterOperationError(
+                    "verify rollback",
+                    result.settingName,
+                    request.registerOffset,
+                    error));
+            }
+            else if (result.rollbackReadback
+                     != result.capturedLiveValue)
+            {
+                appendFailure(
+                    "The rollback readback was " +
+                    std::to_string(result.rollbackReadback) +
+                    ", expected " +
+                    std::to_string(result.capturedLiveValue) + '.');
+            }
+            else
+            {
+                result.rollbackVerified = true;
+                result.profileValueRetained = false;
+            }
         }
     }
 
@@ -373,7 +392,7 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         else
         {
             result.selectorParkedAtQuadZero = true;
-            std::this_thread::sleep_for(SelectorSettleTime);
+            waitForSettle(SelectorSettleTime);
         }
     }
 

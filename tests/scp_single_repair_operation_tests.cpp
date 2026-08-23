@@ -7,9 +7,11 @@
 #include "hardware/ScpSingleRepairOperation.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -338,7 +340,7 @@ TEST_CASE("single repair rejects stale and invalid values before writing")
     }
 }
 
-TEST_CASE("single repair rolls back a mismatched readback exactly")
+TEST_CASE("single repair settles every frontend write including rollback")
 {
     using namespace fidget;
     using namespace fidget::test;
@@ -358,12 +360,17 @@ TEST_CASE("single repair rolls back a mismatched readback exactly")
     QueueWrite(
         transport, references, Base + Fw2051ScpSelectorRegister, 0U);
 
+    std::vector<std::pair<std::int64_t, std::size_t>> settleCalls;
     const std::atomic<bool> cancelled{false};
     const auto result = RepairFw2051ScpProfileValue(
         transport,
         {Base, 7U, 0x611AU, 200U, 250U},
         cancelled,
-        AllowAllGates());
+        AllowAllGates(),
+        [&](const std::chrono::microseconds duration) {
+            settleCalls.emplace_back(
+                duration.count(), transport.SentRequests().size());
+        });
 
     CHECK(result.state == ScpSingleRepairState::Failed);
     CHECK(result.writeAttempted);
@@ -374,6 +381,13 @@ TEST_CASE("single repair rolls back a mismatched readback exactly")
     CHECK_FALSE(result.profileValueRetained);
     CHECK(result.selectorParkedAtQuadZero);
     CHECK(transport.SentRequests().size() == 18U);
+    const std::vector<std::pair<std::int64_t, std::size_t>> expectedSettles{
+        {50, 6U},
+        {20, 10U},
+        {20, 14U},
+        {50, 18U},
+    };
+    CHECK(settleCalls == expectedSettles);
 }
 
 TEST_CASE("single repair passively stops after foreign ownership appears")
