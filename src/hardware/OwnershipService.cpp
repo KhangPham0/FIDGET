@@ -236,8 +236,11 @@ void OwnershipService::Submit(TunerCommand command)
         return;
     }
 
-    StopWatchdog();
-    (void)worker_.Post([this] { ReleaseSession(); });
+    if (std::holds_alternative<ReleaseSessionCommand>(command))
+    {
+        StopWatchdog();
+        (void)worker_.Post([this] { ReleaseSession(); });
+    }
 }
 
 std::future<PreWriteGateResult> OwnershipService::VerifyPreWriteGate(

@@ -14,6 +14,7 @@
 #include "core/StartupAudit.h"
 #include "core/StartupPreparation.h"
 #include "core/TunerStatus.h"
+#include "core/TunerTarget.h"
 #include "core/TuningSessionState.h"
 
 #include <cstddef>
@@ -42,6 +43,7 @@ struct TunerSnapshot
 {
     std::uint64_t revision = 0U;
     TuningSessionState tuningSession;
+    TunerTargetState target;
 
     bool projectActive = false;
     std::string projectPath;

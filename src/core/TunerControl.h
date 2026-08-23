@@ -12,6 +12,27 @@
 
 namespace fidget {
 
+struct EditTunerTargetCommand
+{
+    TunerTargetInput input;
+};
+
+struct SelectTunerTargetCommand
+{
+};
+
+struct ProbeTunerTargetCommand
+{
+};
+
+struct OpenTunerTargetSessionCommand
+{
+};
+
+struct ClearTunerTargetCommand
+{
+};
+
 struct UseCrateProjectCommand
 {
     std::string projectPath;
@@ -109,6 +130,11 @@ struct RecoverDiagnosticOrphanCommand
 };
 
 using TunerCommand = std::variant<
+    EditTunerTargetCommand,
+    SelectTunerTargetCommand,
+    ProbeTunerTargetCommand,
+    OpenTunerTargetSessionCommand,
+    ClearTunerTargetCommand,
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
     CheckStatusCommand,

@@ -19,6 +19,7 @@ add_library(fidget_core STATIC
     TargetModuleAddress.cpp
     TunerControl.cpp
     TunerSnapshot.cpp
+    TunerTarget.cpp
     VmeProtocol.cpp
 )
 
