@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <utility>
 
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder API, used for the default layout
@@ -239,6 +240,27 @@ bool App::Init()
         return false;
     }
 
+    TunerTargetInput initialTarget;
+    const auto preferences = LoadApplicationPreferences(storagePaths);
+    if (preferences.success)
+    {
+        initialTarget.mvlcHost =
+            preferences.preferences.lastVerifiedEthernetHost;
+        initialTarget.moduleAddress =
+            preferences.preferences.lastVerifiedModuleAddress;
+        initialTarget.sshDestination =
+            preferences.preferences.sshDestination;
+        if (!preferences.preferences.remoteBridgeCommand.empty())
+        {
+            initialTarget.remoteBridgeCommand =
+                preferences.preferences.remoteBridgeCommand;
+        }
+    }
+    else if (!preferences.fileMissing)
+    {
+        m_errorMessage = preferences.message;
+    }
+
     // OpenGL 3.2 core profile: the newest version macOS still supports.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
@@ -315,6 +337,11 @@ bool App::Init()
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
 
+    // Loading remembered fields is an edit, not verification. Direct
+    // Ethernet remains the default and the coordinator invalidates any old
+    // evidence before the first page is drawn.
+    m_tunerControl.Submit(EditTunerTargetCommand{std::move(initialTarget)});
+
     return true;
 }
 
@@ -340,40 +367,10 @@ void App::DrawFrame()
         m_guiSelection.drawer = guiView.drawer;
     }
 
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(
-        viewport->WorkPos.x, viewport->WorkPos.y + shellHeight));
-    ImGui::SetNextWindowSize(ImVec2(
-        viewport->WorkSize.x, viewport->WorkSize.y - shellHeight));
-    ImGui::SetNextWindowViewport(viewport->ID);
-    ImGuiWindowFlags hostFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
-        | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBringToFrontOnFocus
-        | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground
-        | ImGuiWindowFlags_NoSavedSettings;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::Begin("##dockspace_host", nullptr, hostFlags);
-    ImGui::PopStyleVar(2);
-
-    ImGuiID dockspaceId = ImGui::GetID("FidgetDockspace");
-    ImGui::DockSpace(dockspaceId);
-    if (m_needDefaultLayout)
-    {
-        BuildDefaultLayout(dockspaceId);
-        WriteLayoutVersion(m_layoutVersionFilePath);
-        m_needDefaultLayout = false;
-    }
-    ImGui::End();
-
-    if (m_showWorkflow)
-    {
-        DrawWorkflowPanel(*snapshot);
-    }
-    DrawStagePanel(*snapshot);
-    if (m_showActivityLog)
-    {
-        DrawActivityLogPanel(*snapshot);
-    }
+    if (m_showLegacyWorkflow || snapshot->projectActive)
+        DrawLegacyWorkspace(*snapshot, shellHeight);
+    else
+        DrawRedesignedPage(*snapshot, guiView, shellHeight);
     DrawGuiShellDrawer(
         guiView, shellHeight, m_theme, m_fonts, shellResult);
     if (shellResult.closeDrawer)
@@ -400,6 +397,11 @@ void App::DrawMainMenu()
 
     if (ImGui::BeginMenu("View"))
     {
+        ImGui::MenuItem(
+            ICON_FA_PROJECT_DIAGRAM "  Legacy workflow",
+            nullptr,
+            &m_showLegacyWorkflow);
+        ImGui::Separator();
         ImGui::MenuItem(
             ICON_FA_STREAM "  Workflow",
             FIDGET_MOD "+B",
@@ -444,6 +446,78 @@ void App::DrawMainMenu()
     }
 
     ImGui::EndMainMenuBar();
+}
+
+void App::DrawRedesignedPage(
+    const TunerSnapshot& snapshot,
+    const GuiViewState& view,
+    const float shellHeight)
+{
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(
+        viewport->WorkPos.x, viewport->WorkPos.y + shellHeight));
+    ImGui::SetNextWindowSize(ImVec2(
+        viewport->WorkSize.x,
+        std::max(0.0F, viewport->WorkSize.y - shellHeight)));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration
+        | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking
+        | ImGuiWindowFlags_NoSavedSettings
+        | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, m_theme.windowBackground);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(34.0F, 28.0F));
+    ImGui::Begin("##fidget_redesigned_page", nullptr, flags);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    m_homePage.Draw(
+        m_tunerControl,
+        snapshot,
+        view,
+        m_guiSelection,
+        m_theme,
+        m_fonts,
+        m_dialogs);
+    ImGui::End();
+}
+
+void App::DrawLegacyWorkspace(
+    const TunerSnapshot& snapshot,
+    const float shellHeight)
+{
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(
+        viewport->WorkPos.x, viewport->WorkPos.y + shellHeight));
+    ImGui::SetNextWindowSize(ImVec2(
+        viewport->WorkSize.x,
+        std::max(0.0F, viewport->WorkSize.y - shellHeight)));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    constexpr ImGuiWindowFlags hostFlags = ImGuiWindowFlags_NoDecoration
+        | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking
+        | ImGuiWindowFlags_NoBringToFrontOnFocus
+        | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground
+        | ImGuiWindowFlags_NoSavedSettings;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
+    ImGui::Begin("##dockspace_host", nullptr, hostFlags);
+    ImGui::PopStyleVar(2);
+
+    const ImGuiID dockspaceId = ImGui::GetID("FidgetDockspace");
+    ImGui::DockSpace(dockspaceId);
+    if (m_needDefaultLayout)
+    {
+        BuildDefaultLayout(dockspaceId);
+        WriteLayoutVersion(m_layoutVersionFilePath);
+        m_needDefaultLayout = false;
+    }
+    ImGui::End();
+
+    if (m_showWorkflow)
+        DrawWorkflowPanel(snapshot);
+    DrawStagePanel(snapshot);
+    if (m_showActivityLog)
+        DrawActivityLogPanel(snapshot);
 }
 
 void App::DrawAboutWindow()

@@ -542,8 +542,7 @@ void AddHomeActions(
 {
     if (evidence.endpointInputsValid && evidence.operationIdle)
         Allow(view.allowedActions, GuiAction::Connect);
-    if (evidence.controllerConnected
-        && evidence.currentConnectionRequestValid
+    if (evidence.currentConnectionRequestValid
         && evidence.operationIdle)
     {
         Allow(view.allowedActions, GuiAction::Check);

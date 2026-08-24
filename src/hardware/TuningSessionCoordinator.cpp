@@ -1,6 +1,5 @@
 #include "hardware/TuningSessionCoordinator.h"
 
-#include "core/TargetModuleAddress.h"
 #include "hardware/CommandWorker.h"
 #include "hardware/TargetProbeOperation.h"
 #include "hardware/TransportFactory.h"
@@ -27,16 +26,6 @@ struct SessionPathResult
     std::string activityLogPath;
     std::string recoveryJournalPath;
 };
-
-bool EndpointFieldsComplete(const TunerTargetInput& input)
-{
-    if (input.mvlcHost.empty() || input.mvlcCommandPort == 0U)
-        return false;
-
-    return input.endpointKind != TunerTargetEndpointKind::SshBridge
-        || (!input.sshDestination.empty()
-            && !input.remoteBridgeCommand.empty());
-}
 
 TransportEndpointRequest MakeEndpointRequest(
     const TunerTargetInput& input)
@@ -133,6 +122,30 @@ TunerStatusLevel ProbeStatusLevel(const TargetProbeOutcome outcome)
     }
 }
 
+ApplicationStorageResult RememberBridgeFields(
+    const ApplicationStoragePaths& storagePaths,
+    const TunerTargetInput& input)
+{
+    ApplicationPreferences preferences;
+    const auto loaded = LoadApplicationPreferences(storagePaths);
+    if (loaded.success)
+    {
+        preferences = loaded.preferences;
+    }
+    else if (!loaded.fileMissing)
+    {
+        return {
+            false,
+            "Could not load the existing connection preferences: "
+                + loaded.message,
+        };
+    }
+
+    preferences.sshDestination = input.sshDestination;
+    preferences.remoteBridgeCommand = input.remoteBridgeCommand;
+    return SaveApplicationPreferences(storagePaths, preferences);
+}
+
 } // namespace
 
 TuningSessionCoordinator::TuningSessionCoordinator(
@@ -222,13 +235,12 @@ void TuningSessionCoordinator::EditTarget(EditTunerTargetCommand command)
 void TuningSessionCoordinator::SelectTarget()
 {
     auto snapshot = SnapshotCopy();
-    const auto parsed = ParseTargetModuleAddress(
-        snapshot.target.input.moduleAddress);
+    const auto validation = ValidateTunerTargetInput(snapshot.target.input);
     snapshot.target.verification.inProgress = false;
     snapshot.target.verification.invalidated = true;
     snapshot.target.sessionGate = {};
 
-    if (!parsed.success || !parsed.address)
+    if (!validation.success || !validation.normalizedModuleAddress)
     {
         snapshot.target.selection.reset();
         RefreshPresentationEvidence(snapshot);
@@ -236,19 +248,29 @@ void TuningSessionCoordinator::SelectTarget()
             std::move(snapshot),
             TunerStatusLevel::Warning,
             "The tuner target was not selected.",
-            parsed.message);
+            validation.endpointValid
+                ? validation.moduleAddressMessage
+                : validation.endpointMessage);
         return;
     }
 
     snapshot.target.selection = TunerTargetSelection{
         snapshot.target.input,
-        *parsed.address,
+        *validation.normalizedModuleAddress,
     };
+    const auto remembered = RememberBridgeFields(
+        storagePaths_, snapshot.target.input);
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
-        TunerStatusLevel::Success,
-        "The target-module address was normalized and selected.");
+        remembered.success
+            ? TunerStatusLevel::Success
+            : TunerStatusLevel::Warning,
+        "The endpoint request and normalized target were selected.",
+        remembered.success
+            ? "Run Check to connect and verify the controller and target."
+            : "The SSH connection fields could not be remembered: "
+                + remembered.message);
 }
 
 void TuningSessionCoordinator::ProbeTarget(
@@ -298,6 +320,21 @@ void TuningSessionCoordinator::ProbeTarget(
         },
         *cancellation);
 
+    std::string persistenceError;
+    if (result.outcome == TargetProbeOutcome::VerifiedIdle)
+    {
+        const ApplicationPreferences preferences{
+            selected.input.mvlcHost,
+            selected.input.moduleAddress,
+            selected.input.sshDestination,
+            selected.input.remoteBridgeCommand,
+        };
+        const auto saved = SaveApplicationPreferences(
+            storagePaths_, preferences);
+        if (!saved.success)
+            persistenceError = saved.message;
+    }
+
     snapshot = SnapshotCopy();
     snapshot.target.verification.inProgress = false;
     snapshot.target.verification.invalidated = false;
@@ -306,8 +343,14 @@ void TuningSessionCoordinator::ProbeTarget(
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
-        ProbeStatusLevel(result.outcome),
-        result.message);
+        persistenceError.empty()
+            ? ProbeStatusLevel(result.outcome)
+            : TunerStatusLevel::Warning,
+        result.message,
+        persistenceError.empty()
+            ? std::string{}
+            : "Verification succeeded, but the remembered target could not "
+              "be saved: " + persistenceError);
     FinishProbe(cancellation);
 }
 
@@ -431,13 +474,34 @@ void TuningSessionCoordinator::RefreshPresentationEvidence(
         snapshot.tuningSession.evidence);
     const bool currentSelection = snapshot.target.selection.has_value()
         && snapshot.target.selection->input == snapshot.target.input;
+    const auto validation = ValidateTunerTargetInput(snapshot.target.input);
     snapshot.tuningSession.evidence.endpointInputsValid =
-        currentSelection && EndpointFieldsComplete(snapshot.target.input);
+        validation.success;
     snapshot.tuningSession.evidence.endpointEditingAllowed =
         !snapshot.target.verification.inProgress;
     snapshot.tuningSession.evidence.operationIdle =
         !snapshot.target.verification.inProgress
         && snapshot.activeOperation == GuidedTunerOperation::None;
+    if (snapshot.tuningSession.phase == TuningSessionPhase::Home
+        && !snapshot.tuningSession.evidence.recoveryContextEstablished
+        && !snapshot.tuningSession.evidence.recoveryInProgress)
+    {
+        snapshot.tuningSession.evidence.noRecoveryPending =
+            !snapshot.recoveryRecordAvailable
+            && snapshot.recoveryJournalStatus == RecoveryJournalStatus::None;
+        snapshot.tuningSession.evidence.helpAvailable = true;
+        snapshot.tuningSession.evidence.detailsAvailable = currentSelection;
+        snapshot.tuningSession.evidence.logsAvailable =
+            !snapshot.statusMessages.empty();
+        snapshot.tuningSession.evidence.primaryNavigationAvailable = true;
+        snapshot.tuningSession.evidence.navigationAwayVerifiedSafe =
+            snapshot.tuningSession.evidence.noRecoveryPending
+            && !snapshot.tuningSession.evidence.controlHeld
+            && (!snapshot.tuningSession.evidence.activeControllerUseDetected
+                || (snapshot.tuningSession.evidence.noControlTaken
+                    && snapshot.tuningSession.evidence
+                        .noStateChangingCommandsSent));
+    }
 }
 
 } // namespace fidget

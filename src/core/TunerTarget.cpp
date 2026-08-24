@@ -1,6 +1,20 @@
 #include "core/TunerTarget.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace fidget {
+namespace {
+
+bool HasNonWhitespace(const std::string& value)
+{
+    return std::any_of(
+        value.begin(), value.end(), [](const unsigned char character) {
+            return std::isspace(character) == 0;
+        });
+}
+
+} // namespace
 
 bool operator==(
     const TunerTargetInput& left,
@@ -19,6 +33,36 @@ bool operator!=(
     const TunerTargetInput& right) noexcept
 {
     return !(left == right);
+}
+
+TunerTargetInputValidation ValidateTunerTargetInput(
+    const TunerTargetInput& input)
+{
+    TunerTargetInputValidation result;
+    const bool hostValid = HasNonWhitespace(input.mvlcHost)
+        && input.mvlcCommandPort != 0U;
+    const bool bridgeValid =
+        input.endpointKind != TunerTargetEndpointKind::SshBridge
+        || (HasNonWhitespace(input.sshDestination)
+            && HasNonWhitespace(input.remoteBridgeCommand));
+    result.endpointValid = hostValid && bridgeValid;
+    if (!hostValid)
+    {
+        result.endpointMessage =
+            "Enter an MVLC hostname or IP address.";
+    }
+    else if (!bridgeValid)
+    {
+        result.endpointMessage =
+            "Enter an SSH destination and remote bridge command.";
+    }
+
+    const auto address = ParseTargetModuleAddress(input.moduleAddress);
+    result.moduleAddressValid = address.success && address.address.has_value();
+    result.moduleAddressMessage = address.message;
+    result.normalizedModuleAddress = address.address;
+    result.success = result.endpointValid && result.moduleAddressValid;
+    return result;
 }
 
 bool TargetProbeEvidenceIsCurrent(

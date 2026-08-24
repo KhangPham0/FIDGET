@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include "core/TargetModuleAddress.h"
+#include "core/TunerTarget.h"
 
 #include <array>
 #include <cstdint>
@@ -119,4 +120,45 @@ TEST_CASE("malformed target-module addresses fail closed")
         CHECK_FALSE(parsed.success);
         CHECK_FALSE(parsed.address.has_value());
     }
+}
+
+TEST_CASE("Home target fields share one parse-level validation contract")
+{
+    using namespace fidget;
+
+    TunerTargetInput input;
+    input.mvlcHost = "controller.example";
+    input.moduleAddress = "0x1100";
+    auto validation = ValidateTunerTargetInput(input);
+    REQUIRE(validation.success);
+    CHECK(validation.endpointValid);
+    CHECK(validation.moduleAddressValid);
+    REQUIRE(validation.normalizedModuleAddress.has_value());
+    CHECK(validation.normalizedModuleAddress->FullA32Value()
+          == 0x11000000U);
+
+    input.moduleAddress = "0x0000";
+    validation = ValidateTunerTargetInput(input);
+    REQUIRE(validation.success);
+    REQUIRE(validation.normalizedModuleAddress.has_value());
+    CHECK(validation.normalizedModuleAddress->FullA32Value() == 0U);
+
+    input.endpointKind = TunerTargetEndpointKind::SshBridge;
+    validation = ValidateTunerTargetInput(input);
+    CHECK_FALSE(validation.success);
+    CHECK_FALSE(validation.endpointValid);
+    CHECK(validation.moduleAddressValid);
+
+    input.sshDestination = "bridge-alias";
+    input.remoteBridgeCommand = "/opt/fidget_bridge";
+    CHECK(ValidateTunerTargetInput(input).success);
+
+    input.mvlcHost = " \t ";
+    validation = ValidateTunerTargetInput(input);
+    CHECK_FALSE(validation.success);
+    CHECK_FALSE(validation.endpointValid);
+
+    input.mvlcHost = "controller.example";
+    input.mvlcCommandPort = 0U;
+    CHECK_FALSE(ValidateTunerTargetInput(input).success);
 }

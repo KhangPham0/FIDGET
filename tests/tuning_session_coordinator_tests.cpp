@@ -300,9 +300,41 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
 
     ServiceFixture fixture;
     const auto input = TargetInput();
-    EditAndSelect(*fixture.service, input);
+    fixture.service->Submit(EditTunerTargetCommand{input});
+    REQUIRE(WaitFor(*fixture.service, [&input](const TunerSnapshot& snapshot) {
+        return snapshot.target.input == input
+            && snapshot.target.verification.invalidated;
+    }));
+    CHECK(fixture.service->CurrentSnapshot()
+              ->tuningSession.evidence.endpointInputsValid);
+    CHECK_FALSE(fixture.service->CurrentSnapshot()
+                    ->tuningSession.evidence.currentConnectionRequestValid);
+
+    fixture.service->Submit(SelectTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.target.selection.has_value();
+    }));
     REQUIRE(fixture.service->CurrentSnapshot()->target.selection.has_value());
     CHECK(fixture.service->CurrentSnapshot()->target.selection->input == input);
+    CHECK(fixture.service->CurrentSnapshot()
+              ->tuningSession.evidence.endpointInputsValid);
+    CHECK(fixture.service->CurrentSnapshot()
+              ->tuningSession.evidence.currentConnectionRequestValid);
+    CHECK_FALSE(fixture.service->CurrentSnapshot()
+                    ->tuningSession.evidence.controllerConnected);
+    CHECK_FALSE(fixture.service->CurrentSnapshot()
+                    ->tuningSession.evidence.connectionVerificationFresh);
+
+    const auto connectionPreferences = LoadApplicationPreferences(
+        fixture.storage);
+    INFO(connectionPreferences.message);
+    REQUIRE(connectionPreferences.success);
+    CHECK(connectionPreferences.preferences.lastVerifiedEthernetHost.empty());
+    CHECK(connectionPreferences.preferences.lastVerifiedModuleAddress.empty());
+    CHECK(connectionPreferences.preferences.sshDestination
+          == input.sshDestination);
+    CHECK(connectionPreferences.preferences.remoteBridgeCommand
+          == input.remoteBridgeCommand);
 
     std::thread::id probeThread;
     fixture.transport->SetSendHook(
@@ -334,6 +366,18 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK(endpoint.sshDestination == input.sshDestination);
     CHECK(endpoint.remoteBridgeCommand == input.remoteBridgeCommand);
 
+    const auto remembered = LoadApplicationPreferences(fixture.storage);
+    INFO(remembered.message);
+    REQUIRE(remembered.success);
+    CHECK(remembered.preferences.lastVerifiedEthernetHost
+          == input.mvlcHost);
+    CHECK(remembered.preferences.lastVerifiedModuleAddress
+          == input.moduleAddress);
+    CHECK(remembered.preferences.sshDestination
+          == input.sshDestination);
+    CHECK(remembered.preferences.remoteBridgeCommand
+          == input.remoteBridgeCommand);
+
     auto edited = input;
     edited.mvlcHost = "replacement-controller";
     fixture.service->Submit(EditTunerTargetCommand{edited});
@@ -346,6 +390,13 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK_FALSE(snapshot->tuningSession.evidence.connectionVerificationFresh);
     CHECK(snapshot->target.sessionGate.outcome
           == TunerTargetSessionGateOutcome::NotRequested);
+    const auto rememberedAfterEdit = LoadApplicationPreferences(
+        fixture.storage);
+    REQUIRE(rememberedAfterEdit.success);
+    CHECK(rememberedAfterEdit.preferences.lastVerifiedEthernetHost
+          == input.mvlcHost);
+    CHECK(rememberedAfterEdit.preferences.remoteBridgeCommand
+          == input.remoteBridgeCommand);
 
     fixture.service->Submit(ClearTunerTargetCommand{});
     REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {

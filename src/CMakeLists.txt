@@ -16,6 +16,7 @@ add_library(fidget_ui STATIC
     ui/ConfigurationStage.cpp
     ui/Fonts.cpp
     ui/GuiShell.cpp
+    ui/HomePage.cpp
     ui/ProfileStage.cpp
     ui/ProjectStage.cpp
     ui/SessionStage.cpp

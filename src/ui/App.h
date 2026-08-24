@@ -6,6 +6,7 @@
 #include "ui/AcquisitionStage.h"
 #include "ui/ConfigurationStage.h"
 #include "ui/Fonts.h"
+#include "ui/HomePage.h"
 #include "ui/ProfileStage.h"
 #include "ui/ProjectStage.h"
 #include "ui/SessionStage.h"
@@ -42,6 +43,13 @@ private:
     void DrawMainMenu();
     void DrawAboutWindow();
     void DrawErrorPopup();
+    void DrawRedesignedPage(
+        const TunerSnapshot& snapshot,
+        const GuiViewState& view,
+        float shellHeight);
+    void DrawLegacyWorkspace(
+        const TunerSnapshot& snapshot,
+        float shellHeight);
     void DrawWorkflowPanel(const TunerSnapshot& snapshot);
     void DrawStagePanel(const TunerSnapshot& snapshot);
     void DrawActivityLogPanel(const TunerSnapshot& snapshot);
@@ -60,6 +68,7 @@ private:
     UiDialogs m_dialogs;
     Theme m_theme;
     Fonts m_fonts;
+    HomePage m_homePage;
     ProjectStage m_projectStage;
     SessionStage m_sessionStage;
     ProfileStage m_profileStage;
@@ -85,6 +94,7 @@ private:
     bool m_showWorkflow = true;
     bool m_showActivityLog = true;
     bool m_showAbout = false;
+    bool m_showLegacyWorkflow = false;
 
     // True until the default panel layout has been applied for the current
     // layout version.

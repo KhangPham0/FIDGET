@@ -91,7 +91,6 @@ TEST_CASE("the presenter covers every approved primary page")
         auto& evidence = homeDisconnected.tuningSession.evidence;
         evidence.endpointInputsValid = true;
         evidence.endpointEditingAllowed = true;
-        evidence.currentConnectionRequestValid = true;
         evidence.noRecoveryPending = true;
         evidence.operationIdle = true;
     }
@@ -966,12 +965,16 @@ TEST_CASE("connection checks and both tuning paths have explicit gates")
 {
     TunerSnapshot connected;
     auto& connection = connected.tuningSession.evidence;
-    connection.controllerConnected = true;
     connection.currentConnectionRequestValid = true;
     connection.operationIdle = true;
     auto view = PresentGui(connected);
     CHECK(view.page == GuiPage::HomeDisconnected);
     CHECK(Allows(view.allowedActions, GuiAction::Check));
+
+    connection.controllerConnected = true;
+    CHECK(Allows(
+        PresentGui(connected).allowedActions,
+        GuiAction::Check));
 
     connection.currentConnectionRequestValid = false;
     CHECK_FALSE(Allows(

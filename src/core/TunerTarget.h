@@ -29,12 +29,29 @@ struct TunerTargetInput
     std::string remoteBridgeCommand = "fidget_bridge";
 };
 
+// Parse-level validation for the editable Home fields. Hostnames and SSH
+// destinations are intentionally treated as opaque, non-empty endpoint
+// strings: aliases, IPv4, IPv6, and remote-side names are all valid inputs.
+// The module address is normalized by the one shared parser used by hardware.
+struct TunerTargetInputValidation
+{
+    bool success = false;
+    bool endpointValid = false;
+    bool moduleAddressValid = false;
+    std::string endpointMessage;
+    std::string moduleAddressMessage;
+    std::optional<TargetModuleAddress> normalizedModuleAddress;
+};
+
 [[nodiscard]] bool operator==(
     const TunerTargetInput& left,
     const TunerTargetInput& right) noexcept;
 [[nodiscard]] bool operator!=(
     const TunerTargetInput& left,
     const TunerTargetInput& right) noexcept;
+
+[[nodiscard]] TunerTargetInputValidation ValidateTunerTargetInput(
+    const TunerTargetInput& input);
 
 // A selection contains the one normalized address used by hardware and
 // workspace matching. The optional selection in TunerTargetState avoids using
