@@ -24,6 +24,7 @@ add_library(fidget_hardware STATIC
     TargetProbeOperation.cpp
     Transport.cpp
     TransportFactory.cpp
+    TuningSessionCoordinator.cpp
     VmeTransaction.cpp
 )
 

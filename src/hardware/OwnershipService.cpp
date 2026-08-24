@@ -12,6 +12,7 @@
 #include "core/StartupPreparation.h"
 #include "core/VmeProtocol.h"
 #include "hardware/DeterministicStartupOperation.h"
+#include "hardware/TuningSessionCoordinator.h"
 #include "hardware/VmeTransaction.h"
 
 #include <algorithm>
@@ -48,7 +49,8 @@ const char* DisconnectedMessage = "No tuner session";
 
 OwnershipService::OwnershipService(
     std::unique_ptr<ITransportFactory> transportFactory,
-    std::chrono::milliseconds watchdogInterval)
+    std::chrono::milliseconds watchdogInterval,
+    ApplicationStoragePaths applicationStoragePaths)
     : transportFactory_(std::move(transportFactory))
     , snapshot_(std::make_shared<const TunerSnapshot>())
     , watchdogInterval_(watchdogInterval)
@@ -61,11 +63,21 @@ OwnershipService::OwnershipService(
             std::move(snapshot),
             TunerStatusLevel::Error,
             "The ownership service has no transport factory.");
+        return;
     }
+
+    tuningSessionCoordinator_ = std::make_unique<TuningSessionCoordinator>(
+        *transportFactory_,
+        worker_,
+        std::move(applicationStoragePaths),
+        [this] { return CurrentSnapshot(); },
+        [this](TunerSnapshot snapshot) { Publish(std::move(snapshot)); });
 }
 
 OwnershipService::~OwnershipService()
 {
+    if (tuningSessionCoordinator_)
+        tuningSessionCoordinator_->CancelPendingProbe();
     StopWatchdog();
 
     if (worker_.IsAcceptingTasks())
@@ -95,6 +107,13 @@ OwnershipService::CurrentSnapshot() const
 
 void OwnershipService::Submit(TunerCommand command)
 {
+    if (tuningSessionCoordinator_
+        && TuningSessionCoordinator::Handles(command))
+    {
+        tuningSessionCoordinator_->Submit(std::move(command));
+        return;
+    }
+
     if (std::holds_alternative<UseCrateProjectCommand>(command))
     {
         StopWatchdog();

@@ -99,11 +99,32 @@ struct TunerTargetVerification
     TargetProbeResult result;
 };
 
+enum class TunerTargetSessionGateOutcome
+{
+    NotRequested,
+    ReadyForPreparation,
+    RefusedVerificationNotFresh,
+    RefusedStorageUnavailable,
+};
+
+// This is only the pre-session gate. A ready result records where future
+// coordinator work will persist its evidence, but does not claim hardware
+// ownership or that session preparation has started.
+struct TunerTargetSessionGateResult
+{
+    TunerTargetSessionGateOutcome outcome =
+        TunerTargetSessionGateOutcome::NotRequested;
+    std::string message;
+    std::string activityLogPath;
+    std::string recoveryJournalPath;
+};
+
 struct TunerTargetState
 {
     TunerTargetInput input;
     std::optional<TunerTargetSelection> selection;
     TunerTargetVerification verification;
+    TunerTargetSessionGateResult sessionGate;
 };
 
 // Freshness compares every editable connection field, including inactive SSH

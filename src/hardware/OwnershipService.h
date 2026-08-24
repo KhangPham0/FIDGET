@@ -1,6 +1,7 @@
 #ifndef FIDGET_HARDWARE_OWNERSHIP_SERVICE_H
 #define FIDGET_HARDWARE_OWNERSHIP_SERVICE_H
 
+#include "core/ApplicationStorage.h"
 #include "core/TunerControl.h"
 #include "hardware/AcquisitionReceiver.h"
 #include "hardware/CommandWorker.h"
@@ -28,6 +29,8 @@
 
 namespace fidget {
 
+class TuningSessionCoordinator;
+
 inline constexpr std::uint16_t HardwareIdRegister = 0x6008U;
 inline constexpr std::uint16_t FirmwareRevisionRegister = 0x600EU;
 inline constexpr std::uint16_t DaqModeRegister = 0x1300U;
@@ -45,7 +48,9 @@ public:
     explicit OwnershipService(
         std::unique_ptr<ITransportFactory> transportFactory,
         std::chrono::milliseconds watchdogInterval =
-            std::chrono::seconds(1));
+            std::chrono::seconds(1),
+        ApplicationStoragePaths applicationStoragePaths =
+            DefaultApplicationStoragePaths());
     ~OwnershipService() override;
 
     OwnershipService(const OwnershipService&) = delete;
@@ -179,6 +184,7 @@ private:
     std::mutex watchdogMutex_;
     std::condition_variable watchdogWakeup_;
     std::thread watchdog_;
+    std::unique_ptr<TuningSessionCoordinator> tuningSessionCoordinator_;
 };
 
 } // namespace fidget
