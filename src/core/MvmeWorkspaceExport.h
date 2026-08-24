@@ -41,9 +41,10 @@ struct Fw2051WorkspaceStartingStateResult
     std::optional<Fw2051WorkspaceStartingState> startingState;
 };
 
-// Failed evaluations never produce a starting state. A successful evaluation
-// with no resolved frontend values also has no working baseline. Non-frontend
-// unresolved statements remain attached to an otherwise usable partial state.
+// Failed and ConditionalAfterAccuTest evaluations never produce a starting
+// state. A successful evaluation with no resolved frontend values also has no
+// working baseline. Non-frontend unresolved statements remain attached to an
+// otherwise usable partial state.
 [[nodiscard]] Fw2051WorkspaceStartingStateResult
 ExtractFw2051WorkspaceStartingState(
     const MvmeInitScriptEvaluation& evaluation);

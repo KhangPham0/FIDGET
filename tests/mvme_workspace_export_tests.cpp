@@ -177,6 +177,17 @@ TEST_CASE("workspace starting state rejects failed evaluations")
     CHECK_FALSE(extracted.startingState.has_value());
     CHECK(extracted.message.find("failed") != std::string::npos);
 
+    MvmeInitScriptEvaluation conditional;
+    conditional.state =
+        MvmeInitScriptEvaluationState::ConditionalAfterAccuTest;
+    conditional.conditionalAccuTestLocation =
+        MvmeInitScriptLocation{0U, 2U};
+    conditional.finalFrontendValues.push_back(
+        {{0U, 1U}, 0U, 0x6110U, 8U});
+    extracted = ExtractFw2051WorkspaceStartingState(conditional);
+    CHECK_FALSE(extracted.startingState.has_value());
+    CHECK(extracted.message.find("conditional") != std::string::npos);
+
     MvmeInitScriptEvaluation empty;
     empty.state = MvmeInitScriptEvaluationState::Complete;
     extracted = ExtractFw2051WorkspaceStartingState(empty);

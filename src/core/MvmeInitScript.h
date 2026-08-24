@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ enum class MvmeInitScriptEvaluationState
 {
     Complete,
     CompleteWithUnresolvedNonFrontend,
+    ConditionalAfterAccuTest,
     Failed,
 };
 
@@ -35,6 +37,7 @@ enum class MvmeInitScriptUnresolvedReason
     InvalidValue,
     InvalidSelector,
     SelectorUnresolved,
+    ConditionalAfterAccuTest,
     MalformedScript,
 };
 
@@ -98,14 +101,23 @@ struct MvmeInitScriptEvaluation
     std::vector<MvmeInitScriptFrontendWrite> frontendWrites;
     std::vector<MvmeInitScriptFrontendValue> finalFrontendValues;
     std::vector<MvmeInitScriptUnresolvedStatement> unresolvedStatements;
+    // The first accu_test whose live-accumulator result makes every later
+    // statement conditional. Present only when such a test was encountered;
+    // ConditionalAfterAccuTest means at least one later frontend write could
+    // not be extracted as a definite write or final value.
+    std::optional<MvmeInitScriptLocation> conditionalAccuTestLocation;
 };
 
 // Passively evaluates the enabled initScripts of an already-located target in
 // workspace order. This function never executes a script, contacts hardware,
 // or treats workspace values as live restoration evidence. Unsupported or
-// unresolvable frontend-affecting statements make the result Failed. Other
-// unsupported statements remain explicitly listed for later reporting. The
-// resolved write/value collections must not be used when state is Failed.
+// unresolvable frontend-affecting statements make the result Failed. A plain
+// accu_test makes every later statement conditional because its live
+// accumulator result and execution options are unavailable; conditional
+// frontend writes produce ConditionalAfterAccuTest and are never extracted as
+// definite writes. Other unsupported statements remain explicitly listed for
+// later reporting. The resolved write/value collections must not be used as a
+// complete starting state when state is Failed or ConditionalAfterAccuTest.
 [[nodiscard]] MvmeInitScriptEvaluation EvaluateMvmeTargetInitScripts(
     const MvmeWorkspace& workspace,
     const MvmeWorkspaceTarget& target);

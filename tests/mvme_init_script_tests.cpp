@@ -302,6 +302,72 @@ TEST_CASE("unsupported non-frontend statements remain visible without guessing")
         CHECK_FALSE(unresolved.message.empty());
 }
 
+// MVME src/vme_script_exec.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// makes accu_test abort only under AbortOnError, while accu_test_warn always
+// continues. FIDGET has neither the live accumulator nor the run option.
+TEST_CASE("accu_test makes every later frontend write conditional")
+{
+    using namespace fidget;
+
+    const auto evaluation = EvaluateScripts({
+        Script(
+            "conditional_origin",
+            "0x6100 0\n"
+            "0x6110 20\n"
+            "accu_test eq 1 \"live check\"\n"
+            "0x6110 22\n"
+            "0x611A 100"),
+        Script(
+            "conditional_later_script",
+            "0x6100 2\n"
+            "0x6110 24"),
+    });
+
+    CHECK(evaluation.state
+          == MvmeInitScriptEvaluationState::ConditionalAfterAccuTest);
+    REQUIRE(evaluation.conditionalAccuTestLocation.has_value());
+    CHECK(evaluation.conditionalAccuTestLocation->scriptIndex == 0U);
+    CHECK(evaluation.conditionalAccuTestLocation->lineNumber == 3U);
+    REQUIRE(evaluation.frontendWrites.size() == 1U);
+    CHECK(evaluation.frontendWrites[0].registerOffset == 0x6110U);
+    CHECK(evaluation.frontendWrites[0].value == 20U);
+    CHECK(evaluation.finalFrontendValues.empty());
+    CHECK(FinalValue(evaluation, 0U, 0x6110U) == nullptr);
+    CHECK(FinalValue(evaluation, 0U, 0x611AU) == nullptr);
+    CHECK(FinalValue(evaluation, 2U, 0x6110U) == nullptr);
+    CHECK(static_cast<std::size_t>(std::count_if(
+              evaluation.unresolvedStatements.begin(),
+              evaluation.unresolvedStatements.end(),
+              [](const MvmeInitScriptUnresolvedStatement& unresolved) {
+                  return unresolved.reason
+                      == MvmeInitScriptUnresolvedReason::
+                          ConditionalAfterAccuTest;
+              }))
+          == 4U);
+}
+
+TEST_CASE("accu_test_warn reports without making later writes conditional")
+{
+    using namespace fidget;
+
+    const auto evaluation = EvaluateScripts({Script(
+        "warning_only",
+        "0x6100 0\n"
+        "accu_test_warn eq 1 \"live warning\"\n"
+        "0x6110 20")});
+
+    CHECK(evaluation.state
+          == MvmeInitScriptEvaluationState::
+              CompleteWithUnresolvedNonFrontend);
+    CHECK_FALSE(evaluation.conditionalAccuTestLocation.has_value());
+    REQUIRE(evaluation.frontendWrites.size() == 1U);
+    CHECK(evaluation.frontendWrites[0].registerOffset == 0x6110U);
+    CHECK(evaluation.frontendWrites[0].value == 20U);
+    REQUIRE(evaluation.unresolvedStatements.size() == 1U);
+    CHECK(evaluation.unresolvedStatements[0].impact
+          == MvmeInitScriptUnresolvedImpact::NonFrontend);
+}
+
 TEST_CASE("every unsupported frontend construct fails visibly")
 {
     using namespace fidget;

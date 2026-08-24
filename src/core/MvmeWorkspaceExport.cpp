@@ -52,6 +52,11 @@ std::string ValidateStartingState(
 {
     if (state.sourceEvaluationState == MvmeInitScriptEvaluationState::Failed)
         return "A failed init-script evaluation cannot be exported.";
+    if (state.sourceEvaluationState
+        == MvmeInitScriptEvaluationState::ConditionalAfterAccuTest)
+    {
+        return "A conditional init-script evaluation cannot be exported.";
+    }
     if (state.frontendValues.empty())
         return "The workspace starting state has no resolved frontend values.";
 
@@ -242,6 +247,14 @@ Fw2051WorkspaceStartingStateResult ExtractFw2051WorkspaceStartingState(
     {
         result.message =
             "The failed init-script evaluation has no working starting state.";
+        return result;
+    }
+    if (evaluation.state
+        == MvmeInitScriptEvaluationState::ConditionalAfterAccuTest)
+    {
+        result.message =
+            "The conditional init-script evaluation has no definite working "
+            "starting state.";
         return result;
     }
     if (evaluation.finalFrontendValues.empty())

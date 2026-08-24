@@ -758,6 +758,24 @@ private:
     {
         const auto first = TakeToken(line);
         const auto command = Lower(first.first);
+        if (statementsConditional_)
+        {
+            EvaluateConditionalLine(location, command, first, resolver);
+            return;
+        }
+        if (command == "accu_test")
+        {
+            result_.conditionalAccuTestLocation = location;
+            conditionalSelector_ = selector_;
+            AddIssue(
+                location,
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "An accu_test depends on a live accumulator; whether later "
+                "statements execute cannot be proven.");
+            statementsConditional_ = true;
+            return;
+        }
         if (command == "set")
         {
             EvaluateSet(location, first.second, resolver);
@@ -793,6 +811,124 @@ private:
         }
         EvaluateRelativeWrite(
             location, address.value, first.second, resolver, true);
+    }
+
+    void EvaluateConditionalLine(
+        const MvmeInitScriptLocation location,
+        const std::string_view command,
+        const std::pair<std::string_view, std::string_view>& first,
+        ValueResolver& resolver)
+    {
+        auto impact = MvmeInitScriptUnresolvedImpact::Frontend;
+        std::optional<std::uint32_t> frontendAddress;
+        std::string_view valueText;
+        if (command == "set")
+        {
+            const auto nameAndValue = TakeToken(first.second);
+            if (IsIdentifier(nameAndValue.first))
+                resolver.Invalidate(nameAndValue.first);
+            impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
+        }
+        else if (IsKnownNonFrontendCommand(command)
+                 || command == "accu_test")
+        {
+            impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
+        }
+        else if (command == "write" || command == "writeabs")
+        {
+            const auto mode = TakeToken(first.second);
+            const auto width = TakeToken(mode.second);
+            const auto addressToken = TakeToken(width.second);
+            const auto address = resolver.Resolve(addressToken.first);
+            if (address.success)
+            {
+                const auto relativeAddress = command == "writeabs"
+                    ? RelativeAbsoluteAddress(address.value)
+                    : std::optional<std::uint32_t>(address.value);
+                if (relativeAddress.has_value()
+                    && !IsFrontendAddress(*relativeAddress))
+                {
+                    impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
+                }
+                else
+                {
+                    frontendAddress = relativeAddress;
+                    valueText = addressToken.second;
+                }
+            }
+        }
+        else
+        {
+            const auto address = resolver.Resolve(first.first);
+            if (address.success && !IsFrontendAddress(address.value))
+                impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
+            else if (address.success)
+            {
+                frontendAddress = address.value;
+                valueText = first.second;
+            }
+        }
+
+        if (impact == MvmeInitScriptUnresolvedImpact::Frontend)
+        {
+            conditionalFrontendWrite_ = true;
+            TaintConditionalFrontendValue(
+                frontendAddress, valueText, resolver);
+        }
+        AddIssue(
+            location,
+            impact,
+            MvmeInitScriptUnresolvedReason::ConditionalAfterAccuTest,
+            impact == MvmeInitScriptUnresolvedImpact::Frontend
+                ? "A possible frontend write is conditional after an "
+                  "unprovable accu_test and was not extracted."
+                : "A non-frontend statement is conditional after an "
+                  "unprovable accu_test and was not interpreted.");
+    }
+
+    void TaintConditionalFrontendValue(
+        const std::optional<std::uint32_t> address,
+        const std::string_view valueText,
+        const ValueResolver& resolver)
+    {
+        if (!address.has_value()
+            || *address > std::numeric_limits<std::uint16_t>::max())
+        {
+            finalValues_.clear();
+            conditionalSelector_.reset();
+            return;
+        }
+
+        const auto registerOffset = static_cast<std::uint16_t>(*address);
+        if (registerOffset == Fw2051ScpSelectorRegister)
+        {
+            const auto value = resolver.Resolve(valueText);
+            if (!value.success
+                || value.value > Fw2051ScpBroadcastSelectorValue)
+            {
+                conditionalSelector_.reset();
+            }
+            else
+            {
+                conditionalSelector_ =
+                    static_cast<std::uint16_t>(value.value);
+            }
+            return;
+        }
+
+        if (FindFw2051ScpSetting(registerOffset) == nullptr)
+        {
+            finalValues_.clear();
+            return;
+        }
+        if (!conditionalSelector_.has_value()
+            || *conditionalSelector_ == Fw2051ScpBroadcastSelectorValue)
+        {
+            for (std::uint16_t quad = 0U; quad < Fw2051ScpQuadCount; ++quad)
+                finalValues_.erase({quad, registerOffset});
+            return;
+        }
+        finalValues_.erase({*conditionalSelector_, registerOffset});
     }
 
     void EvaluateSet(
@@ -1019,7 +1155,7 @@ private:
     static bool IsKnownNonFrontendCommand(const std::string_view command)
     {
         return command == "read" || command == "readabs"
-            || command == "accu_mask_rotate" || command == "accu_test"
+            || command == "accu_mask_rotate"
             || command == "accu_test_warn" || command == "wait"
             || command == "print";
     }
@@ -1041,7 +1177,10 @@ private:
             result_.unresolvedStatements.end(),
             [](const MvmeInitScriptUnresolvedStatement& unresolved) {
                 return unresolved.impact
-                    == MvmeInitScriptUnresolvedImpact::Frontend;
+                        == MvmeInitScriptUnresolvedImpact::Frontend
+                    && unresolved.reason
+                        != MvmeInitScriptUnresolvedReason::
+                            ConditionalAfterAccuTest;
             });
         if (frontendFailure)
         {
@@ -1049,6 +1188,14 @@ private:
             result_.message =
                 "Init-script evaluation failed because at least one "
                 "frontend-affecting statement was unresolved.";
+        }
+        else if (conditionalFrontendWrite_)
+        {
+            result_.state = MvmeInitScriptEvaluationState::
+                ConditionalAfterAccuTest;
+            result_.message =
+                "Later frontend writes were conditional after an "
+                "unprovable accu_test and were not extracted.";
         }
         else if (!result_.unresolvedStatements.empty())
         {
@@ -1070,6 +1217,9 @@ private:
     const MvmeWorkspaceTarget& target_;
     MvmeInitScriptEvaluation result_;
     std::optional<std::uint16_t> selector_;
+    std::optional<std::uint16_t> conditionalSelector_;
+    bool statementsConditional_ = false;
+    bool conditionalFrontendWrite_ = false;
     std::map<
         std::pair<std::uint16_t, std::uint16_t>,
         MvmeInitScriptFrontendValue> finalValues_;
