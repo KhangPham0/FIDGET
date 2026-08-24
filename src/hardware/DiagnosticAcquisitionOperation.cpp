@@ -10,8 +10,6 @@
 namespace fidget {
 namespace {
 
-constexpr std::uint16_t SupportedMdpp32HardwareId = 0x5007U;
-constexpr std::uint16_t SupportedMdpp32McpdHardwareId = 0x500CU;
 constexpr std::uint32_t ExpectedMvlcHardwareId = 0x5008U;
 constexpr std::uint16_t ResetCommandValue = 1U;
 constexpr std::uint16_t StoppedAcquisitionValue = 0U;
@@ -37,12 +35,6 @@ std::string RegisterOperationError(
         static_cast<unsigned>(registerOffset));
     return std::string("Could not ") + operation + ' ' + name
         + " at register 0x" + registerText + ": " + error;
-}
-
-bool IsSupportedMdpp32(const std::uint16_t hardwareId)
-{
-    return hardwareId == SupportedMdpp32HardwareId
-        || hardwareId == SupportedMdpp32McpdHardwareId;
 }
 
 std::uint32_t MakeOwnershipToken()
@@ -187,9 +179,13 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
         fail(RegisterOperationError(
             "read", "hardware ID", DiagnosticHardwareIdRegister, error));
     }
-    else if (!IsSupportedMdpp32(result.hardwareId))
+    else if (!IsWriteApprovedMdpp32HardwareId(result.hardwareId))
     {
-        fail("The target does not identify as a supported MDPP-32 module.");
+        fail(result.hardwareId == Mdpp32AlternateHardwareId
+                 ? "MDPP-32 v2 acquisition writes await recorded hardware "
+                   "acceptance."
+                 : "The target does not identify as a supported MDPP-32 "
+                   "module.");
     }
     if (failure.empty()
         && !readRegister(
@@ -261,13 +257,22 @@ DiagnosticAcquisitionPreparationResult PrepareDiagnosticAcquisition(
                 fail("Could not validate configured MDPP at "
                      + Hexadecimal32(configuredBase) + ": " + moduleError);
             }
-            else if (!IsSupportedMdpp32(isolation.hardwareId))
+            else if (!IsWriteApprovedMdpp32HardwareId(isolation.hardwareId))
             {
-                isolation.message =
-                    "The configured address does not identify as a "
-                    "supported MDPP-32 module.";
-                fail("Configured address " + Hexadecimal32(configuredBase)
-                     + " is not a supported MDPP-32 module.");
+                isolation.message = isolation.hardwareId
+                        == Mdpp32AlternateHardwareId
+                    ? "MDPP-32 v2 isolation writes await recorded hardware "
+                      "acceptance."
+                    : "The configured address does not identify as a "
+                      "supported MDPP-32 module.";
+                fail(isolation.hardwareId == Mdpp32AlternateHardwareId
+                         ? "Configured MDPP-32 v2 at "
+                               + Hexadecimal32(configuredBase)
+                               + " cannot be isolated until write support "
+                                 "has recorded hardware acceptance."
+                         : "Configured address "
+                               + Hexadecimal32(configuredBase)
+                               + " is not a supported MDPP-32 module.");
             }
             else if (!readRegister(
                     configuredBase,

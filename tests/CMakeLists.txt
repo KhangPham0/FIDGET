@@ -300,6 +300,20 @@ target_link_libraries(target_probe_operation_tests PRIVATE
 add_test(NAME target_probe_operation_tests COMMAND target_probe_operation_tests)
 
 add_executable(
+    prepare_tuning_session_operation_tests
+    prepare_tuning_session_operation_tests.cpp
+)
+target_link_libraries(prepare_tuning_session_operation_tests PRIVATE
+    fidget_hardware
+    doctest::doctest
+)
+
+add_test(
+    NAME prepare_tuning_session_operation_tests
+    COMMAND prepare_tuning_session_operation_tests
+)
+
+add_executable(
     tuning_session_coordinator_tests
     tuning_session_coordinator_tests.cpp
 )

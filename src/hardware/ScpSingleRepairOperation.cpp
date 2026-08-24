@@ -198,11 +198,14 @@ ScpSingleRepairResult RepairFw2051ScpProfileValue(
         appendFailure(RegisterOperationError(
             "read", "hardware ID", HardwareIdRegister, error));
     }
-    else if (hardwareId != Mdpp32HardwareId &&
-             hardwareId != Mdpp32AlternateHardwareId)
+    else if (!IsWriteApprovedMdpp32HardwareId(hardwareId))
     {
         appendFailure(
-            "The target does not identify as a supported MDPP-32 module.");
+            hardwareId == Mdpp32AlternateHardwareId
+                ? "MDPP-32 v2 repair writes await recorded hardware "
+                  "acceptance."
+                : "The target does not identify as a write-approved "
+                  "MDPP-32 module.");
     }
 
     if (failure.empty() &&

@@ -281,6 +281,158 @@ ControllerProbeResult RunControllerProbe(
     return finish(std::move(result));
 }
 
+TargetProbeResult ProbeTargetOnOpenTransport(
+    ICommandTransport& transport,
+    const TargetProbeRequest& request,
+    const std::atomic<bool>& cancellationRequested)
+{
+    TargetProbeResult result;
+    result.evidence.noControlTaken = true;
+    result.evidence.noVmeOrModuleSettingWritesSent = true;
+
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, {});
+        return result;
+    }
+
+    std::uint16_t nextSuperReference = 1U;
+    const auto mvlc = ReadLocalRegisters(
+        transport,
+        TargetProbeMvlcRegisterOrder.data(),
+        TargetProbeMvlcRegisterOrder.size(),
+        nextSuperReference,
+        cancellationRequested);
+    if (!mvlc.success)
+    {
+        result.outcome = TargetOutcome(ClassifyCommunicationFailure(
+            mvlc.error, cancellationRequested));
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, mvlc.error);
+        return result;
+    }
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, {});
+        return result;
+    }
+    if (mvlc.values.size() != TargetProbeMvlcRegisterOrder.size())
+    {
+        result.outcome = TargetProbeOutcome::MalformedResponse;
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome,
+            "unexpected MVLC identity response size");
+        return result;
+    }
+
+    result.evidence.controllerEndpointReached = true;
+    result.mvlcHardwareId = mvlc.values[0U];
+    result.mvlcFirmwareRevision = mvlc.values[1U];
+    result.mvlcDaqMode = mvlc.values[2U];
+    if (*result.mvlcHardwareId != TargetProbeExpectedMvlcHardwareId)
+    {
+        result.outcome = TargetProbeOutcome::WrongMvlcIdentity;
+        result.message =
+            "The controller reached during Check is not the supported MVLC.";
+        return result;
+    }
+    if (*result.mvlcFirmwareRevision != TargetProbeExpectedMvlcFirmware)
+    {
+        result.outcome = TargetProbeOutcome::WrongMvlcFirmware;
+        result.message = "The controller reached during Check is not running "
+                         "exact FW0046.";
+        return result;
+    }
+    result.evidence.supportedControllerTypeAndFirmwareReverified = true;
+    if (*result.mvlcDaqMode != 0U)
+    {
+        result.outcome = TargetProbeOutcome::ControllerDaqActive;
+        result.evidence.activeControllerUseDetected = true;
+        result.message = ActiveUseMessage;
+        return result;
+    }
+    result.evidence.controllerDaqIdleReverified = true;
+
+    std::uint32_t nextStackReference = 1U;
+    const auto readTarget = [&](const std::uint16_t registerOffset) {
+        return ReadVmeD16(
+            transport,
+            request.targetAddress.FullA32Value() + registerOffset,
+            nextSuperReference,
+            nextStackReference,
+            cancellationRequested);
+    };
+    const auto failRead = [&](const MvlcVmeReadResult& read) {
+        result.outcome = TargetOutcome(ClassifyCommunicationFailure(
+            read.error, cancellationRequested));
+        result.message = TargetFailureMessage(result.outcome, read.error);
+        return result;
+    };
+
+    const auto hardware = readTarget(TargetProbeMdppRegisterOrder[0U]);
+    if (!hardware.success)
+        return failRead(hardware);
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = TargetFailureMessage(result.outcome, {});
+        return result;
+    }
+    result.targetHardwareId = hardware.value;
+    if (!IsSupportedMdpp32HardwareId(hardware.value))
+    {
+        result.outcome = TargetProbeOutcome::WrongTargetIdentity;
+        result.message =
+            "The selected target is not the supported MDPP-32 SCP.";
+        return result;
+    }
+
+    const auto firmware = readTarget(TargetProbeMdppRegisterOrder[1U]);
+    if (!firmware.success)
+        return failRead(firmware);
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = TargetFailureMessage(result.outcome, {});
+        return result;
+    }
+    result.targetFirmwareRevision = firmware.value;
+    if (firmware.value != Mdpp32ScpFirmwareRevisionFw2051)
+    {
+        result.outcome = TargetProbeOutcome::WrongTargetFirmware;
+        result.message = "The selected target is not running exact FW2051.";
+        return result;
+    }
+    result.evidence.targetIdentityAndFirmwareVerified = true;
+
+    const auto acquisition = readTarget(TargetProbeMdppRegisterOrder[2U]);
+    if (!acquisition.success)
+        return failRead(acquisition);
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = TargetFailureMessage(result.outcome, {});
+        return result;
+    }
+    result.targetAcquisitionControl = acquisition.value;
+    if (acquisition.value != Fw2051StopAcquisitionValue)
+    {
+        result.outcome = TargetProbeOutcome::TargetAcquisitionActive;
+        result.evidence.activeControllerUseDetected = true;
+        result.message = ActiveUseMessage;
+        return result;
+    }
+
+    result.evidence.targetAcquisitionStoppedVerified = true;
+    result.outcome = TargetProbeOutcome::VerifiedIdle;
+    result.message = "The target module is verified and stopped.";
+    return result;
+}
+
 TargetProbeResult RunTargetProbe(
     ITransportFactory& transportFactory,
     const TargetProbeRequest& request,
@@ -289,7 +441,6 @@ TargetProbeResult RunTargetProbe(
     TargetProbeResult result;
     result.evidence.noControlTaken = true;
     result.evidence.noVmeOrModuleSettingWritesSent = true;
-
     if (cancellationRequested.load())
     {
         result.outcome = TargetProbeOutcome::Cancelled;
@@ -314,7 +465,6 @@ TargetProbeResult RunTargetProbe(
         current.temporaryConnectionClosed = true;
         return current;
     };
-
     auto* transport = session->CommandTransport();
     if (!transport)
     {
@@ -324,7 +474,6 @@ TargetProbeResult RunTargetProbe(
             "the transport factory returned no command transport");
         return finish(std::move(result));
     }
-
     const auto opened = transport->Open(
         EndpointHost(request.endpoint), EndpointPort(request.endpoint));
     if (!opened.success)
@@ -335,140 +484,10 @@ TargetProbeResult RunTargetProbe(
             result.outcome, opened.error);
         return finish(std::move(result));
     }
+
+    result = ProbeTargetOnOpenTransport(
+        *transport, request, cancellationRequested);
     result.temporaryConnectionOpened = true;
-
-    std::uint16_t nextSuperReference = 1U;
-    const auto mvlc = ReadLocalRegisters(
-        *transport,
-        TargetProbeMvlcRegisterOrder.data(),
-        TargetProbeMvlcRegisterOrder.size(),
-        nextSuperReference,
-        cancellationRequested);
-    if (!mvlc.success)
-    {
-        result.outcome = TargetOutcome(ClassifyCommunicationFailure(
-            mvlc.error, cancellationRequested));
-        result.message = ControllerRevalidationFailureMessage(
-            result.outcome, mvlc.error);
-        return finish(std::move(result));
-    }
-    if (cancellationRequested.load())
-    {
-        result.outcome = TargetProbeOutcome::Cancelled;
-        result.message = ControllerRevalidationFailureMessage(
-            result.outcome, {});
-        return finish(std::move(result));
-    }
-    if (mvlc.values.size() != TargetProbeMvlcRegisterOrder.size())
-    {
-        result.outcome = TargetProbeOutcome::MalformedResponse;
-        result.message = ControllerRevalidationFailureMessage(
-            result.outcome,
-            "unexpected MVLC identity response size");
-        return finish(std::move(result));
-    }
-
-    result.evidence.controllerEndpointReached = true;
-    result.mvlcHardwareId = mvlc.values[0U];
-    result.mvlcFirmwareRevision = mvlc.values[1U];
-    result.mvlcDaqMode = mvlc.values[2U];
-    if (*result.mvlcHardwareId != TargetProbeExpectedMvlcHardwareId)
-    {
-        result.outcome = TargetProbeOutcome::WrongMvlcIdentity;
-        result.message =
-            "The controller reached during Check is not the supported MVLC.";
-        return finish(std::move(result));
-    }
-    if (*result.mvlcFirmwareRevision != TargetProbeExpectedMvlcFirmware)
-    {
-        result.outcome = TargetProbeOutcome::WrongMvlcFirmware;
-        result.message = "The controller reached during Check is not running "
-                         "exact FW0046.";
-        return finish(std::move(result));
-    }
-    result.evidence.supportedControllerTypeAndFirmwareReverified = true;
-    if (*result.mvlcDaqMode != 0U)
-    {
-        result.outcome = TargetProbeOutcome::ControllerDaqActive;
-        result.evidence.activeControllerUseDetected = true;
-        result.message = ActiveUseMessage;
-        return finish(std::move(result));
-    }
-    result.evidence.controllerDaqIdleReverified = true;
-
-    std::uint32_t nextStackReference = 1U;
-    const auto readTarget = [&](const std::uint16_t registerOffset) {
-        return ReadVmeD16(
-            *transport,
-            request.targetAddress.FullA32Value() + registerOffset,
-            nextSuperReference,
-            nextStackReference,
-            cancellationRequested);
-    };
-    const auto failRead = [&](const MvlcVmeReadResult& read) {
-        result.outcome = TargetOutcome(ClassifyCommunicationFailure(
-            read.error, cancellationRequested));
-        result.message = TargetFailureMessage(result.outcome, read.error);
-        return finish(std::move(result));
-    };
-
-    const auto hardware = readTarget(TargetProbeMdppRegisterOrder[0U]);
-    if (!hardware.success)
-        return failRead(hardware);
-    if (cancellationRequested.load())
-    {
-        result.outcome = TargetProbeOutcome::Cancelled;
-        result.message = TargetFailureMessage(result.outcome, {});
-        return finish(std::move(result));
-    }
-    result.targetHardwareId = hardware.value;
-    if (!IsSupportedMdpp32HardwareId(hardware.value))
-    {
-        result.outcome = TargetProbeOutcome::WrongTargetIdentity;
-        result.message =
-            "The selected target is not the supported MDPP-32 SCP.";
-        return finish(std::move(result));
-    }
-
-    const auto firmware = readTarget(TargetProbeMdppRegisterOrder[1U]);
-    if (!firmware.success)
-        return failRead(firmware);
-    if (cancellationRequested.load())
-    {
-        result.outcome = TargetProbeOutcome::Cancelled;
-        result.message = TargetFailureMessage(result.outcome, {});
-        return finish(std::move(result));
-    }
-    result.targetFirmwareRevision = firmware.value;
-    if (firmware.value != Mdpp32ScpFirmwareRevisionFw2051)
-    {
-        result.outcome = TargetProbeOutcome::WrongTargetFirmware;
-        result.message = "The selected target is not running exact FW2051.";
-        return finish(std::move(result));
-    }
-    result.evidence.targetIdentityAndFirmwareVerified = true;
-
-    const auto acquisition = readTarget(TargetProbeMdppRegisterOrder[2U]);
-    if (!acquisition.success)
-        return failRead(acquisition);
-    if (cancellationRequested.load())
-    {
-        result.outcome = TargetProbeOutcome::Cancelled;
-        result.message = TargetFailureMessage(result.outcome, {});
-        return finish(std::move(result));
-    }
-    result.targetAcquisitionControl = acquisition.value;
-    if (acquisition.value != Fw2051StopAcquisitionValue)
-    {
-        result.outcome = TargetProbeOutcome::TargetAcquisitionActive;
-        result.evidence.activeControllerUseDetected = true;
-        result.message = ActiveUseMessage;
-        return finish(std::move(result));
-    }
-
-    result.evidence.targetAcquisitionStoppedVerified = true;
-    result.outcome = TargetProbeOutcome::VerifiedIdle;
-    result.message = "The target module is verified and stopped.";
     return finish(std::move(result));
 }
 

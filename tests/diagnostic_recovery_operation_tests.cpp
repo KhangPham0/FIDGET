@@ -513,6 +513,44 @@ TEST_CASE("a target MDPP identity mismatch refuses every recovery write")
     CHECK(std::filesystem::exists(journal.Get()));
 }
 
+TEST_CASE("read-only MDPP-32 v2 identity evidence does not authorize recovery writes")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    auto record = MakeRecord();
+    record.mdppHardwareId = Mdpp32AlternateHardwareId;
+    REQUIRE(SaveTunerRecoveryJournal(record, journal.Get()).success);
+
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueRecoveryFingerprint(transport, references, record);
+    QueueTargetIdentity(
+        transport,
+        references,
+        record,
+        Mdpp32AlternateHardwareId,
+        Mdpp32ScpFirmwareRevisionFw2051);
+
+    const std::atomic<bool> cancelled{false};
+    const auto result = RecoverDiagnosticOrphan(
+        transport, {record, journal.Get()}, cancelled);
+
+    INFO(result.message);
+    CHECK(result.state == DiagnosticOrphanRecoveryState::Failed);
+    CHECK(result.message.find("await recorded hardware acceptance")
+          != std::string::npos);
+    CHECK_FALSE(result.hardwareWriteSent);
+    const auto operations = DecodeWireOperations(transport);
+    CHECK(std::none_of(
+        operations.begin(),
+        operations.end(),
+        [](const WireOperation& operation) { return operation.write; }));
+    CHECK(std::filesystem::exists(journal.Get()));
+}
+
 TEST_CASE("an untested MDPP firmware refuses active-orphan recovery writes")
 {
     using namespace fidget;

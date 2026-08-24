@@ -276,6 +276,15 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
             + Hexadecimal32(targetHardwareId.value)
             + ". No recovery write was sent.");
     }
+    if (!IsWriteApprovedMdpp32HardwareId(targetHardwareId.value))
+    {
+        return fail(
+            targetHardwareId.value == Mdpp32AlternateHardwareId
+                ? "MDPP-32 v2 recovery writes await recorded hardware "
+                  "acceptance. No recovery write was sent; retain the journal."
+                : "The journaled target is not a write-approved MDPP-32. "
+                  "No recovery write was sent; retain the journal.");
+    }
     if (targetFirmware.value != Mdpp32ScpFirmwareRevisionFw2051)
     {
         return fail(
@@ -352,9 +361,8 @@ DiagnosticOrphanRecoveryResult RecoverDiagnosticOrphan(
                     + Hexadecimal32(baseAddress)
                     + " before recovery: " + isolatedHardwareId.error);
             }
-            if (isolatedHardwareId.value != Mdpp32HardwareId
-                && isolatedHardwareId.value
-                    != Mdpp32AlternateHardwareId)
+            if (!IsWriteApprovedMdpp32HardwareId(
+                    isolatedHardwareId.value))
             {
                 return fail(
                     "Unsupported isolated-module hardware ID at "

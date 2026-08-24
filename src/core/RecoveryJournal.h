@@ -186,6 +186,7 @@ struct TunerRecoverySaveResult
 {
     bool success = false;
     std::string message;
+    bool destinationAlreadyExists = false;
     // Installation can have completed even when the following directory
     // durability sync fails. Callers must treat this as retained recovery
     // evidence while refusing any hardware action that required save success.
@@ -246,6 +247,25 @@ ClassifyTunerRecoveryV5LiveValue(
 // EnsureApplicationStorageDirectories(); legacy project-adjacent callers use
 // the already-existing project directory.
 [[nodiscard]] TunerRecoverySaveResult SaveTunerRecoveryJournal(
+    const TunerRecoveryRecord& record,
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime = {});
+
+// Installs a fully serialized journal with a no-replace filesystem operation.
+// A concurrent or stale destination wins: FIDGET never overwrites it. The
+// optional writer is a deterministic fault-injection seam; a failed temporary
+// write leaves no destination and no discoverable staging entry.
+[[nodiscard]] TunerRecoverySaveResult CreateTunerRecoveryJournalExclusive(
+    const TunerRecoveryRecord& record,
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime = {});
+
+// Replaces only an identity-only v5 Preparing record with the corresponding
+// complete, selector-parked snapshot record. The replacement is installed by
+// one same-filesystem rename, never by deleting the Prepared authority first.
+// A failed temporary write leaves the existing Prepared bytes untouched.
+[[nodiscard]] TunerRecoverySaveResult
+PromoteTunerRecoveryJournalV5Snapshot(
     const TunerRecoveryRecord& record,
     const std::string& path,
     const TunerRecoveryJournalSaveRuntime& runtime = {});

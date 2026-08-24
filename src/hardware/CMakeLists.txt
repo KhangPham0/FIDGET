@@ -16,6 +16,7 @@ add_library(fidget_hardware STATIC
     MvlcCommandTransport.cpp
     MvlcDataReceiver.cpp
     OwnershipService.cpp
+    PrepareTuningSessionOperation.cpp
     ScpBulkApplyOperation.cpp
     ScpCaptureOperation.cpp
     ScpSingleRepairOperation.cpp

@@ -134,10 +134,11 @@ void QueueWrite(
 
 void QueueIdentity(
     fidget::test::FakeCommandTransport& transport,
-    TransactionReferences& references)
+    TransactionReferences& references,
+    const std::uint16_t hardwareId = fidget::Mdpp32HardwareId)
 {
     QueueRead(
-        transport, references, Base + 0x6008U, fidget::Mdpp32HardwareId);
+        transport, references, Base + 0x6008U, hardwareId);
     QueueRead(
         transport,
         references,
@@ -308,6 +309,32 @@ void Open(fidget::test::FakeCommandTransport& transport)
 }
 
 } // namespace
+
+TEST_CASE("single repair does not convert read-only MDPP-32 v2 recognition into write authority")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references;
+    QueueIdentity(transport, references, Mdpp32AlternateHardwareId);
+    const std::atomic<bool> cancelled{false};
+    const auto result = RepairFw2051ScpProfileValue(
+        transport,
+        {Base, 7U, 0x611AU, 200U, 250U},
+        cancelled,
+        AllowAllGates());
+
+    INFO(result.message);
+    CHECK(result.state == ScpSingleRepairState::Failed);
+    CHECK(result.message.find("await recorded hardware acceptance")
+          != std::string::npos);
+    CHECK_FALSE(result.writeAttempted);
+    const auto operations = DecodeWireOperations(transport);
+    REQUIRE(operations.size() == 1U);
+    CHECK_FALSE(operations.front().write);
+}
 
 TEST_CASE("single repair stops a running module and retains profile values")
 {

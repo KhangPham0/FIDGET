@@ -13,10 +13,36 @@ inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
 inline constexpr std::uint16_t Mdpp32AlternateHardwareId = 0x500CU;
 inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
 
+// Read-only recognition and write authorization are intentionally separate.
+// The latter may widen only after the corresponding hardware-acceptance
+// checklist evidence is recorded.
+inline constexpr std::array<std::uint16_t, 2U>
+    Mdpp32ReadOnlyAcceptedHardwareIds{{
+        Mdpp32HardwareId,
+        Mdpp32AlternateHardwareId,
+    }};
+inline constexpr std::array<std::uint16_t, 1U>
+    Mdpp32WriteApprovedHardwareIds{{Mdpp32HardwareId}};
+
 constexpr bool IsSupportedMdpp32HardwareId(const std::uint16_t hardwareId)
 {
-    return hardwareId == Mdpp32HardwareId
-        || hardwareId == Mdpp32AlternateHardwareId;
+    for (const auto accepted : Mdpp32ReadOnlyAcceptedHardwareIds)
+    {
+        if (hardwareId == accepted)
+            return true;
+    }
+    return false;
+}
+
+constexpr bool IsWriteApprovedMdpp32HardwareId(
+    const std::uint16_t hardwareId)
+{
+    for (const auto accepted : Mdpp32WriteApprovedHardwareIds)
+    {
+        if (hardwareId == accepted)
+            return true;
+    }
+    return false;
 }
 
 inline constexpr std::uint16_t Fw2051AcquisitionControlRegister = 0x603AU;

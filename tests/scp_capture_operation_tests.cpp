@@ -525,8 +525,11 @@ TEST_CASE("unsupported hardware and firmware stop before selector writes")
         std::uint16_t firmware;
         const char* messageFragment;
     };
-    const std::array<Rejection, 3> rejections{{
-        {0x1234U, Mdpp32ScpFirmwareRevisionFw2051, "not an MDPP-32"},
+    const std::array<Rejection, 4> rejections{{
+        {0x1234U, Mdpp32ScpFirmwareRevisionFw2051, "write-approved MDPP-32"},
+        {Mdpp32AlternateHardwareId,
+         Mdpp32ScpFirmwareRevisionFw2051,
+         "awaits recorded hardware acceptance"},
         {Mdpp32HardwareId, 0x1051U, "supported SCP FW2051"},
         {Mdpp32HardwareId, 0x2052U, "supported SCP FW2051"},
     }};

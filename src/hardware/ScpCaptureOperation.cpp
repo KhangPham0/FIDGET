@@ -50,6 +50,21 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
     const std::atomic<bool>& cancellationRequested,
     const ScpCaptureOwnershipGate& ownershipGate)
 {
+    return CaptureFw2051ScpConfiguration(
+        transport,
+        baseAddress,
+        cancellationRequested,
+        ownershipGate,
+        {});
+}
+
+ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
+    ICommandTransport& transport,
+    const std::uint32_t baseAddress,
+    const std::atomic<bool>& cancellationRequested,
+    const ScpCaptureOwnershipGate& ownershipGate,
+    const ScpCaptureRuntime& runtime)
+{
     ScpCaptureOperationResult operation;
     auto& result = operation.configuration;
     result.state = ScpConfigurationState::Reading;
@@ -70,6 +85,16 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
             ScpCaptureGateStatus::CommunicationUnavailable;
         return operation;
     }
+
+    const auto delay = [&runtime](const std::chrono::microseconds duration) {
+        if (runtime.delay)
+            runtime.delay(duration);
+        else
+            std::this_thread::sleep_for(duration);
+    };
+    const auto checkpoint = [&runtime](const ScpCaptureCheckpoint& event) {
+        return !runtime.checkpoint || runtime.checkpoint(event);
+    };
 
     const auto initialGate = ownershipGate(
         "the SCP configuration snapshot");
@@ -153,6 +178,8 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
     };
 
     std::string failure;
+    bool selectionAttempted = false;
+    bool ownershipCertain = true;
     for (const auto& read : globalReads)
     {
         std::string error;
@@ -162,12 +189,27 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
                 "read", read.name, read.registerOffset, error);
             break;
         }
+        if (!checkpoint({
+                ScpCaptureCheckpointKind::GlobalRegisterRead,
+                std::nullopt,
+                read.registerOffset,
+            }))
+        {
+            failure = "SCP configuration capture was interrupted after a "
+                      "global register read.";
+            ownershipCertain = false;
+            operation.lastGateStatus = ScpCaptureGateStatus::Cancelled;
+            break;
+        }
     }
 
-    if (failure.empty() && result.hardwareId != Mdpp32HardwareId &&
-        result.hardwareId != Mdpp32AlternateHardwareId)
+    if (failure.empty()
+        && !IsWriteApprovedMdpp32HardwareId(result.hardwareId))
     {
-        failure = "The selected VME base is not an MDPP-32 or MDPP-32 v2.";
+        failure = result.hardwareId == Mdpp32AlternateHardwareId
+            ? "MDPP-32 v2 selector-write support awaits recorded hardware "
+              "acceptance."
+            : "The selected VME base is not a write-approved MDPP-32.";
     }
     if (failure.empty() &&
         result.firmwareRevision != Mdpp32ScpFirmwareRevisionFw2051)
@@ -177,15 +219,13 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
             "firmware; this register map cannot be applied safely.";
     }
 
-    bool selectionAttempted = false;
-    bool ownershipCertain = true;
     result.quads.reserve(Fw2051ScpQuadCount);
 
     for (std::uint16_t quadIndex = 0U;
          failure.empty() && quadIndex < Fw2051ScpQuadCount;
          ++quadIndex)
     {
-        if (quadIndex > 0U)
+        if (quadIndex > 0U || runtime.gateBeforeFirstSelector)
         {
             const auto gate = ownershipGate(
                 "SCP configuration bank " + std::to_string(quadIndex));
@@ -212,7 +252,19 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
                 selectorError);
             break;
         }
-        std::this_thread::sleep_for(SelectorSettleTime);
+        delay(SelectorSettleTime);
+        if (!checkpoint({
+                ScpCaptureCheckpointKind::SelectorSettled,
+                quadIndex,
+                Fw2051ScpSelectorRegister,
+            }))
+        {
+            failure = "SCP configuration capture was interrupted after "
+                      "selecting quad " + std::to_string(quadIndex) + '.';
+            ownershipCertain = false;
+            operation.lastGateStatus = ScpCaptureGateStatus::Cancelled;
+            break;
+        }
 
         for (const auto& definition : Fw2051ScpSettingRegistry)
         {
@@ -234,6 +286,19 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
             {
                 failure =
                     "The FW2051 registry does not map every captured value.";
+                break;
+            }
+            if (!checkpoint({
+                    ScpCaptureCheckpointKind::BankedRegisterRead,
+                    quadIndex,
+                    definition.registerOffset,
+                }))
+            {
+                failure = "SCP configuration capture was interrupted after "
+                          "a banked register read in quad "
+                    + std::to_string(quadIndex) + '.';
+                ownershipCertain = false;
+                operation.lastGateStatus = ScpCaptureGateStatus::Cancelled;
                 break;
             }
         }
@@ -264,7 +329,20 @@ ScpCaptureOperationResult CaptureFw2051ScpConfiguration(
             0U, true, parkingError);
         if (result.selectorParkedAtQuadZero)
         {
-            std::this_thread::sleep_for(SelectorSettleTime);
+            delay(SelectorSettleTime);
+            if (!checkpoint({
+                    ScpCaptureCheckpointKind::SelectorParked,
+                    0U,
+                    Fw2051ScpSelectorRegister,
+                }))
+            {
+                ownershipCertain = false;
+                operation.lastGateStatus = ScpCaptureGateStatus::Cancelled;
+                if (!failure.empty())
+                    failure += ' ';
+                failure += "SCP configuration capture was interrupted after "
+                           "parking the selector.";
+            }
         }
         else
         {

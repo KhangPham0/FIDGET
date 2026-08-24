@@ -496,6 +496,37 @@ TEST_CASE("an unsupported target is rejected before isolation or journaling")
     CHECK_FALSE(std::filesystem::exists(journal.Get()));
 }
 
+TEST_CASE("read-only MDPP-32 v2 recognition does not authorize acquisition writes")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    JournalPath journal;
+    FakeCommandTransport transport;
+    Open(transport);
+    TransactionReferences references{0x5000U, 0x9E000001U};
+    QueueTargetValidation(
+        transport, references, Mdpp32AlternateHardwareId);
+
+    const std::atomic<bool> cancelled{false};
+    const auto prepared = PrepareDiagnosticAcquisition(
+        transport,
+        MakeRequest(journal.Get()),
+        cancelled,
+        AllowOwnership());
+
+    INFO(prepared.acquisition.message);
+    CHECK(prepared.acquisition.state == DiagnosticAcquisitionState::Failed);
+    CHECK(prepared.acquisition.message.find(
+              "await recorded hardware acceptance")
+          != std::string::npos);
+    CHECK_FALSE(prepared.acquisition.recoveryJournalPrepared);
+    const auto operations = DecodeWireOperations(transport);
+    REQUIRE(operations.size() == 1U);
+    CHECK_FALSE(operations.front().write);
+    CHECK_FALSE(std::filesystem::exists(journal.Get()));
+}
+
 TEST_CASE("acquisition cannot begin when recovery journaling is unavailable")
 {
     using namespace fidget;

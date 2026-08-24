@@ -144,9 +144,7 @@ bool ValidateIdentity(
         return false;
     }
     if ((identity.targetBaseAddress & 0xFFFFU) != 0U
-        || (identity.targetHardwareId != Mdpp32HardwareId
-            && identity.targetHardwareId
-                != Mdpp32AlternateHardwareId)
+        || !IsSupportedMdpp32HardwareId(identity.targetHardwareId)
         || identity.targetFirmwareRevision
             != Mdpp32ScpFirmwareRevisionFw2051)
     {

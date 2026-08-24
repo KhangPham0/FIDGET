@@ -46,11 +46,19 @@ struct ControllerProbeRequest
     const ControllerProbeRequest& request,
     const std::atomic<bool>& cancellationRequested);
 
-// Check first repeats the one MVLC-local batch, then reads only the three
-// target registers above in the same transport session. It never calls
-// WriteVmeD16 or WriteLocalRegisters. ReadVmeD16's accepted immediate-stack
-// plumbing transiently writes stack memory and stack execution controls but
-// performs no VME-bus write or module-setting write.
+// Shared zero-write verification for callers that already own an open command
+// transport. It first repeats the one MVLC-local batch and then reads the
+// three target registers above. It emits the exact same read sequence as
+// RunTargetProbe and does not open or close the caller's transport.
+[[nodiscard]] TargetProbeResult ProbeTargetOnOpenTransport(
+    ICommandTransport& transport,
+    const TargetProbeRequest& request,
+    const std::atomic<bool>& cancellationRequested);
+
+// Check uses the shared open-transport verifier in a temporary session. It
+// never calls WriteVmeD16 or WriteLocalRegisters. ReadVmeD16's accepted
+// immediate-stack plumbing transiently writes stack memory and stack
+// execution controls but performs no VME-bus write or module-setting write.
 [[nodiscard]] TargetProbeResult RunTargetProbe(
     ITransportFactory& transportFactory,
     const TargetProbeRequest& request,

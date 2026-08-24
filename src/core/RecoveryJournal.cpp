@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <ostream>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -236,6 +237,13 @@ bool ValidateRecord(const TunerRecoveryRecord& record, std::string& error)
     return true;
 }
 
+enum class AtomicJournalInstallMode
+{
+    Upsert,
+    Exclusive,
+    ReplaceExisting,
+};
+
 void RemoveAtomicWorkspace(const std::filesystem::path& path)
 {
     std::error_code ignored;
@@ -251,7 +259,6 @@ bool SyncPath(const std::filesystem::path& path, std::string& error)
             + std::string(std::strerror(errno)) + '.';
         return false;
     }
-
     const int syncResult = ::fsync(descriptor);
     const int syncError = errno;
     const int closeResult = ::close(descriptor);
@@ -368,6 +375,7 @@ bool JournalPathsShareFilesystem(
 TunerRecoverySaveResult InstallSerializedJournalAtomically(
     const std::string& text,
     const std::filesystem::path& requestedDestination,
+    const AtomicJournalInstallMode mode,
     const TunerRecoveryJournalSaveRuntime& runtime)
 {
     TunerRecoverySaveResult result;
@@ -414,6 +422,20 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
                 "The recovery-journal destination is not a plain file.";
             return result;
         }
+    }
+
+    if (mode == AtomicJournalInstallMode::Exclusive && destinationExists)
+    {
+        result.destinationAlreadyExists = true;
+        result.message =
+            "A recovery journal already exists at the exclusive destination.";
+        return result;
+    }
+    if (mode == AtomicJournalInstallMode::ReplaceExisting
+        && !destinationExists)
+    {
+        result.message = "The Prepared recovery journal is not a plain file.";
+        return result;
     }
 
     std::filesystem::path workspace;
@@ -480,7 +502,6 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
         result.message = "Could not open the temporary recovery journal.";
         return result;
     }
-
     bool writeSucceeded = false;
     try
     {
@@ -512,15 +533,34 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
         return result;
     }
 
-    std::string replaceError;
-    if (!ReplaceJournalPath(
-            temporary, destination, runtime, replaceError))
+    std::string installError;
+    bool installed = false;
+    if (mode == AtomicJournalInstallMode::Exclusive)
+    {
+        std::error_code linkError;
+        std::filesystem::create_hard_link(temporary, destination, linkError);
+        installed = !linkError;
+        if (linkError)
+        {
+            result.destinationAlreadyExists =
+                linkError == std::errc::file_exists;
+            installError = linkError.message();
+        }
+    }
+    else
+    {
+        installed = ReplaceJournalPath(
+            temporary, destination, runtime, installError);
+    }
+    if (!installed)
     {
         RemoveAtomicWorkspace(workspace);
-        result.message = "Could not atomically install the recovery journal: "
-            + (replaceError.empty()
-                   ? std::string("replacement failed.")
-                   : replaceError + '.');
+        result.message = result.destinationAlreadyExists
+            ? "A recovery journal already exists at the exclusive destination."
+            : "Could not atomically install the recovery journal: "
+                + (installError.empty()
+                       ? std::string("installation failed.")
+                       : installError + '.');
         return result;
     }
     result.destinationInstalled = true;
@@ -538,8 +578,30 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
     }
 
     result.success = true;
-    result.message = "Saved tuner recovery journal durably.";
+    result.message = mode == AtomicJournalInstallMode::Exclusive
+        ? "Created the tuner recovery journal exclusively and durably."
+        : mode == AtomicJournalInstallMode::ReplaceExisting
+            ? "Promoted the tuner recovery journal atomically and durably."
+            : "Saved tuner recovery journal durably.";
     return result;
+}
+
+bool SameEndpoint(
+    const ControllerEndpointRequest& left,
+    const ControllerEndpointRequest& right)
+{
+    return left == right;
+}
+
+bool SameIdentity(
+    const TunerRecoveryV5IdentityEvidence& left,
+    const TunerRecoveryV5IdentityEvidence& right)
+{
+    return left.mvlcHardwareId == right.mvlcHardwareId
+        && left.mvlcFirmwareRevision == right.mvlcFirmwareRevision
+        && left.targetBaseAddress == right.targetBaseAddress
+        && left.targetHardwareId == right.targetHardwareId
+        && left.targetFirmwareRevision == right.targetFirmwareRevision;
 }
 
 bool ExpectToken(std::istream& input,
@@ -891,7 +953,104 @@ TunerRecoverySaveResult SaveTunerRecoveryJournal(
     }
 
     return InstallSerializedJournalAtomically(
-        serialized.text, std::filesystem::path(path), runtime);
+        serialized.text,
+        std::filesystem::path(path),
+        AtomicJournalInstallMode::Upsert,
+        runtime);
+}
+
+TunerRecoverySaveResult CreateTunerRecoveryJournalExclusive(
+    const TunerRecoveryRecord& record,
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime)
+{
+    TunerRecoverySaveResult result;
+    if (path.empty())
+    {
+        result.message = "The tuner recovery-journal path is empty.";
+        return result;
+    }
+    const auto serialized = SerializeTunerRecoveryJournal(record);
+    if (!serialized.success)
+    {
+        result.message = "Recovery journal not created: "
+            + serialized.message;
+        return result;
+    }
+    return InstallSerializedJournalAtomically(
+        serialized.text,
+        std::filesystem::path(path),
+        AtomicJournalInstallMode::Exclusive,
+        runtime);
+}
+
+TunerRecoverySaveResult PromoteTunerRecoveryJournalV5Snapshot(
+    const TunerRecoveryRecord& record,
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime)
+{
+    TunerRecoverySaveResult result;
+    if (path.empty())
+    {
+        result.message = "The tuner recovery-journal path is empty.";
+        return result;
+    }
+
+    const auto loaded = LoadTunerRecoveryJournal(path);
+    if (!loaded.success || !loaded.record.has_value()
+        || loaded.record->formatVersion
+            != TunerRecoveryJournalV5FormatVersion
+        || !loaded.record->version5.has_value())
+    {
+        result.message =
+            "The existing Prepared v5 recovery journal could not be trusted: "
+            + loaded.message;
+        return result;
+    }
+    const auto& prepared = *loaded.record->version5;
+    if (prepared.sessionPhase != TuningSessionPhase::Preparing
+        || !prepared.selectorParkingRequired
+        || prepared.ownership.has_value()
+        || prepared.liveRestoreSnapshot.has_value()
+        || !prepared.deviations.empty())
+    {
+        result.message =
+            "The existing journal is not the identity-only Prepared record.";
+        return result;
+    }
+
+    if (record.formatVersion != TunerRecoveryJournalV5FormatVersion
+        || !record.version5.has_value())
+    {
+        result.message = "The promoted recovery journal is not v5.";
+        return result;
+    }
+    const auto& promoted = *record.version5;
+    if (promoted.sessionPhase != prepared.sessionPhase
+        || promoted.selectorParkingRequired
+        || promoted.ownership.has_value()
+        || !promoted.liveRestoreSnapshot.has_value()
+        || !promoted.deviations.empty()
+        || !SameEndpoint(promoted.endpoint, prepared.endpoint)
+        || !SameIdentity(promoted.identity, prepared.identity))
+    {
+        result.message =
+            "The promoted snapshot does not match its Prepared authority.";
+        return result;
+    }
+
+    const auto serialized = SerializeTunerRecoveryJournal(record);
+    if (!serialized.success)
+    {
+        result.message = "Recovery journal not promoted: "
+            + serialized.message;
+        return result;
+    }
+    return InstallSerializedJournalAtomically(
+        serialized.text,
+        std::filesystem::path(path),
+        AtomicJournalInstallMode::ReplaceExisting,
+        runtime);
 }
 
 TunerRecoveryLoadResult LoadTunerRecoveryJournal(const std::string& path)
