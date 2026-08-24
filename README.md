@@ -30,7 +30,7 @@ The repository uses git submodules, so clone it together with its
 dependencies:
 
 ```sh
-git clone --recurse-submodules <repository-url> FIDGET
+git clone --recurse-submodules https://github.com/KhangPham0/FIDGET.git
 cd FIDGET
 ```
 

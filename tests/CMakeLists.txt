@@ -74,6 +74,17 @@ target_compile_definitions(mvme_workspace_tests PRIVATE
 
 add_test(NAME mvme_workspace_tests COMMAND mvme_workspace_tests)
 
+add_executable(mvme_init_script_tests mvme_init_script_tests.cpp)
+target_link_libraries(mvme_init_script_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+target_compile_definitions(mvme_init_script_tests PRIVATE
+    FIDGET_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+
+add_test(NAME mvme_init_script_tests COMMAND mvme_init_script_tests)
+
 add_executable(stream_decoder_tests stream_decoder_tests.cpp)
 target_link_libraries(stream_decoder_tests PRIVATE fidget_core doctest::doctest)
 

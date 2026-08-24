@@ -1,0 +1,9 @@
+# Sanitized later overrides for two individual quads.
+set selected_quad 4
+write a32 d16 0x6100 ${selected_quad}
+write a32 d16 0x611C 0x0898
+write a32 d16 0x611E 2200
+
+0x6100 5
+0x611C $(2000 + 500)
+0x611E 0b1010'0010'1000

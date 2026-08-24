@@ -1,0 +1,21 @@
+# Sanitized frontend defaults used to exercise the safe evaluator.
+set time_unit 12.5
+set gain_factor 2.0
+set sample_source 0b11
+set no_offset_correction 0
+set no_resampling 1
+
+/* The selector and values below apply to every four-channel quad.
+0x6100 7
+0x6110 999
+*/
+0x6100 0b1000
+0x6110 $(100 / ${time_unit})
+0x611A $(${gain_factor} * 100)
+0x611C 2000
+0x611E 0x07D0
+0x6124 $(2000 / 12.5)
+0x6128 $(20 - 4)
+0x6146 0x0004
+0x6148 0b0000'0000'0000'1100
+0x614A $(${no_offset_correction} * 128 + ${no_resampling} * 64 + ${sample_source})

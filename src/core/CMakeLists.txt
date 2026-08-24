@@ -5,6 +5,7 @@ add_library(fidget_core STATIC
     BridgeProtocol.cpp
     CrateProject.cpp
     GuidedWorkflow.cpp
+    MvmeInitScript.cpp
     MvmeExport.cpp
     MvmeExportFile.cpp
     MvmeWorkspace.cpp
