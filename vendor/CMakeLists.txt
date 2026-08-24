@@ -39,6 +39,13 @@ if(FIDGET_BUILD_GUI)
     add_subdirectory(nfd)
 endif()
 
+# JSON for Modern C++ v3.12.0: header-only JSON support for core parsing.
+# The gitlink pins commit 55f93686c01528224f448c19128836e7df245f72;
+# configure and build use only the checked-in submodule.
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+add_subdirectory(json)
+
 # doctest: the test framework. Only the tests link it.
 set(DOCTEST_WITH_TESTS OFF CACHE BOOL "" FORCE)
 set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)

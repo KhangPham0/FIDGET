@@ -104,6 +104,14 @@ target_link_libraries(guided_workflow_tests PRIVATE fidget_core doctest::doctest
 
 add_test(NAME guided_workflow_tests COMMAND guided_workflow_tests)
 
+add_executable(json_dependency_tests json_dependency_tests.cpp)
+target_link_libraries(json_dependency_tests PRIVATE
+    nlohmann_json::nlohmann_json
+    doctest::doctest
+)
+
+add_test(NAME json_dependency_tests COMMAND json_dependency_tests)
+
 add_executable(gui_presentation_tests gui_presentation_tests.cpp)
 target_link_libraries(gui_presentation_tests PRIVATE
     fidget_gui_presentation

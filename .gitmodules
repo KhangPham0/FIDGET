@@ -15,3 +15,7 @@
 	path = vendor/nfd
 	url = https://github.com/btzy/nativefiledialog-extended.git
 	shallow = true
+[submodule "vendor/json"]
+	path = vendor/json
+	url = https://github.com/nlohmann/json.git
+	shallow = true
