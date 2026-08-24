@@ -79,6 +79,13 @@ enum class GuiTuningOutcome
     InsufficientData,
 };
 
+enum class GuiConflictRetry
+{
+    None,
+    Connect,
+    Check,
+};
+
 enum class GuiTargetAddressDisplay
 {
     HomeMvmeShorthand,
@@ -193,6 +200,7 @@ struct GuiViewState
     GuiHeaderConnectionStatus headerConnection =
         GuiHeaderConnectionStatus::Unknown;
     GuiTuningOutcome tuningOutcome = GuiTuningOutcome::None;
+    GuiConflictRetry conflictRetry = GuiConflictRetry::None;
     GuiActionSet allowedActions;
     GuiEvidenceClaims claims;
     // This is a display projection of TunerTargetSelection's one canonical

@@ -51,6 +51,7 @@ ImVec4 ProbeColor(const TargetProbeOutcome outcome, const Theme& theme)
     {
     case TargetProbeOutcome::VerifiedIdle:
         return theme.statusGood;
+    case TargetProbeOutcome::ControllerDaqActive:
     case TargetProbeOutcome::TargetAcquisitionActive:
         return theme.statusWarning;
     case TargetProbeOutcome::NotRun:
@@ -598,12 +599,11 @@ void HomePage::DrawControllerConflict(
         view.allowedActions, GuiAction::CheckAgain);
     if (DrawPrimaryButton("Check again", checkAgain, theme))
     {
-        if (snapshot.target.controllerVerification.result.outcome
-            == ControllerProbeOutcome::ControllerDaqActive)
+        if (view.conflictRetry == GuiConflictRetry::Connect)
         {
             tunerControl.Submit(SelectTunerTargetCommand{});
         }
-        else
+        else if (view.conflictRetry == GuiConflictRetry::Check)
         {
             tunerControl.Submit(ProbeTunerTargetCommand{});
         }

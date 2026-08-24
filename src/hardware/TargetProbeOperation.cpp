@@ -140,6 +140,26 @@ std::string TargetFailureMessage(
     }
 }
 
+std::string ControllerRevalidationFailureMessage(
+    const TargetProbeOutcome outcome,
+    const std::string& error)
+{
+    switch (outcome)
+    {
+    case TargetProbeOutcome::Cancelled:
+        return "The read-only target check was cancelled during controller "
+               "revalidation.";
+    case TargetProbeOutcome::Timeout:
+        return "Controller revalidation for Check timed out: " + error;
+    case TargetProbeOutcome::MalformedResponse:
+        return "Controller revalidation for Check returned a malformed "
+               "response: " + error;
+    default:
+        return "Controller revalidation for Check could not communicate: "
+            + error;
+    }
+}
+
 } // namespace
 
 ControllerProbeResult RunControllerProbe(
@@ -273,7 +293,8 @@ TargetProbeResult RunTargetProbe(
     if (cancellationRequested.load())
     {
         result.outcome = TargetProbeOutcome::Cancelled;
-        result.message = TargetFailureMessage(result.outcome, {});
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, {});
         return result;
     }
 
@@ -282,7 +303,8 @@ TargetProbeResult RunTargetProbe(
     {
         result.outcome = TargetOutcome(ClassifyCommunicationFailure(
             created.error, cancellationRequested));
-        result.message = TargetFailureMessage(result.outcome, created.error);
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, created.error);
         return result;
     }
 
@@ -297,7 +319,7 @@ TargetProbeResult RunTargetProbe(
     if (!transport)
     {
         result.outcome = TargetProbeOutcome::TransportUnavailable;
-        result.message = TargetFailureMessage(
+        result.message = ControllerRevalidationFailureMessage(
             result.outcome,
             "the transport factory returned no command transport");
         return finish(std::move(result));
@@ -309,12 +331,71 @@ TargetProbeResult RunTargetProbe(
     {
         result.outcome = TargetOutcome(ClassifyCommunicationFailure(
             opened.error, cancellationRequested));
-        result.message = TargetFailureMessage(result.outcome, opened.error);
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, opened.error);
         return finish(std::move(result));
     }
     result.temporaryConnectionOpened = true;
 
     std::uint16_t nextSuperReference = 1U;
+    const auto mvlc = ReadLocalRegisters(
+        *transport,
+        TargetProbeMvlcRegisterOrder.data(),
+        TargetProbeMvlcRegisterOrder.size(),
+        nextSuperReference,
+        cancellationRequested);
+    if (!mvlc.success)
+    {
+        result.outcome = TargetOutcome(ClassifyCommunicationFailure(
+            mvlc.error, cancellationRequested));
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, mvlc.error);
+        return finish(std::move(result));
+    }
+    if (cancellationRequested.load())
+    {
+        result.outcome = TargetProbeOutcome::Cancelled;
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome, {});
+        return finish(std::move(result));
+    }
+    if (mvlc.values.size() != TargetProbeMvlcRegisterOrder.size())
+    {
+        result.outcome = TargetProbeOutcome::MalformedResponse;
+        result.message = ControllerRevalidationFailureMessage(
+            result.outcome,
+            "unexpected MVLC identity response size");
+        return finish(std::move(result));
+    }
+
+    result.evidence.controllerEndpointReached = true;
+    result.mvlcHardwareId = mvlc.values[0U];
+    result.mvlcFirmwareRevision = mvlc.values[1U];
+    result.mvlcDaqMode = mvlc.values[2U];
+    if (*result.mvlcHardwareId != TargetProbeExpectedMvlcHardwareId)
+    {
+        result.outcome = TargetProbeOutcome::WrongMvlcIdentity;
+        result.message =
+            "The controller reached during Check is not the supported MVLC.";
+        return finish(std::move(result));
+    }
+    if (*result.mvlcFirmwareRevision != TargetProbeExpectedMvlcFirmware)
+    {
+        result.outcome = TargetProbeOutcome::WrongMvlcFirmware;
+        result.message = "The controller reached during Check is not running "
+                         "exact FW0046.";
+        return finish(std::move(result));
+    }
+    result.evidence.supportedControllerTypeAndFirmwareReverified = true;
+    if (*result.mvlcDaqMode != 0U)
+    {
+        result.outcome = TargetProbeOutcome::ControllerDaqActive;
+        result.evidence.activeControllerUseDetected = true;
+        result.message = ActiveUseMessage;
+        return finish(std::move(result));
+    }
+    result.evidence.controllerDaqIdleReverified = true;
+
     std::uint32_t nextStackReference = 1U;
     const auto readTarget = [&](const std::uint16_t registerOffset) {
         return ReadVmeD16(

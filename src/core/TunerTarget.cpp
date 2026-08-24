@@ -86,8 +86,7 @@ bool ControllerVerificationIsFresh(
 bool TargetProbeEvidenceIsCurrent(
     const TunerTargetState& target) noexcept
 {
-    return ControllerVerificationIsFresh(target)
-        && !target.verification.invalidated
+    return !target.verification.invalidated
         && target.verification.probedInput.has_value()
         && *target.verification.probedInput == target.input
         && target.verification.result.outcome != TargetProbeOutcome::NotRun
@@ -97,17 +96,27 @@ bool TargetProbeEvidenceIsCurrent(
 bool TargetVerificationIsFresh(
     const TunerTargetState& target) noexcept
 {
-    return TargetProbeEvidenceIsCurrent(target)
+    const auto& evidence = target.verification.result.evidence;
+    return ControllerVerificationIsFresh(target)
+        && TargetProbeEvidenceIsCurrent(target)
         && target.verification.result.outcome
-            == TargetProbeOutcome::VerifiedIdle;
+            == TargetProbeOutcome::VerifiedIdle
+        && evidence.supportedControllerTypeAndFirmwareReverified
+        && evidence.controllerDaqIdleReverified
+        && evidence.targetIdentityAndFirmwareVerified
+        && evidence.targetAcquisitionStoppedVerified;
 }
 
 void ApplyTargetPresentationEvidence(
     const TunerTargetState& target,
     TuningSessionEvidence& evidence) noexcept
 {
-    evidence.currentConnectionRequestValid =
+    const bool controllerEvidenceCurrent =
         ControllerProbeEvidenceIsCurrent(target);
+    const bool targetEvidenceCurrent =
+        TargetProbeEvidenceIsCurrent(target);
+    evidence.currentConnectionRequestValid =
+        controllerEvidenceCurrent || targetEvidenceCurrent;
     evidence.controllerConnected = false;
     evidence.controllerIdentityVerified = false;
     evidence.controllerVerificationFresh = false;
@@ -120,7 +129,7 @@ void ApplyTargetPresentationEvidence(
     evidence.noControlTaken = false;
     evidence.noVmeOrModuleSettingWritesSent = false;
 
-    if (ControllerProbeEvidenceIsCurrent(target))
+    if (controllerEvidenceCurrent)
     {
         const auto& controller =
             target.controllerVerification.result.evidence;
@@ -138,10 +147,18 @@ void ApplyTargetPresentationEvidence(
             controller.noVmeOrModuleSettingWritesSent;
     }
 
-    if (!TargetProbeEvidenceIsCurrent(target))
+    if (!targetEvidenceCurrent)
         return;
 
     const auto& probe = target.verification.result.evidence;
+    if (!controllerEvidenceCurrent)
+    {
+        evidence.controllerConnected = probe.controllerEndpointReached;
+        evidence.controllerIdentityVerified =
+            probe.supportedControllerTypeAndFirmwareReverified;
+        evidence.controllerIdleVerified =
+            probe.controllerDaqIdleReverified;
+    }
     evidence.targetIdentityAndFirmwareVerified =
         probe.targetIdentityAndFirmwareVerified;
     evidence.targetAcquisitionStoppedVerified =
@@ -153,11 +170,13 @@ void ApplyTargetPresentationEvidence(
     evidence.activeControllerUseDetected =
         evidence.activeControllerUseDetected
         || probe.activeControllerUseDetected;
-    evidence.noControlTaken =
-        evidence.noControlTaken && probe.noControlTaken;
-    evidence.noVmeOrModuleSettingWritesSent =
-        evidence.noVmeOrModuleSettingWritesSent
-        && probe.noVmeOrModuleSettingWritesSent;
+    evidence.noControlTaken = controllerEvidenceCurrent
+        ? evidence.noControlTaken && probe.noControlTaken
+        : probe.noControlTaken;
+    evidence.noVmeOrModuleSettingWritesSent = controllerEvidenceCurrent
+        ? evidence.noVmeOrModuleSettingWritesSent
+            && probe.noVmeOrModuleSettingWritesSent
+        : probe.noVmeOrModuleSettingWritesSent;
 }
 
 } // namespace fidget

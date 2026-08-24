@@ -178,7 +178,11 @@ void EditTarget(
 
 void QueueMvlcProbeRead(
     fidget::test::FakeCommandTransport& transport,
-    const std::uint32_t daqMode = 0U)
+    const std::uint32_t daqMode = 0U,
+    const std::uint32_t hardwareId =
+        fidget::TargetProbeExpectedMvlcHardwareId,
+    const std::uint32_t firmware =
+        fidget::TargetProbeExpectedMvlcFirmware)
 {
     using namespace fidget;
     using namespace fidget::test;
@@ -190,8 +194,8 @@ void QueueMvlcProbeRead(
         TargetProbeMvlcRegisterOrder.size());
     REQUIRE(request.success);
     const std::array<std::uint32_t, 3U> values{{
-        TargetProbeExpectedMvlcHardwareId,
-        TargetProbeExpectedMvlcFirmware,
+        hardwareId,
+        firmware,
         daqMode,
     }};
     std::vector<std::uint32_t> frame{
@@ -220,7 +224,8 @@ void QueueSuccessfulTargetCheck(
     using namespace fidget;
     using namespace fidget::test;
 
-    TransactionReferences references{1U, 1U};
+    QueueMvlcProbeRead(transport);
+    TransactionReferences references{2U, 1U};
     QueueRead(
         transport,
         references,
@@ -369,7 +374,7 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK(std::none_of(
         operations.begin(), operations.end(),
         [](const auto& operation) { return operation.write; }));
-    CHECK(fixture.transport->SentRequests().size() == 7U);
+    CHECK(fixture.transport->SentRequests().size() == 8U);
     const auto requests = fixture.factory->Requests();
     REQUIRE(requests.size() == 2U);
     for (const auto& request : requests)
@@ -446,7 +451,32 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
           == ControllerProbeOutcome::NotRun);
 }
 
-TEST_CASE("Connect ignores an invalid module address and Check does not")
+TEST_CASE("Check refuses before Connect without transport traffic")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    EditTarget(*fixture.service, TargetInput(
+        TunerTargetEndpointKind::SshBridge));
+    fixture.service->Submit(ProbeTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.target.verification.result.message
+            == "The target check requires a current verified controller "
+               "connection.";
+    }));
+
+    const auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->target.verification.result.outcome
+          == TargetProbeOutcome::NotRun);
+    CHECK(snapshot->statusMessages.front().summary
+          == "The read-only target check was not started.");
+    CHECK(snapshot->statusMessages.front().detail
+          == "Run Connect successfully for the current endpoint first.");
+    CHECK(fixture.factory->CreateCount() == 0U);
+    CHECK(fixture.transport->SentRequests().empty());
+}
+
+TEST_CASE("Connect ignores an invalid module address and Check refuses it")
 {
     using namespace fidget;
 
@@ -473,6 +503,22 @@ TEST_CASE("Connect ignores an invalid module address and Check does not")
     CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
     CHECK_FALSE(snapshot->tuningSession.evidence.targetVerificationFresh);
 
+    const auto createCount = fixture.factory->CreateCount();
+    const auto wireCount = fixture.transport->SentRequests().size();
+    fixture.service->Submit(ProbeTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.target.verification.result.message
+            == "The target check requires a valid module address.";
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->statusMessages.front().summary
+          == "The read-only target check was not started.");
+    CHECK(snapshot->statusMessages.front().detail
+          == "The target-module address is not valid hexadecimal.");
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
+    CHECK(fixture.factory->CreateCount() == createCount);
+    CHECK(fixture.transport->SentRequests().size() == wireCount);
+
     input.moduleAddress = "0x1100";
     fixture.service->Submit(EditTunerTargetCommand{input});
     REQUIRE(WaitFor(*fixture.service, [&input](const TunerSnapshot& value) {
@@ -483,6 +529,139 @@ TEST_CASE("Connect ignores an invalid module address and Check does not")
     CHECK(ControllerVerificationIsFresh(snapshot->target));
     CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
     CHECK(snapshot->tuningSession.evidence.targetModuleAddressValid);
+}
+
+TEST_CASE("Check invalidates old controller evidence when revalidation fails")
+{
+    using namespace fidget;
+
+    SUBCASE("DAQ became active")
+    {
+        ServiceFixture fixture;
+        EditTarget(*fixture.service, TargetInput(
+            TunerTargetEndpointKind::DirectEthernet));
+        QueueMvlcProbeRead(*fixture.transport);
+        fixture.service->Submit(SelectTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return ControllerVerificationIsFresh(value.target);
+        }));
+
+        QueueMvlcProbeRead(*fixture.transport, 0x0005U);
+        fixture.service->Submit(ProbeTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return value.target.verification.result.outcome
+                == TargetProbeOutcome::ControllerDaqActive;
+        }));
+        const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->target.controllerVerification.invalidated);
+        CHECK_FALSE(ControllerVerificationIsFresh(snapshot->target));
+        CHECK_FALSE(TargetVerificationIsFresh(snapshot->target));
+        CHECK(fixture.factory->CreateCount() == 2U);
+        CHECK(fixture.transport->SentRequests().size() == 2U);
+        CHECK(DecodeWireOperations(*fixture.transport).empty());
+        CHECK(snapshot->tuningSession.evidence.activeControllerUseDetected);
+        CHECK_FALSE(
+            snapshot->tuningSession.evidence.connectionVerificationFresh);
+    }
+
+    SUBCASE("controller identity changed")
+    {
+        ServiceFixture fixture;
+        EditTarget(*fixture.service, TargetInput(
+            TunerTargetEndpointKind::DirectEthernet));
+        QueueMvlcProbeRead(*fixture.transport);
+        fixture.service->Submit(SelectTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return ControllerVerificationIsFresh(value.target);
+        }));
+
+        QueueMvlcProbeRead(
+            *fixture.transport, 0U, 0x1234U);
+        fixture.service->Submit(ProbeTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return value.target.verification.result.outcome
+                == TargetProbeOutcome::WrongMvlcIdentity;
+        }));
+        const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->target.controllerVerification.invalidated);
+        CHECK_FALSE(ControllerVerificationIsFresh(snapshot->target));
+        CHECK_FALSE(TargetVerificationIsFresh(snapshot->target));
+        CHECK(fixture.transport->SentRequests().size() == 2U);
+        CHECK(DecodeWireOperations(*fixture.transport).empty());
+        CHECK_FALSE(
+            snapshot->tuningSession.evidence.connectionVerificationFresh);
+    }
+
+    SUBCASE("controller firmware changed")
+    {
+        ServiceFixture fixture;
+        EditTarget(*fixture.service, TargetInput(
+            TunerTargetEndpointKind::DirectEthernet));
+        QueueMvlcProbeRead(*fixture.transport);
+        fixture.service->Submit(SelectTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return ControllerVerificationIsFresh(value.target);
+        }));
+
+        QueueMvlcProbeRead(
+            *fixture.transport,
+            0U,
+            TargetProbeExpectedMvlcHardwareId,
+            0x0045U);
+        fixture.service->Submit(ProbeTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return value.target.verification.result.outcome
+                == TargetProbeOutcome::WrongMvlcFirmware;
+        }));
+        const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->target.controllerVerification.invalidated);
+        CHECK_FALSE(ControllerVerificationIsFresh(snapshot->target));
+        CHECK_FALSE(TargetVerificationIsFresh(snapshot->target));
+        CHECK(fixture.transport->SentRequests().size() == 2U);
+        CHECK(DecodeWireOperations(*fixture.transport).empty());
+        CHECK_FALSE(
+            snapshot->tuningSession.evidence.connectionVerificationFresh);
+    }
+}
+
+TEST_CASE("SSH convenience persistence never downgrades a probe error")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    const auto storageReady = EnsureApplicationStorageDirectories(
+        fixture.storage);
+    REQUIRE(storageReady.success);
+    REQUIRE(std::filesystem::create_directory(
+        fixture.storage.preferencesFile));
+    EditTarget(*fixture.service, TargetInput(
+        TunerTargetEndpointKind::SshBridge));
+
+    SUBCASE("successful probe is elevated to warning")
+    {
+        QueueMvlcProbeRead(*fixture.transport);
+        fixture.service->Submit(SelectTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return value.target.controllerVerification.result.outcome
+                == ControllerProbeOutcome::VerifiedIdle;
+        }));
+        const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->statusMessages.front().level
+              == TunerStatusLevel::Warning);
+    }
+
+    SUBCASE("failed probe remains error")
+    {
+        QueueMvlcProbeRead(*fixture.transport, 0U, 0x1234U);
+        fixture.service->Submit(SelectTunerTargetCommand{});
+        REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+            return value.target.controllerVerification.result.outcome
+                == ControllerProbeOutcome::WrongMvlcIdentity;
+        }));
+        const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->statusMessages.front().level
+              == TunerStatusLevel::Error);
+    }
 }
 
 TEST_CASE("clearing a target cancels a probe on the command worker")

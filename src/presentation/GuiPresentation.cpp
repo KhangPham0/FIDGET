@@ -365,6 +365,31 @@ GuiDrawer SelectDrawer(
     return GuiDrawer::None;
 }
 
+GuiConflictRetry SelectConflictRetry(
+    const TunerSnapshot& snapshot) noexcept
+{
+    if (TargetProbeEvidenceIsCurrent(snapshot.target))
+    {
+        switch (snapshot.target.verification.result.outcome)
+        {
+        case TargetProbeOutcome::ControllerDaqActive:
+            return GuiConflictRetry::Connect;
+        case TargetProbeOutcome::TargetAcquisitionActive:
+            return GuiConflictRetry::Check;
+        default:
+            break;
+        }
+    }
+
+    if (ControllerProbeEvidenceIsCurrent(snapshot.target)
+        && snapshot.target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::ControllerDaqActive)
+    {
+        return GuiConflictRetry::Connect;
+    }
+    return GuiConflictRetry::None;
+}
+
 GuiPage SelectBaseNormalPage(
     const TuningSessionPhase phase,
     const Evidence& evidence,
@@ -763,6 +788,7 @@ GuiViewState PresentGui(
     view.claims = MakeClaims(snapshot, evidence);
     view.drawer = SelectDrawer(selection.drawer, evidence);
     view.headerConnection = SelectHeader(snapshot, evidence);
+    view.conflictRetry = SelectConflictRetry(snapshot);
     if (evidence.moduleCouldNotBeArmed)
         view.tuningOutcome = GuiTuningOutcome::ModuleCouldNotBeArmed;
     else if (evidence.insufficientData)

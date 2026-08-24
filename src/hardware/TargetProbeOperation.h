@@ -16,8 +16,9 @@ inline constexpr std::uint32_t TargetProbeExpectedMvlcHardwareId = 0x5008U;
 inline constexpr std::uint32_t TargetProbeExpectedMvlcFirmware = 0x0046U;
 
 // The staged Home checks use this documented order: Connect reads MVLC
-// identity, MVLC firmware, and MVLC DAQ mode; Check then reads target identity,
-// target firmware, and target acquisition control.
+// identity, MVLC firmware, and MVLC DAQ mode. Check repeats that same batch in
+// its newly opened session before reading target identity, target firmware,
+// and target acquisition control.
 inline constexpr std::array<std::uint16_t, 3U>
     TargetProbeMvlcRegisterOrder{{0x6008U, 0x600EU, 0x1300U}};
 inline constexpr std::array<std::uint16_t, 3U>
@@ -45,7 +46,8 @@ struct ControllerProbeRequest
     const ControllerProbeRequest& request,
     const std::atomic<bool>& cancellationRequested);
 
-// Check reads only the three target registers above. It never calls
+// Check first repeats the one MVLC-local batch, then reads only the three
+// target registers above in the same transport session. It never calls
 // WriteVmeD16 or WriteLocalRegisters. ReadVmeD16's accepted immediate-stack
 // plumbing transiently writes stack memory and stack execution controls but
 // performs no VME-bus write or module-setting write.

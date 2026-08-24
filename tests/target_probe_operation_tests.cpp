@@ -22,7 +22,7 @@
 namespace {
 
 constexpr std::uint32_t TargetBase = 0x11000000U;
-constexpr std::uint16_t FirstTargetSuperReference = 1U;
+constexpr std::uint16_t FirstTargetSuperReference = 2U;
 constexpr std::uint32_t FirstTargetStackReference = 1U;
 constexpr const char ApprovedActiveUseMessage[] =
     "Active controller use was detected. FIDGET did not take control, and "
@@ -133,6 +133,15 @@ void QueueTargetReads(
     }
 }
 
+void QueueCheckReads(
+    fidget::test::FakeCommandTransport& transport,
+    const ProbeValues& values,
+    const std::size_t targetReadCount = 3U)
+{
+    QueueMvlcRead(transport, values);
+    QueueTargetReads(transport, values, targetReadCount);
+}
+
 fidget::ControllerProbeResult RunController(
     ProbeFixture& fixture,
     fidget::TransportEndpointRequest endpoint = DirectEndpoint())
@@ -189,6 +198,26 @@ void CheckExactControllerTrace(
         }));
 }
 
+void CheckOnlyControllerRevalidationTraffic(
+    const fidget::test::FakeCommandTransport& transport)
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    const auto expected = BuildMvlcLocalRegisterBatchReadRequest(
+        1U,
+        TargetProbeMvlcRegisterOrder.data(),
+        TargetProbeMvlcRegisterOrder.size());
+    REQUIRE(expected.success);
+    const auto requests = transport.SentRequests();
+    REQUIRE_FALSE(requests.empty());
+    for (const auto& request : requests)
+    {
+        CHECK(DecodeWords(request) == expected.words);
+    }
+    CHECK(DecodeWireOperations(transport).empty());
+}
+
 void CheckExactTargetTrace(
     const fidget::test::FakeCommandTransport& transport,
     const std::size_t readCount = 3U)
@@ -197,9 +226,16 @@ void CheckExactTargetTrace(
     using namespace fidget::test;
 
     const auto requests = transport.SentRequests();
-    REQUIRE(requests.size() == readCount * 2U);
+    REQUIRE(requests.size() == 1U + readCount * 2U);
     const auto operations = DecodeWireOperations(transport);
     REQUIRE(operations.size() == readCount);
+
+    const auto expectedController = BuildMvlcLocalRegisterBatchReadRequest(
+        1U,
+        TargetProbeMvlcRegisterOrder.data(),
+        TargetProbeMvlcRegisterOrder.size());
+    REQUIRE(expectedController.success);
+    CHECK(DecodeWords(requests.front()) == expectedController.words);
 
     std::uint16_t superReference = FirstTargetSuperReference;
     std::uint32_t stackReference = FirstTargetStackReference;
@@ -219,15 +255,17 @@ void CheckExactTargetTrace(
             stackReference++,
             operation.data(),
             operation.size());
-        CHECK(DecodeWords(requests[index * 2U]) == expectedUpload);
-        CHECK(DecodeWords(requests[index * 2U + 1U])
+        CHECK(DecodeWords(requests[1U + index * 2U]) == expectedUpload);
+        CHECK(DecodeWords(requests[1U + index * 2U + 1U])
               == BuildMvlcStackExecuteRequest(superReference++));
     }
 
     std::size_t localWriteCount = 0U;
-    for (const auto& request : requests)
+    for (std::size_t requestIndex = 1U;
+         requestIndex < requests.size();
+         ++requestIndex)
     {
-        const auto words = DecodeWords(request);
+        const auto words = DecodeWords(requests[requestIndex]);
         CHECK(std::find(
                   words.begin(), words.end(), MvlcVmeWriteA32D16Command)
               == words.end());
@@ -277,6 +315,12 @@ fidget::TunerSnapshot PresentationSnapshot(
     snapshot.target.controllerVerification.result = controller;
     snapshot.target.verification.probedInput = snapshot.target.input;
     snapshot.target.verification.result = target;
+    if (target.outcome != TargetProbeOutcome::NotRun
+        && (!target.evidence.supportedControllerTypeAndFirmwareReverified
+            || !target.evidence.controllerDaqIdleReverified))
+    {
+        snapshot.target.controllerVerification.invalidated = true;
+    }
     ApplyTargetPresentationEvidence(
         snapshot.target,
         snapshot.tuningSession.evidence);
@@ -285,6 +329,22 @@ fidget::TunerSnapshot PresentationSnapshot(
     snapshot.tuningSession.evidence.operationIdle = true;
     snapshot.tuningSession.evidence.noRecoveryPending = true;
     return snapshot;
+}
+
+void CheckFailedRevalidationBlocksStart(
+    const fidget::TargetProbeResult& result)
+{
+    using namespace fidget;
+
+    CHECK(result.evidence.noControlTaken);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
+    const auto snapshot = PresentationSnapshot(
+        VerifiedControllerResult(), result);
+    CHECK_FALSE(ControllerVerificationIsFresh(snapshot.target));
+    CHECK_FALSE(TargetVerificationIsFresh(snapshot.target));
+    CHECK_FALSE(Allows(
+        PresentGui(snapshot).allowedActions,
+        GuiAction::StartTuning));
 }
 
 void CheckClosed(const ProbeFixture& fixture)
@@ -357,7 +417,7 @@ TEST_CASE("Connect has one controller-only trace over both endpoints")
     CheckEndpointRequest(fixture.factory, endpoint);
 }
 
-TEST_CASE("Check has one target-only trace over both endpoints")
+TEST_CASE("Check revalidates the controller before three target reads")
 {
     using namespace fidget;
 
@@ -373,13 +433,16 @@ TEST_CASE("Check has one target-only trace over both endpoints")
     }
 
     ProbeFixture fixture;
-    QueueTargetReads(*fixture.transport, ProbeValues{});
+    QueueCheckReads(*fixture.transport, ProbeValues{});
     const auto result = RunTarget(fixture, endpoint);
 
     INFO(result.message);
     CHECK(result.outcome == TargetProbeOutcome::VerifiedIdle);
     CHECK(result.temporaryConnectionOpened);
     CHECK(result.temporaryConnectionClosed);
+    CHECK(result.evidence.controllerEndpointReached);
+    CHECK(result.evidence.supportedControllerTypeAndFirmwareReverified);
+    CHECK(result.evidence.controllerDaqIdleReverified);
     CHECK(result.evidence.targetIdentityAndFirmwareVerified);
     CHECK(result.evidence.targetAcquisitionStoppedVerified);
     CHECK(result.evidence.noControlTaken);
@@ -406,30 +469,67 @@ TEST_CASE("active MVLC DAQ routes to conflict with controller-only traffic")
     CheckExactControllerTrace(*fixture.transport);
     const auto view = PresentGui(PresentationSnapshot(result));
     CHECK(view.page == GuiPage::ControllerConflict);
+    CHECK(view.conflictRetry == GuiConflictRetry::Connect);
     CHECK(view.claims.noControlTaken);
     CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CheckClosed(fixture);
 }
 
-TEST_CASE("an active target routes to conflict after target-only reads")
+TEST_CASE("Check revalidation stops at an active MVLC DAQ")
+{
+    using namespace fidget;
+
+    ProbeValues values;
+    values.mvlcDaqMode = 0x0005U;
+    ProbeFixture fixture;
+    QueueMvlcRead(*fixture.transport, values);
+    const auto result = RunTarget(fixture);
+
+    CHECK(result.outcome == TargetProbeOutcome::ControllerDaqActive);
+    CHECK(result.message == ApprovedActiveUseMessage);
+    CHECK(result.evidence.controllerEndpointReached);
+    CHECK(result.evidence.supportedControllerTypeAndFirmwareReverified);
+    CHECK_FALSE(result.evidence.controllerDaqIdleReverified);
+    CHECK(result.evidence.activeControllerUseDetected);
+    CHECK(result.evidence.noControlTaken);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
+    CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+    CheckFailedRevalidationBlocksStart(result);
+
+    const auto snapshot = PresentationSnapshot(
+        VerifiedControllerResult(), result);
+    CHECK_FALSE(ControllerVerificationIsFresh(snapshot.target));
+    const auto view = PresentGui(snapshot);
+    CHECK(view.page == GuiPage::ControllerConflict);
+    CHECK(view.conflictRetry == GuiConflictRetry::Connect);
+    CHECK(Allows(view.allowedActions, GuiAction::CheckAgain));
+    CHECK_FALSE(Allows(view.allowedActions, GuiAction::StartTuning));
+    CheckClosed(fixture);
+}
+
+TEST_CASE("an active target routes to conflict after staged read-only checks")
 {
     using namespace fidget;
 
     ProbeValues values;
     values.targetAcquisition = 1U;
     ProbeFixture fixture;
-    QueueTargetReads(*fixture.transport, values);
+    QueueCheckReads(*fixture.transport, values);
     const auto result = RunTarget(fixture);
 
     CHECK(result.outcome == TargetProbeOutcome::TargetAcquisitionActive);
     CHECK(result.message == ApprovedActiveUseMessage);
     CHECK(result.evidence.activeControllerUseDetected);
+    CHECK(result.evidence.supportedControllerTypeAndFirmwareReverified);
+    CHECK(result.evidence.controllerDaqIdleReverified);
     CHECK(result.evidence.targetIdentityAndFirmwareVerified);
     CHECK_FALSE(result.evidence.targetAcquisitionStoppedVerified);
     CheckExactTargetTrace(*fixture.transport);
     const auto view = PresentGui(
         PresentationSnapshot(VerifiedControllerResult(), result));
     CHECK(view.page == GuiPage::ControllerConflict);
+    CHECK(view.conflictRetry == GuiConflictRetry::Check);
+    CHECK(Allows(view.allowedActions, GuiAction::CheckAgain));
     CHECK(view.claims.noControlTaken);
     CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CheckClosed(fixture);
@@ -458,6 +558,40 @@ TEST_CASE("wrong MVLC identity and firmware have controller outcomes")
     CheckClosed(fixture);
 }
 
+TEST_CASE("Check rejects changed MVLC identity or firmware before target traffic")
+{
+    using namespace fidget;
+
+    ProbeValues values;
+    SUBCASE("identity")
+        values.mvlcHardwareId = 0x1234U;
+    SUBCASE("firmware")
+        values.mvlcFirmware = 0x0045U;
+
+    ProbeFixture fixture;
+    QueueMvlcRead(*fixture.transport, values);
+    const auto result = RunTarget(fixture);
+    CHECK(result.outcome == (
+        values.mvlcHardwareId == TargetProbeExpectedMvlcHardwareId
+            ? TargetProbeOutcome::WrongMvlcFirmware
+            : TargetProbeOutcome::WrongMvlcIdentity));
+    CHECK(result.evidence.controllerEndpointReached);
+    CHECK_FALSE(
+        result.evidence.supportedControllerTypeAndFirmwareReverified);
+    CHECK_FALSE(result.evidence.controllerDaqIdleReverified);
+    CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+    CheckFailedRevalidationBlocksStart(result);
+
+    const auto snapshot = PresentationSnapshot(
+        VerifiedControllerResult(), result);
+    CHECK_FALSE(ControllerVerificationIsFresh(snapshot.target));
+    CHECK_FALSE(TargetVerificationIsFresh(snapshot.target));
+    CHECK_FALSE(Allows(
+        PresentGui(snapshot).allowedActions,
+        GuiAction::StartTuning));
+    CheckClosed(fixture);
+}
+
 TEST_CASE("wrong target identity and firmware have target outcomes")
 {
     using namespace fidget;
@@ -475,7 +609,7 @@ TEST_CASE("wrong target identity and firmware have target outcomes")
     }
 
     ProbeFixture fixture;
-    QueueTargetReads(*fixture.transport, values, targetReads);
+    QueueCheckReads(*fixture.transport, values, targetReads);
     const auto result = RunTarget(fixture);
     CHECK(result.outcome == (
         values.targetHardwareId == 0x1234U
@@ -498,7 +632,7 @@ TEST_CASE("both MDPP-32 identities require exact SCP FW2051")
         ProbeValues accepted;
         accepted.targetHardwareId = hardwareId;
         ProbeFixture acceptedFixture;
-        QueueTargetReads(*acceptedFixture.transport, accepted);
+        QueueCheckReads(*acceptedFixture.transport, accepted);
         const auto acceptedResult = RunTarget(acceptedFixture);
         CHECK(acceptedResult.outcome == TargetProbeOutcome::VerifiedIdle);
         CHECK(acceptedResult.evidence.targetIdentityAndFirmwareVerified);
@@ -509,7 +643,8 @@ TEST_CASE("both MDPP-32 identities require exact SCP FW2051")
         wrongFirmware.targetHardwareId = hardwareId;
         wrongFirmware.targetFirmware = 0x2050U;
         ProbeFixture wrongFirmwareFixture;
-        QueueTargetReads(*wrongFirmwareFixture.transport, wrongFirmware, 2U);
+        QueueCheckReads(
+            *wrongFirmwareFixture.transport, wrongFirmware, 2U);
         const auto wrongFirmwareResult = RunTarget(wrongFirmwareFixture);
         CHECK(wrongFirmwareResult.outcome
               == TargetProbeOutcome::WrongTargetFirmware);
@@ -552,11 +687,13 @@ TEST_CASE("controller and target timeouts stay stage-specific")
     SUBCASE("target")
     {
         ProbeFixture fixture;
+        QueueMvlcRead(*fixture.transport, ProbeValues{});
         for (int attempt = 0;
              attempt < MvlcTransactionAttemptCount;
              ++attempt)
         {
-            const auto super = static_cast<std::uint16_t>(1U + attempt * 2U);
+            const auto super = static_cast<std::uint16_t>(
+                FirstTargetSuperReference + attempt * 2U);
             const auto stack = static_cast<std::uint32_t>(1U + attempt);
             const auto operation = EncodeMvlcVmeReadD16Words(
                 TargetBase + TargetProbeMdppRegisterOrder[0U]);
@@ -581,6 +718,32 @@ TEST_CASE("controller and target timeouts stay stage-specific")
         CHECK(std::none_of(
             operations.begin(), operations.end(),
             [](const auto& operation) { return operation.write; }));
+        CheckClosed(fixture);
+    }
+
+    SUBCASE("Check controller revalidation")
+    {
+        ProbeFixture fixture;
+        const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+            1U,
+            TargetProbeMvlcRegisterOrder.data(),
+            TargetProbeMvlcRegisterOrder.size());
+        REQUIRE(request.success);
+        for (int attempt = 0;
+             attempt < MvlcFingerprintReadAttemptCount;
+             ++attempt)
+        {
+            fixture.transport->QueueExchange({
+                EncodeWords(request.words),
+                {FakeReceiveAction::Timeout()},
+            });
+        }
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::Timeout);
+        CHECK(result.temporaryConnectionClosed);
+        CHECK_FALSE(result.evidence.controllerEndpointReached);
+        CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+        CheckFailedRevalidationBlocksStart(result);
         CheckClosed(fixture);
     }
 }
@@ -612,6 +775,7 @@ TEST_CASE("malformed controller and target responses stay stage-specific")
     SUBCASE("target")
     {
         ProbeFixture fixture;
+        QueueMvlcRead(*fixture.transport, ProbeValues{});
         const auto operation = EncodeMvlcVmeReadD16Words(
             TargetBase + TargetProbeMdppRegisterOrder[0U]);
         const auto upload = BuildMvlcStackUploadRequest(
@@ -643,6 +807,81 @@ TEST_CASE("malformed controller and target responses stay stage-specific")
         CHECK(result.outcome == TargetProbeOutcome::MalformedResponse);
         CHECK(result.temporaryConnectionClosed);
         CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
+        CheckClosed(fixture);
+    }
+
+    SUBCASE("Check controller revalidation")
+    {
+        ProbeFixture fixture;
+        const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+            1U,
+            TargetProbeMvlcRegisterOrder.data(),
+            TargetProbeMvlcRegisterOrder.size());
+        REQUIRE(request.success);
+        fixture.transport->QueueExchange({
+            EncodeWords(request.words),
+            {FakeReceiveAction::Datagram(
+                std::vector<std::byte>{std::byte{0x01U}})},
+        });
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::MalformedResponse);
+        CHECK(result.temporaryConnectionClosed);
+        CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+        CheckFailedRevalidationBlocksStart(result);
+        CheckClosed(fixture);
+    }
+}
+
+TEST_CASE("Check revalidation cancellation and transport loss precede stack traffic")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    SUBCASE("cancelled after the controller response")
+    {
+        ProbeFixture fixture;
+        QueueMvlcRead(*fixture.transport, ProbeValues{});
+        fixture.transport->SetReceiveHook([&](const std::size_t) {
+            fixture.cancelled.store(true);
+        });
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::Cancelled);
+        CHECK(result.temporaryConnectionClosed);
+        CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+        CheckFailedRevalidationBlocksStart(result);
+        CheckClosed(fixture);
+    }
+
+    SUBCASE("transport loss while opening the Check session")
+    {
+        ProbeFixture fixture;
+        fixture.transport->SetOpenError("connection lost");
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::TransportUnavailable);
+        CHECK(result.temporaryConnectionClosed);
+        CHECK(fixture.transport->SentRequests().empty());
+        CHECK(DecodeWireOperations(*fixture.transport).empty());
+        CheckFailedRevalidationBlocksStart(result);
+        CheckClosed(fixture);
+    }
+
+    SUBCASE("transport loss during the controller recheck")
+    {
+        ProbeFixture fixture;
+        const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+            1U,
+            TargetProbeMvlcRegisterOrder.data(),
+            TargetProbeMvlcRegisterOrder.size());
+        REQUIRE(request.success);
+        fixture.transport->QueueExchange({
+            EncodeWords(request.words),
+            {FakeReceiveAction::Error("connection lost")},
+        });
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::TransportUnavailable);
+        CHECK(result.temporaryConnectionClosed);
+        CheckOnlyControllerRevalidationTraffic(*fixture.transport);
+        CheckFailedRevalidationBlocksStart(result);
         CheckClosed(fixture);
     }
 }

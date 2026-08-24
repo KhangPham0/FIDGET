@@ -81,7 +81,10 @@ enum class TargetProbeOutcome
     NotRun,
     InProgress,
     VerifiedIdle,
+    ControllerDaqActive,
     TargetAcquisitionActive,
+    WrongMvlcIdentity,
+    WrongMvlcFirmware,
     WrongTargetIdentity,
     WrongTargetFirmware,
     TransportUnavailable,
@@ -113,11 +116,16 @@ struct ControllerProbeResult
     std::string message;
 };
 
-// Positive facts established by the target-only Check operation. Current,
-// verified controller evidence is a separate prerequisite owned by the
-// coordinator and is never inferred from these target reads.
+// Positive facts established by Check in its newly opened transport session.
+// The controller facts prove only that a supported controller type, exact
+// firmware, and idle DAQ were reachable at the selected endpoint immediately
+// before the target reads. They do not prove a unique physical-controller
+// identity, serial continuity, or sameness with an earlier connection.
 struct TargetProbeEvidence
 {
+    bool controllerEndpointReached = false;
+    bool supportedControllerTypeAndFirmwareReverified = false;
+    bool controllerDaqIdleReverified = false;
     bool targetIdentityAndFirmwareVerified = false;
     bool targetAcquisitionStoppedVerified = false;
     bool activeControllerUseDetected = false;
@@ -131,6 +139,9 @@ struct TargetProbeResult
     TargetProbeEvidence evidence;
     bool temporaryConnectionOpened = false;
     bool temporaryConnectionClosed = false;
+    std::optional<std::uint32_t> mvlcHardwareId;
+    std::optional<std::uint32_t> mvlcFirmwareRevision;
+    std::optional<std::uint32_t> mvlcDaqMode;
     std::optional<std::uint16_t> targetHardwareId;
     std::optional<std::uint16_t> targetFirmwareRevision;
     std::optional<std::uint16_t> targetAcquisitionControl;

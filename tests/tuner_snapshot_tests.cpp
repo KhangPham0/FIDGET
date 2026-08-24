@@ -42,6 +42,9 @@ fidget::TunerTargetState VerifiedTarget()
     target.verification.probedInput = target.input;
     target.verification.result.outcome = TargetProbeOutcome::VerifiedIdle;
     auto& evidence = target.verification.result.evidence;
+    evidence.controllerEndpointReached = true;
+    evidence.supportedControllerTypeAndFirmwareReverified = true;
+    evidence.controllerDaqIdleReverified = true;
     evidence.targetIdentityAndFirmwareVerified = true;
     evidence.targetAcquisitionStoppedVerified = true;
     evidence.noControlTaken = true;
@@ -246,7 +249,19 @@ TEST_CASE("target evidence invalidates according to field dependencies")
 
     target = VerifiedTarget();
     target.controllerVerification.invalidated = true;
+    target.verification.invalidated = true;
     checkEndpointInvalidated(target);
+
+    target = VerifiedTarget();
+    target.verification.result.evidence
+        .supportedControllerTypeAndFirmwareReverified = false;
+    CHECK(TargetProbeEvidenceIsCurrent(target));
+    CHECK_FALSE(TargetVerificationIsFresh(target));
+
+    target = VerifiedTarget();
+    target.verification.result.evidence.controllerDaqIdleReverified = false;
+    CHECK(TargetProbeEvidenceIsCurrent(target));
+    CHECK_FALSE(TargetVerificationIsFresh(target));
 }
 
 TEST_CASE("active-use target evidence routes into the presentation hazard facts")
@@ -277,6 +292,7 @@ TEST_CASE("controller active-use evidence remains separate from target evidence"
     auto target = VerifiedTarget();
     target.controllerVerification.result.outcome =
         ControllerProbeOutcome::ControllerDaqActive;
+    target.verification.invalidated = true;
     auto& controller = target.controllerVerification.result.evidence;
     controller.controllerDaqIdleVerified = false;
     controller.activeControllerUseDetected = true;

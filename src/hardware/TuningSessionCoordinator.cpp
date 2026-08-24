@@ -127,12 +127,25 @@ TunerStatusLevel ProbeStatusLevel(const TargetProbeOutcome outcome)
     {
     case TargetProbeOutcome::VerifiedIdle:
         return TunerStatusLevel::Success;
+    case TargetProbeOutcome::ControllerDaqActive:
     case TargetProbeOutcome::TargetAcquisitionActive:
     case TargetProbeOutcome::Cancelled:
         return TunerStatusLevel::Warning;
     default:
         return TunerStatusLevel::Error;
     }
+}
+
+TunerStatusLevel WithPersistenceWarning(
+    const TunerStatusLevel operationLevel,
+    const bool persistenceSucceeded)
+{
+    if (!persistenceSucceeded
+        && operationLevel == TunerStatusLevel::Success)
+    {
+        return TunerStatusLevel::Warning;
+    }
+    return operationLevel;
 }
 
 ApplicationStorageResult SaveBridgeConvenienceFields(
@@ -350,9 +363,9 @@ void TuningSessionCoordinator::ConnectController(
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
-        savedBridgeFields.success
-            ? ProbeStatusLevel(result.outcome)
-            : TunerStatusLevel::Warning,
+        WithPersistenceWarning(
+            ProbeStatusLevel(result.outcome),
+            savedBridgeFields.success),
         result.message,
         savedBridgeFields.success
             ? std::string{}
@@ -451,6 +464,14 @@ void TuningSessionCoordinator::ProbeTarget(
     snapshot.target.verification.invalidated = false;
     snapshot.target.verification.probedInput = input;
     snapshot.target.verification.result = result;
+    const bool controllerRevalidated =
+        result.evidence.supportedControllerTypeAndFirmwareReverified
+        && result.evidence.controllerDaqIdleReverified;
+    if (!controllerRevalidated)
+    {
+        snapshot.target.controllerVerification.inProgress = false;
+        snapshot.target.controllerVerification.invalidated = true;
+    }
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
