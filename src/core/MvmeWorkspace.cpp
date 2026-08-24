@@ -1,10 +1,8 @@
 #include "core/MvmeWorkspace.h"
 
-#include <array>
-#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <limits>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -40,30 +38,17 @@ std::string IndexedField(
         + std::string(detail);
 }
 
-TargetModuleAddressParseResult ParseNumericModuleAddress(
-    const std::uint32_t value)
-{
-    std::array<char, 10U> text{};
-    text[0] = '0';
-    text[1] = 'x';
-    const auto converted = std::to_chars(
-        text.data() + 2U, text.data() + text.size(), value, 16);
-    if (converted.ec != std::errc{})
-    {
-        TargetModuleAddressParseResult result;
-        result.message = "Could not format the numeric module address.";
-        return result;
-    }
-
-    return ParseTargetModuleAddress(
-        std::string_view(text.data(), converted.ptr - text.data()));
-}
-
 TargetModuleAddressParseResult ParseModuleAddress(
     const nlohmann::ordered_json& value)
 {
     if (value.is_string())
-        return ParseTargetModuleAddress(value.get_ref<const std::string&>());
+    {
+        TargetModuleAddressParseResult result;
+        result.message =
+            "The MVME workspace schema expects baseAddress to be a numeric "
+            "A32 address.";
+        return result;
+    }
 
     if (value.is_number_unsigned())
     {
@@ -74,7 +59,8 @@ TargetModuleAddressParseResult ParseModuleAddress(
             result.message = "The module address exceeds the A32 range.";
             return result;
         }
-        return ParseNumericModuleAddress(static_cast<std::uint32_t>(number));
+        return ParseFullTargetModuleAddress(
+            static_cast<std::uint32_t>(number));
     }
 
     if (value.is_number_integer())
@@ -88,11 +74,33 @@ TargetModuleAddressParseResult ParseModuleAddress(
             result.message = "The module address is outside the A32 range.";
             return result;
         }
-        return ParseNumericModuleAddress(static_cast<std::uint32_t>(number));
+        return ParseFullTargetModuleAddress(
+            static_cast<std::uint32_t>(number));
+    }
+
+    if (value.is_number_float())
+    {
+        const auto number = value.get<double>();
+        if (!std::isfinite(number) || number < 0.0
+            || number
+                > static_cast<double>(
+                    std::numeric_limits<std::uint32_t>::max())
+            || std::floor(number) != number)
+        {
+            TargetModuleAddressParseResult result;
+            result.message =
+                "The numeric module address is outside the unsigned A32 "
+                "integer range.";
+            return result;
+        }
+        return ParseFullTargetModuleAddress(
+            static_cast<std::uint32_t>(number));
     }
 
     TargetModuleAddressParseResult result;
-    result.message = "The module address is neither a number nor text.";
+    result.message =
+        "The MVME workspace schema expects baseAddress to be a numeric A32 "
+        "address.";
     return result;
 }
 

@@ -91,4 +91,21 @@ TargetModuleAddressParseResult ParseTargetModuleAddress(
     return result;
 }
 
+TargetModuleAddressParseResult ParseFullTargetModuleAddress(
+    const std::uint32_t fullA32Value)
+{
+    TargetModuleAddressParseResult result;
+    if ((fullA32Value & 0xFFFFU) != 0U)
+    {
+        result.message =
+            "A full A32 target-module address must be 64-KiB aligned.";
+        return result;
+    }
+
+    result.success = true;
+    result.address = TargetModuleAddress(fullA32Value);
+    result.message = "Accepted the full numeric target-module address.";
+    return result;
+}
+
 } // namespace fidget

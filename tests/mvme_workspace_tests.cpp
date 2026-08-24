@@ -202,26 +202,69 @@ TEST_CASE("enabled mdpp32_scp target lookup normalizes one address across events
     }
 }
 
-TEST_CASE("workspace target lookup accepts textual shorthand and address zero")
+// MVME src/vme_config.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// serializes baseAddress as a JSON number and deserializes it numerically.
+TEST_CASE("workspace target lookup accepts the numeric A32 boundaries")
 {
     using namespace fidget;
 
     auto document = LoadFixture("mvme_workspace_v4.vme").Json();
     auto& module = document["DAQConfig"]["events"][0]["modules"][0];
 
-    module["baseAddress"] = "1100";
-    auto workspace = Reparse(document);
-    CHECK(workspace.FindEnabledMdpp32ScpTarget(Address("0x11000000"))
-              .status
-          == MvmeWorkspaceTargetStatus::Found);
-
     module["baseAddress"] = 0;
-    workspace = Reparse(document);
-    const auto found = workspace.FindEnabledMdpp32ScpTarget(
+    auto found = Reparse(document).FindEnabledMdpp32ScpTarget(
         Address("0x0000"));
     REQUIRE(found.status == MvmeWorkspaceTargetStatus::Found);
     REQUIRE(found.target.has_value());
     CHECK(found.target->address.FullA32Value() == 0U);
+
+    module["baseAddress"] = 0xFFFF0000ULL;
+    found = Reparse(document).FindEnabledMdpp32ScpTarget(
+        Address("0xFFFF0000"));
+    REQUIRE(found.status == MvmeWorkspaceTargetStatus::Found);
+    REQUIRE(found.target.has_value());
+    CHECK(found.target->address.FullA32Value() == 0xFFFF0000U);
+
+    module["baseAddress"] = 285212672.0;
+    found = Reparse(document).FindEnabledMdpp32ScpTarget(
+        Address("0x11000000"));
+    CHECK(found.status == MvmeWorkspaceTargetStatus::Found);
+}
+
+TEST_CASE("workspace target lookup rejects string baseAddress schema forms")
+{
+    using namespace fidget;
+
+    struct FixtureCase
+    {
+        const char* name;
+        std::size_t eventIndex;
+    };
+    const FixtureCase fixtures[] = {
+        {"mvme_workspace_v3.vme", 1U},
+        {"mvme_workspace_v4.vme", 0U},
+    };
+
+    for (const auto& fixture : fixtures)
+    {
+        for (const auto* text : {"0x1100", "1100", "0x11000000"})
+        {
+            CAPTURE(fixture.name);
+            CAPTURE(text);
+            auto document = LoadFixture(fixture.name).Json();
+            document["DAQConfig"]["events"][fixture.eventIndex]
+                    ["modules"][0]["baseAddress"] = text;
+            const auto found = Reparse(document)
+                .FindEnabledMdpp32ScpTarget(Address("0x1100"));
+            CHECK(found.status
+                  == MvmeWorkspaceTargetStatus::InvalidModuleAddress);
+            CHECK_FALSE(found.target.has_value());
+            CHECK(found.message.find(
+                      "workspace schema expects baseAddress to be a numeric "
+                      "A32 address")
+                  != std::string::npos);
+        }
+    }
 }
 
 TEST_CASE("workspace target lookup rejects duplicate enabled targets")
@@ -308,6 +351,15 @@ TEST_CASE("workspace target lookup fails closed on malformed enabled modules")
         const auto found = Reparse(document).FindEnabledMdpp32ScpTarget(
             Address("0x1100"));
         CHECK(found.status == MvmeWorkspaceTargetStatus::InvalidModuleAddress);
+    }
+
+    SUBCASE("numeric shorthand is not a workspace schema form")
+    {
+        module["baseAddress"] = 0x1100;
+        const auto found = Reparse(document).FindEnabledMdpp32ScpTarget(
+            Address("0x1100"));
+        CHECK(found.status == MvmeWorkspaceTargetStatus::InvalidModuleAddress);
+        CHECK(found.message.find("64-KiB aligned") != std::string::npos);
     }
 
     SUBCASE("non Boolean module enabled field")

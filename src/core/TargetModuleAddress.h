@@ -48,6 +48,8 @@ private:
 
     friend TargetModuleAddressParseResult ParseTargetModuleAddress(
         std::string_view text);
+    friend TargetModuleAddressParseResult ParseFullTargetModuleAddress(
+        std::uint32_t fullA32Value);
 };
 
 struct TargetModuleAddressParseResult
@@ -62,6 +64,11 @@ struct TargetModuleAddressParseResult
 // values must already be full 64-KiB-aligned A32 addresses.
 [[nodiscard]] TargetModuleAddressParseResult ParseTargetModuleAddress(
     std::string_view text);
+
+// Parses an already-expanded numeric A32 address. Unlike the user-facing text
+// parser, this never interprets small values as MVME shorthand.
+[[nodiscard]] TargetModuleAddressParseResult ParseFullTargetModuleAddress(
+    std::uint32_t fullA32Value);
 
 } // namespace fidget
 

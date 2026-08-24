@@ -70,6 +70,27 @@ TEST_CASE("the full shorthand range normalizes without overflow")
     CheckAddress("0x00010000", 0x00010000U, 0x0001U);
 }
 
+TEST_CASE("numeric full A32 parsing never applies Home shorthand")
+{
+    using namespace fidget;
+
+    for (const auto value : {0x00000000U, 0x11000000U, 0xFFFF0000U})
+    {
+        const auto parsed = ParseFullTargetModuleAddress(value);
+        INFO(parsed.message);
+        REQUIRE(parsed.success);
+        REQUIRE(parsed.address.has_value());
+        CHECK(parsed.address->FullA32Value() == value);
+    }
+
+    const auto shorthand = ParseFullTargetModuleAddress(0x00001100U);
+    CHECK_FALSE(shorthand.success);
+    CHECK_FALSE(shorthand.address.has_value());
+    CHECK(shorthand.message.find("64-KiB aligned") != std::string::npos);
+
+    CheckAddress("0x1100", 0x11000000U, 0x1100U);
+}
+
 TEST_CASE("target-module address overflow is rejected")
 {
     const std::array<std::string_view, 2U> overflowing{{
