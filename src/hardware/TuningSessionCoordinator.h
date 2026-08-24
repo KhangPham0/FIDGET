@@ -1,6 +1,7 @@
 #ifndef FIDGET_HARDWARE_TUNING_SESSION_COORDINATOR_H
 #define FIDGET_HARDWARE_TUNING_SESSION_COORDINATOR_H
 
+#include "core/ApplicationRecoveryDiscovery.h"
 #include "core/ApplicationStorage.h"
 #include "core/TunerControl.h"
 
@@ -40,6 +41,8 @@ public:
         const TunerCommand& command) noexcept;
     void Submit(TunerCommand command);
     void CancelPendingProbe() noexcept;
+    void ApplyApplicationRecoveryDiscovery(
+        TunerSnapshot& snapshot) const;
 
 private:
     void EditTarget(EditTunerTargetCommand command);
@@ -68,6 +71,7 @@ private:
     ITransportFactory& transportFactory_;
     CommandWorker& worker_;
     ApplicationStoragePaths storagePaths_;
+    ApplicationRecoveryDiscoveryResult applicationRecoveryDiscovery_;
     TuningSessionSnapshotReader snapshotReader_;
     TuningSessionSnapshotPublisher snapshotPublisher_;
     std::mutex probeMutex_;

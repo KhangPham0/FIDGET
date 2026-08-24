@@ -193,6 +193,20 @@ struct GuiEvidenceClaims
     bool recoveryControllerReleased = false;
 };
 
+// Startup discovery data is copied from a checksum-validated v5 record for
+// later recovery-page rendering. These are stored expectations, not claims
+// that the currently connected hardware has been verified.
+struct GuiApplicationRecoveryContext
+{
+    ApplicationRecoveryDiscoveryState state =
+        ApplicationRecoveryDiscoveryState::NotScanned;
+    ApplicationRecoveryBlockReason blockReason =
+        ApplicationRecoveryBlockReason::None;
+    std::string message;
+    std::optional<ControllerEndpointRequest> endpoint;
+    std::optional<TunerRecoveryV5IdentityEvidence> identity;
+};
+
 struct GuiViewState
 {
     GuiPage page = GuiPage::HomeDisconnected;
@@ -206,11 +220,12 @@ struct GuiViewState
     // This is a display projection of TunerTargetSelection's one canonical
     // parsed address. No second address is parsed or stored as authority.
     std::optional<std::uint32_t> targetModuleAddressA32;
+    GuiApplicationRecoveryContext applicationRecovery;
 };
 
 [[nodiscard]] GuiViewState PresentGui(
     const TunerSnapshot& snapshot,
-    const GuiPresentationSelection& selection = {}) noexcept;
+    const GuiPresentationSelection& selection = {});
 
 [[nodiscard]] const char* GuiHeaderConnectionStatusText(
     GuiHeaderConnectionStatus status) noexcept;

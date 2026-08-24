@@ -10,7 +10,9 @@ GuidedTunerInputs MakeGuidedTunerInputs(
     inputs.targetSupported = snapshot.targetSupported;
     inputs.ownership = snapshot.ownership;
     inputs.mvmeHandoffConfirmed = snapshot.mvmeHandoffConfirmed;
-    inputs.recoveryRecordAvailable = snapshot.recoveryRecordAvailable;
+    inputs.recoveryRecordAvailable = snapshot.recoveryRecordAvailable
+        || ApplicationRecoveryBlocksNormalTuning(
+            snapshot.applicationRecovery);
     inputs.activeOperation = snapshot.activeOperation;
     inputs.profileLoadedForTarget = snapshot.profileLoadedForTarget;
     inputs.startupAuditCompleteForTarget =

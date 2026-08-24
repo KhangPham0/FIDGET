@@ -1,6 +1,7 @@
 add_library(fidget_core STATIC
     ActivityLog.cpp
     ActivityLogFile.cpp
+    ApplicationRecoveryDiscovery.cpp
     ApplicationStorage.cpp
     BridgeProtocol.cpp
     ControllerEndpoint.cpp

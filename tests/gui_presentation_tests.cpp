@@ -6,6 +6,7 @@
 #include <array>
 #include <initializer_list>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -73,6 +74,30 @@ TunerSnapshot RecoverySnapshot()
     evidence.noRecoveryPending = false;
     evidence.recoveryRecordPresent = true;
     evidence.recoveryInProgress = true;
+    return snapshot;
+}
+
+TunerSnapshot ApplicationRecoverySnapshot(
+    ControllerEndpointRequest endpoint)
+{
+    auto snapshot = ReadySnapshot();
+    snapshot.applicationRecovery.state =
+        ApplicationRecoveryDiscoveryState::PendingV5;
+    snapshot.applicationRecovery.message =
+        "Found one valid pending v5 application recovery record.";
+
+    TunerRecoveryRecord record;
+    record.formatVersion = TunerRecoveryJournalV5FormatVersion;
+    TunerRecoveryV5Data data;
+    data.sessionPhase = TuningSessionPhase::Preparing;
+    data.endpoint = std::move(endpoint);
+    data.identity.mvlcHardwareId = 0x5008U;
+    data.identity.mvlcFirmwareRevision = 0x0046U;
+    data.identity.targetBaseAddress = 0x11000000U;
+    data.identity.targetHardwareId = 0x5007U;
+    data.identity.targetFirmwareRevision = 0x2051U;
+    record.version5 = std::move(data);
+    snapshot.applicationRecovery.record = std::move(record);
     return snapshot;
 }
 
@@ -583,6 +608,15 @@ TEST_CASE("ready and preparation actions require every decisive fact")
     CHECK(PresentGui(readyButBusy).page == GuiPage::HomeReady);
     CHECK_FALSE(Allows(
         PresentGui(readyButBusy).allowedActions,
+        GuiAction::StartTuning));
+
+    auto readyWithUnresolvedRecovery = ReadySnapshot();
+    readyWithUnresolvedRecovery.tuningSession.evidence.noRecoveryPending =
+        false;
+    CHECK(PresentGui(readyWithUnresolvedRecovery).page
+          == GuiPage::HomeReady);
+    CHECK_FALSE(Allows(
+        PresentGui(readyWithUnresolvedRecovery).allowedActions,
         GuiAction::StartTuning));
 
     constexpr std::array<Member, 7> preparationFacts = {{
@@ -1166,4 +1200,102 @@ TEST_CASE("SSH expansion remains presentation-only")
     CHECK(Allows(expanded.allowedActions, GuiAction::StartTuning));
     CHECK(Allows(expanded.allowedActions, GuiAction::CollapseSshSettings));
     CHECK(snapshot.tuningSession.phase == TuningSessionPhase::Home);
+}
+
+TEST_CASE("application recovery discovery preempts Home without inventing live claims")
+{
+    using namespace fidget;
+
+    SUBCASE("an empty application recovery directory leaves Home ready")
+    {
+        auto snapshot = ReadySnapshot();
+        snapshot.applicationRecovery.state =
+            ApplicationRecoveryDiscoveryState::Empty;
+        const auto view = PresentGui(snapshot);
+        CHECK(view.page == GuiPage::HomeReady);
+        CHECK(Allows(view.allowedActions, GuiAction::StartTuning));
+    }
+
+    SUBCASE("a direct record carries its stored endpoint and identity")
+    {
+        const auto snapshot = ApplicationRecoverySnapshot(
+            ControllerEndpointRequest{
+                ControllerEndpointKind::DirectEthernet,
+                "controller-direct",
+                32768U,
+                {},
+                {},
+            });
+        const auto view = PresentGui(snapshot);
+        CHECK(view.page == GuiPage::Recovery);
+        CHECK(view.headerConnection
+              == GuiHeaderConnectionStatus::RecoveryInProgress);
+        CHECK_FALSE(Allows(view.allowedActions, GuiAction::StartTuning));
+        CHECK(view.applicationRecovery.state
+              == ApplicationRecoveryDiscoveryState::PendingV5);
+        REQUIRE(view.applicationRecovery.endpoint.has_value());
+        const auto& endpoint = *view.applicationRecovery.endpoint;
+        CHECK(endpoint.kind == ControllerEndpointKind::DirectEthernet);
+        CHECK(endpoint.mvlcHost == "controller-direct");
+        REQUIRE(view.applicationRecovery.identity.has_value());
+        CHECK(view.applicationRecovery.identity->targetBaseAddress
+              == 0x11000000U);
+        CHECK(view.claims.recoveryRecordDurable);
+        CHECK(view.claims.recoveryRecordRetained);
+        CHECK_FALSE(view.claims.noRecoveryWritesSent);
+        CHECK_FALSE(view.claims.recoveryIdentitiesVerified);
+        CHECK_FALSE(view.claims.recoveryStoppedStateVerified);
+    }
+
+    SUBCASE("an SSH record carries routing fields but no live claims")
+    {
+        const auto snapshot = ApplicationRecoverySnapshot(
+            ControllerEndpointRequest{
+                ControllerEndpointKind::SshBridge,
+                "controller-remote",
+                41000U,
+                "bridge-alias",
+                "fidget_bridge",
+            });
+        const auto view = PresentGui(snapshot);
+        CHECK(view.page == GuiPage::Recovery);
+        REQUIRE(view.applicationRecovery.endpoint.has_value());
+        const auto& endpoint = *view.applicationRecovery.endpoint;
+        CHECK(endpoint.kind == ControllerEndpointKind::SshBridge);
+        CHECK(endpoint.mvlcHost == "controller-remote");
+        CHECK(endpoint.mvlcCommandPort == 41000U);
+        CHECK(endpoint.sshDestination == "bridge-alias");
+        CHECK(endpoint.remoteBridgeCommand == "fidget_bridge");
+        CHECK_FALSE(view.claims.recoveryIdentitiesVerified);
+    }
+
+    SUBCASE("blocked discovery overrides stale Home-ready evidence")
+    {
+        auto snapshot = ReadySnapshot();
+        snapshot.applicationRecovery.state =
+            ApplicationRecoveryDiscoveryState::Blocked;
+        snapshot.applicationRecovery.blockReason =
+            ApplicationRecoveryBlockReason::MultipleRecords;
+        snapshot.applicationRecovery.message =
+            "Recovery is blocked because multiple records are present.";
+        snapshot.applicationRecovery.recordPaths = {
+            "first.recovery",
+            "second.recovery",
+        };
+
+        const auto view = PresentGui(snapshot);
+        CHECK(view.page == GuiPage::RecoveryBlocked);
+        CHECK(view.headerConnection
+              == GuiHeaderConnectionStatus::RecoveryBlocked);
+        CHECK(view.applicationRecovery.blockReason
+              == ApplicationRecoveryBlockReason::MultipleRecords);
+        CHECK(view.applicationRecovery.message.find("multiple records")
+              != std::string::npos);
+        CHECK_FALSE(view.applicationRecovery.endpoint.has_value());
+        CHECK_FALSE(view.applicationRecovery.identity.has_value());
+        CHECK_FALSE(Allows(view.allowedActions, GuiAction::StartTuning));
+        CHECK(view.claims.recoveryRecordRetained);
+        CHECK_FALSE(view.claims.noRecoveryWritesSent);
+        CHECK_FALSE(view.claims.recoveryIdentitiesVerified);
+    }
 }

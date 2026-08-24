@@ -165,6 +165,33 @@ fidget::TunerTargetInput TargetInput(
     return input;
 }
 
+fidget::TunerRecoveryRecord ApplicationRecoveryRecord(
+    fidget::ControllerEndpointRequest endpoint = {
+        fidget::ControllerEndpointKind::DirectEthernet,
+        "controller-test",
+        32768U,
+        {},
+        {},
+    })
+{
+    using namespace fidget;
+
+    TunerRecoveryRecord record;
+    record.formatVersion = TunerRecoveryJournalV5FormatVersion;
+    TunerRecoveryV5Data data;
+    data.sessionPhase = TuningSessionPhase::Preparing;
+    data.endpoint = std::move(endpoint);
+    data.identity.mvlcHardwareId = 0x5008U;
+    data.identity.mvlcFirmwareRevision = 0x0046U;
+    data.identity.targetBaseAddress = TargetBase;
+    data.identity.targetHardwareId = Mdpp32HardwareId;
+    data.identity.targetFirmwareRevision =
+        Mdpp32ScpFirmwareRevisionFw2051;
+    data.selectorParkingRequired = true;
+    record.version5 = std::move(data);
+    return record;
+}
+
 void EditTarget(
     fidget::OwnershipService& service,
     const fidget::TunerTargetInput& input)
@@ -338,6 +365,10 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     }));
     CHECK(fixture.service->CurrentSnapshot()
               ->tuningSession.evidence.endpointInputsValid);
+    CHECK(fixture.service->CurrentSnapshot()->applicationRecovery.state
+          == ApplicationRecoveryDiscoveryState::Empty);
+    CHECK(fixture.service->CurrentSnapshot()
+              ->tuningSession.evidence.noRecoveryPending);
     CHECK_FALSE(fixture.service->CurrentSnapshot()
                     ->tuningSession.evidence.currentConnectionRequestValid);
 
@@ -1021,6 +1052,125 @@ TEST_CASE("opening a target session is an evidence-only gate")
     CHECK(fixture.transport->SentRequests().size() == wireCount);
 }
 
+TEST_CASE("application recovery is discovered before direct-target Home work")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryDirectory home;
+    const auto storage = ApplicationStoragePathsForHome(home.Get());
+    const auto ready = EnsureApplicationStorageDirectories(storage);
+    INFO(ready.message);
+    REQUIRE(ready.success);
+    const auto journal = storage.recoveryDirectory / "pending.recovery";
+    const auto saved = SaveTunerRecoveryJournal(
+        ApplicationRecoveryRecord(), journal.string());
+    INFO(saved.message);
+    REQUIRE(saved.success);
+    const auto journalBefore = [&journal] {
+        std::ifstream input(journal, std::ios::binary);
+        REQUIRE(input.good());
+        std::ostringstream text;
+        text << input.rdbuf();
+        REQUIRE_FALSE(input.bad());
+        return text.str();
+    }();
+
+    auto transportOwner = std::make_unique<FakeCommandTransport>();
+    auto* transport = transportOwner.get();
+    auto factoryOwner = std::make_unique<FakeTransportFactory>(
+        std::move(transportOwner));
+    auto* factory = factoryOwner.get();
+    OwnershipService service(std::move(factoryOwner), 1h, storage);
+
+    auto snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->applicationRecovery.state
+          == ApplicationRecoveryDiscoveryState::PendingV5);
+    REQUIRE(snapshot->applicationRecovery.record.has_value());
+    REQUIRE(snapshot->applicationRecovery.record->version5.has_value());
+    CHECK(snapshot->applicationRecovery.record->version5
+              ->identity.targetBaseAddress
+          == TargetBase);
+    CHECK(snapshot->ownership
+          == GuidedTunerOwnershipState::RecoveryRequired);
+    CHECK_FALSE(snapshot->tuningSession.evidence.noRecoveryPending);
+    CHECK(snapshot->tuningSession.evidence.recoveryRecordPresent);
+    CHECK(snapshot->tuningSession.evidence.recoveryContextEstablished);
+    CHECK_FALSE(snapshot->tuningSession.evidence
+                    .recoveryControllerAndTargetIdentitiesVerified);
+    CHECK(factory->CreateCount() == 0U);
+    CHECK(transport->SentRequests().empty());
+
+    const auto input = TargetInput(TunerTargetEndpointKind::DirectEthernet);
+    service.Submit(EditTunerTargetCommand{input});
+    REQUIRE(WaitFor(service, [&input](const TunerSnapshot& value) {
+        return value.target.input == input;
+    }));
+    snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->applicationRecovery.state
+          == ApplicationRecoveryDiscoveryState::PendingV5);
+    CHECK_FALSE(snapshot->tuningSession.evidence.noRecoveryPending);
+
+    service.Submit(OpenTunerTargetSessionCommand{});
+    REQUIRE(WaitFor(service, [](const TunerSnapshot& value) {
+        return value.target.sessionGate.outcome
+            == TunerTargetSessionGateOutcome::RefusedRecoveryPending;
+    }));
+    CHECK(factory->CreateCount() == 0U);
+    CHECK(transport->SentRequests().empty());
+
+    std::ifstream afterInput(journal, std::ios::binary);
+    REQUIRE(afterInput.good());
+    std::ostringstream after;
+    after << afterInput.rdbuf();
+    REQUIRE_FALSE(afterInput.bad());
+    CHECK(after.str() == journalBefore);
+}
+
+TEST_CASE("malformed startup recovery blocks without contacting hardware")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    TemporaryDirectory home;
+    const auto storage = ApplicationStoragePathsForHome(home.Get());
+    REQUIRE(EnsureApplicationStorageDirectories(storage).success);
+    const auto journal = storage.recoveryDirectory / "damaged.recovery";
+    WriteText(journal.string(), "damaged recovery evidence\n");
+
+    auto transportOwner = std::make_unique<FakeCommandTransport>();
+    auto* transport = transportOwner.get();
+    auto factoryOwner = std::make_unique<FakeTransportFactory>(
+        std::move(transportOwner));
+    auto* factory = factoryOwner.get();
+    OwnershipService service(std::move(factoryOwner), 1h, storage);
+
+    const auto snapshot = service.CurrentSnapshot();
+    CHECK(snapshot->applicationRecovery.state
+          == ApplicationRecoveryDiscoveryState::Blocked);
+    CHECK(snapshot->applicationRecovery.blockReason
+          == ApplicationRecoveryBlockReason::MalformedRecord);
+    CHECK(snapshot->applicationRecovery.message.find("malformed")
+          != std::string::npos);
+    CHECK(snapshot->ownership
+          == GuidedTunerOwnershipState::RecoveryRequired);
+    CHECK_FALSE(snapshot->tuningSession.evidence.noRecoveryPending);
+    CHECK(snapshot->tuningSession.evidence.recoveryRecordPresent);
+    CHECK(snapshot->tuningSession.evidence.recoveryRecordRetained);
+    CHECK(snapshot->tuningSession.evidence.recoveryComparison
+          == TuningRecoveryComparison::InsufficientEvidence);
+    CHECK_FALSE(snapshot->tuningSession.evidence.noRecoveryWritesSent);
+    CHECK(factory->CreateCount() == 0U);
+    CHECK(transport->SentRequests().empty());
+    CHECK(std::filesystem::exists(journal));
+    CHECK([&journal] {
+        std::ifstream input(journal, std::ios::binary);
+        std::ostringstream text;
+        text << input.rdbuf();
+        return text.str();
+    }() == "damaged recovery evidence\n");
+}
+
 TEST_CASE("legacy project dispatch and adjacent recovery discovery are unchanged")
 {
     using namespace fidget;
@@ -1072,11 +1222,62 @@ TEST_CASE("legacy project dispatch and adjacent recovery discovery are unchanged
         }));
 
         const auto snapshot = fixture.service->CurrentSnapshot();
+        CHECK(snapshot->applicationRecovery.state
+              == ApplicationRecoveryDiscoveryState::Empty);
         CHECK(snapshot->projectActive);
         CHECK(snapshot->ownership
               == GuidedTunerOwnershipState::RecoveryRequired);
         CHECK(snapshot->recoveryJournalPath == files.RecoveryPath());
         CHECK(fixture.factory->CreateCount() == 0U);
         CHECK(fixture.factory->Projects().empty());
+    }
+
+    SUBCASE("application and project-adjacent evidence remain additive")
+    {
+        TemporaryDirectory home;
+        const auto storage = ApplicationStoragePathsForHome(home.Get());
+        REQUIRE(EnsureApplicationStorageDirectories(storage).success);
+        const auto applicationJournal =
+            storage.recoveryDirectory / "pending.recovery";
+        REQUIRE(SaveTunerRecoveryJournal(
+                    ApplicationRecoveryRecord(
+                        ControllerEndpointRequest{
+                            ControllerEndpointKind::SshBridge,
+                            "controller-remote",
+                            41000U,
+                            "bridge-alias",
+                            "fidget_bridge",
+                        }),
+                    applicationJournal.string()).success);
+
+        TemporaryLegacyProject files(home.Get());
+        WriteText(files.RecoveryPath(), "malformed recovery evidence\n");
+        auto transportOwner =
+            std::make_unique<test::FakeCommandTransport>();
+        auto* transport = transportOwner.get();
+        auto factoryOwner = std::make_unique<test::FakeTransportFactory>(
+            std::move(transportOwner));
+        auto* factory = factoryOwner.get();
+        OwnershipService service(std::move(factoryOwner), 1h, storage);
+
+        service.Submit(UseCrateProjectCommand{
+            files.ProjectPath(), LegacyProject(), 0U});
+        REQUIRE(WaitFor(service, [](const TunerSnapshot& snapshot) {
+            return snapshot.projectActive
+                && snapshot.recoveryJournalStatus
+                    == RecoveryJournalStatus::Malformed;
+        }));
+
+        const auto snapshot = service.CurrentSnapshot();
+        CHECK(snapshot->applicationRecovery.state
+              == ApplicationRecoveryDiscoveryState::PendingV5);
+        CHECK(snapshot->recoveryJournalStatus
+              == RecoveryJournalStatus::Malformed);
+        CHECK(snapshot->recoveryJournalPath == files.RecoveryPath());
+        CHECK(MakeGuidedTunerInputs(*snapshot).recoveryRecordAvailable);
+        CHECK(snapshot->ownership
+              == GuidedTunerOwnershipState::RecoveryRequired);
+        CHECK(factory->CreateCount() == 0U);
+        CHECK(transport->SentRequests().empty());
     }
 }

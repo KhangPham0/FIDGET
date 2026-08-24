@@ -11,6 +11,20 @@ target_link_libraries(application_storage_tests PRIVATE
 
 add_test(NAME application_storage_tests COMMAND application_storage_tests)
 
+add_executable(
+    application_recovery_discovery_tests
+    application_recovery_discovery_tests.cpp
+)
+target_link_libraries(application_recovery_discovery_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(
+    NAME application_recovery_discovery_tests
+    COMMAND application_recovery_discovery_tests
+)
+
 add_executable(bridge_protocol_tests bridge_protocol_tests.cpp)
 target_link_libraries(bridge_protocol_tests PRIVATE
     fidget_core

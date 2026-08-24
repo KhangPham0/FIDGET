@@ -3,6 +3,7 @@
 
 #include "core/ActivityLog.h"
 #include "core/Acquisition.h"
+#include "core/ApplicationRecoveryDiscovery.h"
 #include "core/CrateProject.h"
 #include "core/DeterministicStartup.h"
 #include "core/GuidedWorkflow.h"
@@ -46,6 +47,7 @@ struct TunerSnapshot
     TuningSessionState tuningSession;
     TunerTargetState target;
     TunerWorkspaceState workspace;
+    ApplicationRecoveryDiscoveryResult applicationRecovery;
 
     bool projectActive = false;
     std::string projectPath;

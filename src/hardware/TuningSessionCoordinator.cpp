@@ -185,9 +185,50 @@ TuningSessionCoordinator::TuningSessionCoordinator(
     : transportFactory_(transportFactory)
     , worker_(worker)
     , storagePaths_(std::move(storagePaths))
+    , applicationRecoveryDiscovery_(
+          DiscoverApplicationRecovery(storagePaths_))
     , snapshotReader_(std::move(snapshotReader))
     , snapshotPublisher_(std::move(snapshotPublisher))
 {
+}
+
+void TuningSessionCoordinator::ApplyApplicationRecoveryDiscovery(
+    TunerSnapshot& snapshot) const
+{
+    snapshot.applicationRecovery = applicationRecoveryDiscovery_;
+    auto& evidence = snapshot.tuningSession.evidence;
+    if (ApplicationRecoveryBlocksNormalTuning(
+            applicationRecoveryDiscovery_))
+    {
+        evidence.noRecoveryPending = false;
+        evidence.recoveryRecordPresent =
+            ApplicationRecoveryHasRetainedEvidence(
+                applicationRecoveryDiscovery_);
+        evidence.recoveryContextEstablished = true;
+        evidence.recoveryRecordRetained =
+            ApplicationRecoveryHasRetainedEvidence(
+                applicationRecoveryDiscovery_);
+        evidence.recoveryRecordDurable =
+            applicationRecoveryDiscovery_.state
+            == ApplicationRecoveryDiscoveryState::PendingV5;
+        if (applicationRecoveryDiscovery_.state
+            == ApplicationRecoveryDiscoveryState::Blocked)
+        {
+            evidence.recoveryComparison =
+                TuningRecoveryComparison::InsufficientEvidence;
+        }
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        return;
+    }
+
+    const bool legacyRecoveryOutstanding = snapshot.recoveryRecordAvailable
+        || snapshot.recoveryJournalStatus != RecoveryJournalStatus::None;
+    if (!legacyRecoveryOutstanding
+        && !evidence.recoveryContextEstablished
+        && !evidence.recoveryInProgress)
+    {
+        evidence.noRecoveryPending = true;
+    }
 }
 
 bool TuningSessionCoordinator::Handles(
@@ -513,6 +554,22 @@ void TuningSessionCoordinator::OpenTargetSession()
 {
     auto snapshot = SnapshotCopy();
     snapshot.target.sessionGate = {};
+    if (!snapshot.tuningSession.evidence.noRecoveryPending)
+    {
+        snapshot.target.sessionGate.outcome =
+            TunerTargetSessionGateOutcome::RefusedRecoveryPending;
+        snapshot.target.sessionGate.message =
+            "The target session was not opened because recovery evidence "
+            "must be resolved first.";
+        RefreshPresentationEvidence(snapshot);
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The target session was not opened.",
+            "Resolve the pending or blocked recovery evidence before "
+            "starting normal tuning.");
+        return;
+    }
     if (!TargetVerificationIsFresh(snapshot.target))
     {
         snapshot.target.sessionGate.outcome =

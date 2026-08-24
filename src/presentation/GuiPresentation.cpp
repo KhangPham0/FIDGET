@@ -157,6 +157,8 @@ bool RecoveryRecordOutstanding(
     const Evidence& evidence) noexcept
 {
     return snapshot.recoveryRecordAvailable
+        || ApplicationRecoveryBlocksNormalTuning(
+            snapshot.applicationRecovery)
         || evidence.recoveryRecordPresent
         || snapshot.recoveryJournalStatus == RecoveryJournalStatus::Pending
         || snapshot.recoveryJournalStatus == RecoveryJournalStatus::Malformed;
@@ -181,7 +183,9 @@ bool RecoveryCannotProceed(
         || outcome == TuningRecoveryComparison::InsufficientEvidence;
 
     return RecoveryPending(snapshot, evidence)
-        && (cannotRestore
+        && (snapshot.applicationRecovery.state
+                == ApplicationRecoveryDiscoveryState::Blocked
+            || cannotRestore
             || snapshot.recoveryJournalStatus
                 == RecoveryJournalStatus::Malformed);
 }
@@ -252,6 +256,11 @@ GuiEvidenceClaims MakeClaims(
     claims.liveRestoreSnapshotCaptured =
         evidence.liveRestoreSnapshotCaptured;
     claims.recoveryRecordDurable = evidence.recoveryRecordDurable;
+    if (snapshot.applicationRecovery.state
+        == ApplicationRecoveryDiscoveryState::PendingV5)
+    {
+        claims.recoveryRecordDurable = true;
+    }
     claims.workspaceStartingSettingsResolved =
         evidence.workspaceStartingSettingsResolved;
     claims.acquisitionPrepared =
@@ -314,8 +323,11 @@ GuiEvidenceClaims MakeClaims(
     claims.unexpectedRecoveryValueNotOverwritten =
         unexpected
         && evidence.unexpectedRecoveryValueNotOverwritten;
+    const bool applicationRecordRetained =
+        ApplicationRecoveryHasRetainedEvidence(
+            snapshot.applicationRecovery);
     claims.recoveryRecordRetained =
-        evidence.recoveryRecordRetained;
+        evidence.recoveryRecordRetained || applicationRecordRetained;
     claims.noRecoveryWritesSent =
         evidence.recoveryRecordRetained
         && evidence.noRecoveryWritesSent;
@@ -774,7 +786,7 @@ bool Allows(const GuiActionSet& actions, const GuiAction action) noexcept
 
 GuiViewState PresentGui(
     const TunerSnapshot& snapshot,
-    const GuiPresentationSelection& selection) noexcept
+    const GuiPresentationSelection& selection)
 {
     const auto& evidence = snapshot.tuningSession.evidence;
 
@@ -784,6 +796,20 @@ GuiViewState PresentGui(
     {
         view.targetModuleAddressA32 =
             snapshot.target.selection->moduleAddress.FullA32Value();
+    }
+    view.applicationRecovery.state = snapshot.applicationRecovery.state;
+    view.applicationRecovery.blockReason =
+        snapshot.applicationRecovery.blockReason;
+    view.applicationRecovery.message = snapshot.applicationRecovery.message;
+    if (snapshot.applicationRecovery.state
+            == ApplicationRecoveryDiscoveryState::PendingV5
+        && snapshot.applicationRecovery.record.has_value()
+        && snapshot.applicationRecovery.record->version5.has_value())
+    {
+        view.applicationRecovery.endpoint =
+            snapshot.applicationRecovery.record->version5->endpoint;
+        view.applicationRecovery.identity =
+            snapshot.applicationRecovery.record->version5->identity;
     }
     view.claims = MakeClaims(snapshot, evidence);
     view.drawer = SelectDrawer(selection.drawer, evidence);

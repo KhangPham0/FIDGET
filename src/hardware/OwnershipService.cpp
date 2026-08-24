@@ -72,6 +72,7 @@ OwnershipService::OwnershipService(
         std::move(applicationStoragePaths),
         [this] { return CurrentSnapshot(); },
         [this](TunerSnapshot snapshot) { Publish(std::move(snapshot)); });
+    Publish(TunerSnapshot{});
 }
 
 OwnershipService::~OwnershipService()
@@ -402,6 +403,18 @@ void OwnershipService::CheckStatus()
             "The ownership service has no transport factory.");
         return;
     }
+    if (ApplicationRecoveryBlocksNormalTuning(
+            snapshot.applicationRecovery))
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Recovery,
+            TunerStatusLevel::Warning,
+            "Resolve the application recovery evidence before normal "
+            "controller access.");
+        return;
+    }
     if (snapshot.recoveryRecordAvailable)
     {
         snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
@@ -464,6 +477,18 @@ void OwnershipService::OpenSession()
             ActivityLogCategory::Session,
             TunerStatusLevel::Error,
             "The ownership service has no transport factory.");
+        return;
+    }
+    if (ApplicationRecoveryBlocksNormalTuning(
+            snapshot.applicationRecovery))
+    {
+        snapshot.ownership = GuidedTunerOwnershipState::RecoveryRequired;
+        PublishActivityStatus(
+            std::move(snapshot),
+            ActivityLogCategory::Recovery,
+            TunerStatusLevel::Warning,
+            "Resolve the application recovery evidence before opening a "
+            "tuner session.");
         return;
     }
     if (snapshot.recoveryRecordAvailable)
@@ -3126,6 +3151,11 @@ std::string OwnershipService::ResetTransportSession() noexcept
 
 void OwnershipService::Publish(TunerSnapshot snapshot)
 {
+    if (tuningSessionCoordinator_)
+    {
+        tuningSessionCoordinator_->ApplyApplicationRecoveryDiscovery(
+            snapshot);
+    }
     const auto current = CurrentSnapshot();
     snapshot.revision = current ? current->revision + 1U : 1U;
     std::shared_ptr<const TunerSnapshot> published =

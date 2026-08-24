@@ -169,6 +169,7 @@ enum class TunerTargetSessionGateOutcome
     NotRequested,
     ReadyForPreparation,
     RefusedVerificationNotFresh,
+    RefusedRecoveryPending,
     RefusedStorageUnavailable,
 };
 
