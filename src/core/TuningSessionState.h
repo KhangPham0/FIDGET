@@ -92,7 +92,7 @@ struct TuningSessionEvidence
 
     bool activeControllerUseDetected = false;
     bool noControlTaken = false;
-    bool noStateChangingCommandsSent = false;
+    bool noVmeOrModuleSettingWritesSent = false;
     bool ownershipUncertain = false;
     bool controlsFrozen = false;
     bool noBlindRollbackOrCleanupSent = false;

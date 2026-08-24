@@ -291,7 +291,7 @@ TEST_CASE("the target probe has one exact read-only trace over both endpoints")
     CHECK(result.evidence.targetIdentityAndFirmwareVerified);
     CHECK(result.evidence.targetAcquisitionStoppedVerified);
     CHECK(result.evidence.noControlTaken);
-    CHECK(result.evidence.noStateChangingCommandsSent);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(result.evidence.activeControllerUseDetected);
     REQUIRE(result.targetAcquisitionControl.has_value());
     CHECK(*result.targetAcquisitionControl == 0U);
@@ -336,13 +336,13 @@ TEST_CASE("active MVLC DAQ routes to controller conflict without target traffic"
     CHECK(result.message == ApprovedActiveUseMessage);
     CHECK(result.evidence.activeControllerUseDetected);
     CHECK(result.evidence.noControlTaken);
-    CHECK(result.evidence.noStateChangingCommandsSent);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
     CHECK(fixture.transport->SentRequests().size() == 1U);
     CHECK(DecodeWireOperations(*fixture.transport).empty());
     const auto view = PresentGui(PresentationSnapshot(result));
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
-    CHECK(view.claims.noStateChangingCommandsSent);
+    CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CheckClosed(fixture);
 }
 
@@ -364,7 +364,7 @@ TEST_CASE("an active target routes to controller conflict after read-only checks
     const auto view = PresentGui(PresentationSnapshot(result));
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
-    CHECK(view.claims.noStateChangingCommandsSent);
+    CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CheckClosed(fixture);
 }
 
@@ -455,7 +455,7 @@ TEST_CASE("target probe timeout is specific and closes the connection")
 
     CHECK(result.outcome == TargetProbeOutcome::Timeout);
     CHECK(result.temporaryConnectionClosed);
-    CHECK(result.evidence.noStateChangingCommandsSent);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
     CHECK(transport->SentRequests().size()
           == static_cast<std::size_t>(MvlcFingerprintReadAttemptCount));
     CHECK(DecodeWireOperations(*transport).empty());
@@ -528,6 +528,6 @@ TEST_CASE("malformed local and VME responses have a specific outcome")
     INFO(result.message);
     CHECK(result.outcome == TargetProbeOutcome::MalformedResponse);
     CHECK(result.temporaryConnectionClosed);
-    CHECK(result.evidence.noStateChangingCommandsSent);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(transport->IsOpen());
 }

@@ -38,7 +38,7 @@ fidget::TunerTargetState VerifiedTarget()
     evidence.targetIdentityAndFirmwareVerified = true;
     evidence.targetAcquisitionStoppedVerified = true;
     evidence.noControlTaken = true;
-    evidence.noStateChangingCommandsSent = true;
+    evidence.noVmeOrModuleSettingWritesSent = true;
     return target;
 }
 
@@ -161,7 +161,7 @@ TEST_CASE("verified target facts feed the GUI evidence model")
     CHECK(evidence.controllerIdleVerified);
     CHECK(evidence.connectionVerificationFresh);
     CHECK(evidence.noControlTaken);
-    CHECK(evidence.noStateChangingCommandsSent);
+    CHECK(evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(evidence.activeControllerUseDetected);
 }
 
@@ -238,6 +238,6 @@ TEST_CASE("active-use target evidence routes into the presentation hazard facts"
     CHECK_FALSE(TargetVerificationIsFresh(target));
     CHECK(evidence.activeControllerUseDetected);
     CHECK(evidence.noControlTaken);
-    CHECK(evidence.noStateChangingCommandsSent);
+    CHECK(evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(evidence.connectionVerificationFresh);
 }

@@ -97,7 +97,7 @@ void ApplyTargetPresentationEvidence(
     evidence.connectionVerificationFresh = false;
     evidence.activeControllerUseDetected = false;
     evidence.noControlTaken = false;
-    evidence.noStateChangingCommandsSent = false;
+    evidence.noVmeOrModuleSettingWritesSent = false;
 
     if (!TargetProbeEvidenceIsCurrent(target))
         return;
@@ -116,8 +116,8 @@ void ApplyTargetPresentationEvidence(
     evidence.activeControllerUseDetected =
         probe.activeControllerUseDetected;
     evidence.noControlTaken = probe.noControlTaken;
-    evidence.noStateChangingCommandsSent =
-        probe.noStateChangingCommandsSent;
+    evidence.noVmeOrModuleSettingWritesSent =
+        probe.noVmeOrModuleSettingWritesSent;
 }
 
 } // namespace fidget

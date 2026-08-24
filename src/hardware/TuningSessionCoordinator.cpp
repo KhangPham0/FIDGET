@@ -122,7 +122,7 @@ TunerStatusLevel ProbeStatusLevel(const TargetProbeOutcome outcome)
     }
 }
 
-ApplicationStorageResult RememberBridgeFields(
+ApplicationStorageResult SaveBridgeConvenienceFields(
     const ApplicationStoragePaths& storagePaths,
     const TunerTargetInput& input)
 {
@@ -258,19 +258,19 @@ void TuningSessionCoordinator::SelectTarget()
         snapshot.target.input,
         *validation.normalizedModuleAddress,
     };
-    const auto remembered = RememberBridgeFields(
+    const auto savedBridgeFields = SaveBridgeConvenienceFields(
         storagePaths_, snapshot.target.input);
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
-        remembered.success
+        savedBridgeFields.success
             ? TunerStatusLevel::Success
             : TunerStatusLevel::Warning,
         "The endpoint request and normalized target were selected.",
-        remembered.success
+        savedBridgeFields.success
             ? "Run Check to connect and verify the controller and target."
-            : "The SSH connection fields could not be remembered: "
-                + remembered.message);
+            : "The SSH destination and bridge command could not be saved: "
+                + savedBridgeFields.message);
 }
 
 void TuningSessionCoordinator::ProbeTarget(
@@ -349,8 +349,9 @@ void TuningSessionCoordinator::ProbeTarget(
         result.message,
         persistenceError.empty()
             ? std::string{}
-            : "Verification succeeded, but the remembered target could not "
-              "be saved: " + persistenceError);
+            : "Verification succeeded, but the verified Ethernet host and "
+              "module address and the SSH convenience fields could not be "
+              "saved: " + persistenceError);
     FinishProbe(cancellation);
 }
 
@@ -500,7 +501,7 @@ void TuningSessionCoordinator::RefreshPresentationEvidence(
             && (!snapshot.tuningSession.evidence.activeControllerUseDetected
                 || (snapshot.tuningSession.evidence.noControlTaken
                     && snapshot.tuningSession.evidence
-                        .noStateChangingCommandsSent));
+                        .noVmeOrModuleSettingWritesSent));
     }
 }
 

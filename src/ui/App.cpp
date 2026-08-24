@@ -342,9 +342,10 @@ bool App::Init()
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
 
-    // Loading remembered fields is an edit, not verification. Direct
-    // Ethernet remains the default and the coordinator invalidates any old
-    // evidence before the first page is drawn.
+    // Loading saved fields is an edit, not verification. Only the Ethernet
+    // host and module-address pair came from a VerifiedIdle probe; the SSH
+    // fields are convenience values. Direct Ethernet remains the default and
+    // the coordinator invalidates old evidence before the first page is drawn.
     m_tunerControl.Submit(EditTunerTargetCommand{std::move(initialTarget)});
 
     return true;

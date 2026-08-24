@@ -31,7 +31,8 @@ struct TunerTargetInput
 
 // Parse-level validation for the editable Home fields. Hostnames and SSH
 // destinations are intentionally treated as opaque, non-empty endpoint
-// strings: aliases, IPv4, IPv6, and remote-side names are all valid inputs.
+// strings. The transport resolves IPv4 today; aliases and remote-side names
+// remain valid inputs.
 // The module address is normalized by the one shared parser used by hardware.
 struct TunerTargetInputValidation
 {
@@ -90,7 +91,7 @@ struct TargetProbeEvidence
     bool targetAcquisitionStoppedVerified = false;
     bool activeControllerUseDetected = false;
     bool noControlTaken = false;
-    bool noStateChangingCommandsSent = false;
+    bool noVmeOrModuleSettingWritesSent = false;
 };
 
 struct TargetProbeResult

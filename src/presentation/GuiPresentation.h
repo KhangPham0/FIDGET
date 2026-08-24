@@ -160,7 +160,7 @@ struct GuiEvidenceClaims
     bool outputCreatedOrDeclined = false;
 
     bool noControlTaken = false;
-    bool noStateChangingCommandsSent = false;
+    bool noVmeOrModuleSettingWritesSent = false;
     bool controlsFrozen = false;
     bool noBlindRollbackOrCleanupSent = false;
 

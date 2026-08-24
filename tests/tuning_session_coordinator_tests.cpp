@@ -366,16 +366,16 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK(endpoint.sshDestination == input.sshDestination);
     CHECK(endpoint.remoteBridgeCommand == input.remoteBridgeCommand);
 
-    const auto remembered = LoadApplicationPreferences(fixture.storage);
-    INFO(remembered.message);
-    REQUIRE(remembered.success);
-    CHECK(remembered.preferences.lastVerifiedEthernetHost
+    const auto savedPreferences = LoadApplicationPreferences(fixture.storage);
+    INFO(savedPreferences.message);
+    REQUIRE(savedPreferences.success);
+    CHECK(savedPreferences.preferences.lastVerifiedEthernetHost
           == input.mvlcHost);
-    CHECK(remembered.preferences.lastVerifiedModuleAddress
+    CHECK(savedPreferences.preferences.lastVerifiedModuleAddress
           == input.moduleAddress);
-    CHECK(remembered.preferences.sshDestination
+    CHECK(savedPreferences.preferences.sshDestination
           == input.sshDestination);
-    CHECK(remembered.preferences.remoteBridgeCommand
+    CHECK(savedPreferences.preferences.remoteBridgeCommand
           == input.remoteBridgeCommand);
 
     auto edited = input;
@@ -390,12 +390,12 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK_FALSE(snapshot->tuningSession.evidence.connectionVerificationFresh);
     CHECK(snapshot->target.sessionGate.outcome
           == TunerTargetSessionGateOutcome::NotRequested);
-    const auto rememberedAfterEdit = LoadApplicationPreferences(
+    const auto preferencesAfterEdit = LoadApplicationPreferences(
         fixture.storage);
-    REQUIRE(rememberedAfterEdit.success);
-    CHECK(rememberedAfterEdit.preferences.lastVerifiedEthernetHost
+    REQUIRE(preferencesAfterEdit.success);
+    CHECK(preferencesAfterEdit.preferences.lastVerifiedEthernetHost
           == input.mvlcHost);
-    CHECK(rememberedAfterEdit.preferences.remoteBridgeCommand
+    CHECK(preferencesAfterEdit.preferences.remoteBridgeCommand
           == input.remoteBridgeCommand);
 
     fixture.service->Submit(ClearTunerTargetCommand{});

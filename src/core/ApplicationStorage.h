@@ -11,8 +11,9 @@ inline constexpr std::size_t ApplicationHomeParentSearchLimit = 8U;
 
 // fidget-state intentionally sits beside the build tree, or beside a
 // standalone executable when no build tree can be found. Deleting it forfeits
-// pending recovery evidence, remembered addresses, window layout, logs, and
-// reports. FIDGET never redirects this state into a user home directory.
+// pending recovery evidence, the last verified host and module address,
+// saved SSH convenience fields, window layout, logs, and reports. FIDGET
+// never redirects this state into a user home directory.
 struct ApplicationStoragePaths
 {
     std::filesystem::path applicationHome;
@@ -33,8 +34,9 @@ struct ApplicationStorageResult
 };
 
 // The first two values may be updated only after a successful read-only target
-// verification. The bridge fields are connection preferences. This structure
-// deliberately has no password, key, token, or other secret field.
+// verification. The bridge fields are saved convenience values, not
+// verification evidence. This structure deliberately has no password, key,
+// token, or other secret field.
 struct ApplicationPreferences
 {
     std::string lastVerifiedEthernetHost;

@@ -90,7 +90,7 @@ TargetProbeResult RunTargetProbe(
 {
     TargetProbeResult result;
     result.evidence.noControlTaken = true;
-    result.evidence.noStateChangingCommandsSent = true;
+    result.evidence.noVmeOrModuleSettingWritesSent = true;
 
     if (cancellationRequested.load())
     {

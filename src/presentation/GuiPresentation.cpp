@@ -121,7 +121,7 @@ bool ConflictMitigationsVerified(const Evidence& evidence) noexcept
 {
     return evidence.activeControllerUseDetected
         && evidence.noControlTaken
-        && evidence.noStateChangingCommandsSent;
+        && evidence.noVmeOrModuleSettingWritesSent;
 }
 
 bool OwnershipUncertaintyDetected(const Evidence& evidence) noexcept
@@ -275,9 +275,9 @@ GuiEvidenceClaims MakeClaims(
     claims.noControlTaken =
         ConflictDetected(evidence)
         && evidence.noControlTaken;
-    claims.noStateChangingCommandsSent =
+    claims.noVmeOrModuleSettingWritesSent =
         ConflictDetected(evidence)
-        && evidence.noStateChangingCommandsSent;
+        && evidence.noVmeOrModuleSettingWritesSent;
     claims.controlsFrozen =
         OwnershipUncertaintyDetected(evidence)
         && evidence.controlsFrozen;

@@ -172,7 +172,7 @@ TEST_CASE("the presenter covers every approved primary page")
     auto conflict = ReadySnapshot();
     conflict.tuningSession.evidence.activeControllerUseDetected = true;
     conflict.tuningSession.evidence.noControlTaken = true;
-    conflict.tuningSession.evidence.noStateChangingCommandsSent = true;
+    conflict.tuningSession.evidence.noVmeOrModuleSettingWritesSent = true;
 
     auto uncertain = PreparedSnapshot(TuningSessionPhase::AutomaticEnergy);
     uncertain.tuningSession.evidence.ownershipUncertain = true;
@@ -476,7 +476,7 @@ TEST_CASE("header states use explicit evidence and safety precedence")
     evidence.noBlindRollbackOrCleanupSent = true;
     evidence.activeControllerUseDetected = true;
     evidence.noControlTaken = true;
-    evidence.noStateChangingCommandsSent = true;
+    evidence.noVmeOrModuleSettingWritesSent = true;
 
     CHECK(PresentGui(contradictory).page == GuiPage::RecoveryBlocked);
     CHECK(PresentGui(contradictory).headerConnection
@@ -801,21 +801,21 @@ TEST_CASE("safety pages and actions require their complete evidence bundles")
     auto& conflictEvidence = conflict.tuningSession.evidence;
     conflictEvidence.activeControllerUseDetected = true;
     conflictEvidence.noControlTaken = true;
-    conflictEvidence.noStateChangingCommandsSent = true;
+    conflictEvidence.noVmeOrModuleSettingWritesSent = true;
     conflictEvidence.primaryNavigationAvailable = true;
     conflictEvidence.navigationAwayVerifiedSafe = true;
     auto view = PresentGui(conflict);
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
-    CHECK(view.claims.noStateChangingCommandsSent);
+    CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(Allows(view.allowedActions, GuiAction::NavigateHome));
     CHECK_FALSE(Allows(view.allowedActions, GuiAction::NavigateTune));
 
-    conflictEvidence.noStateChangingCommandsSent = false;
+    conflictEvidence.noVmeOrModuleSettingWritesSent = false;
     view = PresentGui(conflict);
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
-    CHECK_FALSE(view.claims.noStateChangingCommandsSent);
+    CHECK_FALSE(view.claims.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(Allows(view.allowedActions, GuiAction::CheckAgain));
 
     auto uncertain = PreparedSnapshot(TuningSessionPhase::Manual);

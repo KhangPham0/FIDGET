@@ -318,7 +318,8 @@ void HomePage::DrawHome(
         else
         {
             ImGui::TextDisabled(
-                "The last successful connection is remembered.");
+                "The host and module address from the last successful Check "
+                "are remembered.");
         }
         ImGui::EndChild();
 
@@ -563,7 +564,7 @@ void HomePage::DrawControllerConflict(
             theme.statusGood,
             ICON_FA_CHECK_CIRCLE "  FIDGET did not take control.");
     }
-    if (view.claims.noStateChangingCommandsSent)
+    if (view.claims.noVmeOrModuleSettingWritesSent)
     {
         ImGui::TextColored(
             theme.statusGood,
