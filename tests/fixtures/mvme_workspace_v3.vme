@@ -1,0 +1,207 @@
+{
+  "DAQConfig": {
+    "id": "daq_fixture_v3",
+    "name": "workspace_fixture_v3",
+    "enabled": true,
+    "properties": {
+      "version": 3,
+      "fixture_property": 17
+    },
+    "vme_controller": {
+      "type": "mvlc",
+      "settings": {
+        "method": "ethernet",
+        "mvlc_crate_id": 1,
+        "mvlc_eth_enable_jumbos": false,
+        "fixture_controller_setting": 23
+      }
+    },
+    "events": [
+      {
+        "id": "event_fixture_aux",
+        "name": "auxiliary_event",
+        "enabled": true,
+        "irqLevel": 2,
+        "irqVector": 48,
+        "triggerCondition": "Interrupt",
+        "triggerOptions": {
+          "fixture_option": 1
+        },
+        "scalerReadoutFrequency": 1,
+        "scalerReadoutPeriod": 1,
+        "modules": [
+          {
+            "id": "module_fixture_aux",
+            "name": "auxiliary_module",
+            "enabled": true,
+            "type": "mvlc_ts",
+            "baseAddress": 536870912,
+            "vmeReadout": {
+              "id": "script_aux_readout",
+              "name": "auxiliary_readout",
+              "enabled": true,
+              "vme_script": "read a32 d16 0x0000"
+            },
+            "vmeReset": {
+              "id": "script_aux_reset",
+              "name": "auxiliary_reset",
+              "enabled": true,
+              "vme_script": "write a32 d16 0x0000 0"
+            },
+            "initScripts": [
+              {
+                "id": "script_aux_init",
+                "name": "auxiliary_init",
+                "enabled": true,
+                "vme_script": "write a32 d16 0x0002 1"
+              }
+            ]
+          }
+        ],
+        "vme_scripts": {
+          "daq_start": {
+            "id": "script_event_aux_start",
+            "name": "daq_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "daq_stop": {
+            "id": "script_event_aux_stop",
+            "name": "daq_stop",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_start": {
+            "id": "script_event_aux_readout_start",
+            "name": "readout_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_end": {
+            "id": "script_event_aux_readout_end",
+            "name": "readout_end",
+            "enabled": true,
+            "vme_script": ""
+          }
+        }
+      },
+      {
+        "id": "event_fixture_target",
+        "name": "target_event",
+        "enabled": true,
+        "irqLevel": 1,
+        "irqVector": 64,
+        "triggerCondition": "Interrupt",
+        "triggerOptions": {
+          "fixture_option": 2
+        },
+        "scalerReadoutFrequency": 2,
+        "scalerReadoutPeriod": 1,
+        "modules": [
+          {
+            "id": "module_fixture_target_v3",
+            "name": "target_module",
+            "enabled": true,
+            "type": "mdpp32_scp",
+            "baseAddress": 285212672,
+            "vmeReadout": {
+              "id": "script_target_readout_v3",
+              "name": "target_readout",
+              "enabled": true,
+              "vme_script": "mblt 0x0000 256"
+            },
+            "vmeReset": {
+              "id": "script_target_reset_v3",
+              "name": "target_reset",
+              "enabled": true,
+              "vme_script": "write a32 d16 0x6034 1"
+            },
+            "initScripts": [
+              {
+                "id": "script_target_init_v3",
+                "name": "target_init",
+                "enabled": true,
+                "properties": {
+                  "fixture_script_property": true
+                },
+                "vme_script": "write a32 d16 0x6000 1\nwrite a32 d16 0x6100 0"
+              }
+            ],
+            "ModuleMeta": {
+              "displayName": "MDPP-32 SCP",
+              "typeId": 32,
+              "typeName": "mdpp32_scp",
+              "vendorName": "mesytec",
+              "vmeAddress": "a32",
+              "eventHeaderFilters": [
+                {
+                  "mask": 4026531840,
+                  "value": 1073741824
+                }
+              ],
+              "variables": {
+                "fixture_meta_value": 5
+              }
+            }
+          }
+        ],
+        "vme_scripts": {
+          "daq_start": {
+            "id": "script_event_target_start_v3",
+            "name": "daq_start",
+            "enabled": true,
+            "vme_script": "write a32 d16 0x603A 1"
+          },
+          "daq_stop": {
+            "id": "script_event_target_stop_v3",
+            "name": "daq_stop",
+            "enabled": true,
+            "vme_script": "write a32 d16 0x603A 0"
+          },
+          "readout_start": {
+            "id": "script_event_target_readout_start_v3",
+            "name": "readout_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_end": {
+            "id": "script_event_target_readout_end_v3",
+            "name": "readout_end",
+            "enabled": true,
+            "vme_script": ""
+          }
+        },
+        "variable_table": {
+          "fixture_event_variable": {
+            "value": 9,
+            "unit": "count"
+          }
+        }
+      }
+    ],
+    "global_objects": {
+      "fixture_object": {
+        "id": "global_fixture_v3",
+        "enabled": true,
+        "values": [
+          3,
+          1,
+          4
+        ]
+      }
+    },
+    "variable_table": {
+      "fixture_global_variable": {
+        "value": 11,
+        "unit": "count"
+      }
+    },
+    "fixture_unknown_object": {
+      "first": 1,
+      "second": 2,
+      "nested": {
+        "kept": true
+      }
+    }
+  }
+}

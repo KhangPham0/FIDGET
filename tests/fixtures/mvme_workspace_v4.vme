@@ -1,0 +1,278 @@
+{
+  "DAQConfig": {
+    "id": "daq_fixture_v4",
+    "name": "workspace_fixture_v4",
+    "enabled": true,
+    "properties": {
+      "version": 4,
+      "fixture_property": 29
+    },
+    "vme_controller": {
+      "type": "mvlc",
+      "settings": {
+        "method": "ethernet",
+        "mvlc_crate_id": 2,
+        "mvlc_eth_enable_jumbos": true,
+        "fixture_controller_setting": 31
+      }
+    },
+    "variable_table": {
+      "fixture_controller_variable": {
+        "value": 13,
+        "unit": "count"
+      }
+    },
+    "events": [
+      {
+        "id": "event_fixture_target_v4",
+        "name": "target_event",
+        "enabled": true,
+        "irqLevel": 1,
+        "irqVector": 64,
+        "triggerCondition": "Interrupt",
+        "triggerOptions": {
+          "fixture_option": 3
+        },
+        "scalerReadoutFrequency": 2,
+        "scalerReadoutPeriod": 1,
+        "modules": [
+          {
+            "id": "module_fixture_target_v4",
+            "name": "target_module",
+            "enabled": true,
+            "type": "mdpp32_scp",
+            "baseAddress": 285212672,
+            "vmeReadout": {
+              "id": "script_target_readout_v4",
+              "name": "target_readout",
+              "enabled": true,
+              "properties": {
+                "fixture_readout_property": 4
+              },
+              "vme_script": "mblt 0x0000 256"
+            },
+            "vmeReset": {
+              "id": "script_target_reset_v4",
+              "name": "target_reset",
+              "enabled": true,
+              "vme_script": "write a32 d16 0x6034 1"
+            },
+            "initScripts": [
+              {
+                "id": "script_target_init_v4_a",
+                "name": "target_init_a",
+                "enabled": true,
+                "vme_script": "write a32 d16 0x6000 1\nwrite a32 d16 0x6100 0"
+              },
+              {
+                "id": "script_target_init_v4_b",
+                "name": "target_init_b",
+                "enabled": true,
+                "variable_table": {
+                  "fixture_script_variable": {
+                    "value": 7,
+                    "unit": "count"
+                  }
+                },
+                "vme_script": "write a32 d16 0x6110 160"
+              }
+            ],
+            "variable_table": {
+              "fixture_module_variable": {
+                "value": 5,
+                "unit": "count"
+              }
+            },
+            "fixture_module_extension": {
+              "alpha": 1,
+              "beta": 2
+            }
+          }
+        ],
+        "vme_scripts": {
+          "daq_start": {
+            "id": "script_event_target_start_v4",
+            "name": "daq_start",
+            "enabled": true,
+            "vme_script": "write a32 d16 0x603A 1"
+          },
+          "daq_stop": {
+            "id": "script_event_target_stop_v4",
+            "name": "daq_stop",
+            "enabled": true,
+            "vme_script": "write a32 d16 0x603A 0"
+          },
+          "readout_start": {
+            "id": "script_event_target_readout_start_v4",
+            "name": "readout_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_end": {
+            "id": "script_event_target_readout_end_v4",
+            "name": "readout_end",
+            "enabled": true,
+            "vme_script": ""
+          }
+        }
+      },
+      {
+        "id": "event_fixture_aux_v4",
+        "name": "auxiliary_event",
+        "enabled": true,
+        "irqLevel": 2,
+        "irqVector": 48,
+        "triggerCondition": "Interrupt",
+        "triggerOptions": {
+          "fixture_option": 4
+        },
+        "scalerReadoutFrequency": 1,
+        "scalerReadoutPeriod": 1,
+        "modules": [
+          {
+            "id": "module_fixture_aux_v4",
+            "name": "auxiliary_module",
+            "enabled": true,
+            "type": "mvlc_ts",
+            "baseAddress": 536870912,
+            "vmeReadout": {
+              "id": "script_aux_readout_v4",
+              "name": "auxiliary_readout",
+              "enabled": true,
+              "vme_script": "read a32 d16 0x0000"
+            },
+            "vmeReset": {
+              "id": "script_aux_reset_v4",
+              "name": "auxiliary_reset",
+              "enabled": true,
+              "vme_script": "write a32 d16 0x0000 0"
+            },
+            "initScripts": [
+              {
+                "id": "script_aux_init_v4",
+                "name": "auxiliary_init",
+                "enabled": true,
+                "vme_script": "write a32 d16 0x0002 1"
+              }
+            ],
+            "ModuleMeta": {
+              "displayName": "Auxiliary Module",
+              "typeId": 1,
+              "typeName": "mvlc_ts",
+              "vendorName": "generic",
+              "vmeAddress": "a32",
+              "eventHeaderFilters": [],
+              "variables": {
+                "fixture_meta_value": 6
+              }
+            }
+          }
+        ],
+        "vme_scripts": {
+          "daq_start": {
+            "id": "script_event_aux_start_v4",
+            "name": "daq_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "daq_stop": {
+            "id": "script_event_aux_stop_v4",
+            "name": "daq_stop",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_start": {
+            "id": "script_event_aux_readout_start_v4",
+            "name": "readout_start",
+            "enabled": true,
+            "vme_script": ""
+          },
+          "readout_end": {
+            "id": "script_event_aux_readout_end_v4",
+            "name": "readout_end",
+            "enabled": true,
+            "vme_script": ""
+          }
+        }
+      },
+      {
+        "id": "event_fixture_disabled_v4",
+        "name": "disabled_event",
+        "enabled": false,
+        "irqLevel": 1,
+        "irqVector": 64,
+        "triggerCondition": "Interrupt",
+        "triggerOptions": {},
+        "scalerReadoutFrequency": 1,
+        "scalerReadoutPeriod": 1,
+        "modules": [
+          {
+            "id": "module_fixture_disabled_v4",
+            "name": "disabled_target_module",
+            "enabled": true,
+            "type": "mdpp32_scp",
+            "baseAddress": 285212672,
+            "vmeReadout": {
+              "id": "script_disabled_readout_v4",
+              "name": "disabled_readout",
+              "enabled": true,
+              "vme_script": ""
+            },
+            "vmeReset": {
+              "id": "script_disabled_reset_v4",
+              "name": "disabled_reset",
+              "enabled": true,
+              "vme_script": ""
+            },
+            "initScripts": []
+          }
+        ],
+        "vme_scripts": {
+          "daq_start": {
+            "id": "script_event_disabled_start_v4",
+            "name": "daq_start",
+            "enabled": false,
+            "vme_script": ""
+          },
+          "daq_stop": {
+            "id": "script_event_disabled_stop_v4",
+            "name": "daq_stop",
+            "enabled": false,
+            "vme_script": ""
+          },
+          "readout_start": {
+            "id": "script_event_disabled_readout_start_v4",
+            "name": "readout_start",
+            "enabled": false,
+            "vme_script": ""
+          },
+          "readout_end": {
+            "id": "script_event_disabled_readout_end_v4",
+            "name": "readout_end",
+            "enabled": false,
+            "vme_script": ""
+          }
+        }
+      }
+    ],
+    "global_objects": {
+      "fixture_object": {
+        "id": "global_fixture_v4",
+        "enabled": true,
+        "values": [
+          2,
+          7,
+          1,
+          8
+        ]
+      }
+    },
+    "fixture_unknown_object": {
+      "ordered_first": 1,
+      "ordered_second": 2,
+      "ordered_third": {
+        "kept": true
+      }
+    }
+  }
+}

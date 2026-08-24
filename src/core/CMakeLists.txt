@@ -7,6 +7,7 @@ add_library(fidget_core STATIC
     GuidedWorkflow.cpp
     MvmeExport.cpp
     MvmeExportFile.cpp
+    MvmeWorkspace.cpp
     ReadoutProtocol.cpp
     RecoveryJournal.cpp
     RecoveryVerification.cpp
@@ -24,12 +25,13 @@ add_library(fidget_core STATIC
 )
 
 target_include_directories(fidget_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(fidget_core PUBLIC nlohmann_json::nlohmann_json)
 
 # GCC 8 ships C++17 filesystem in a separate standard-library archive.
 # Attaching it here as a usage requirement keeps the link order correct
 # for every consumer that pulls filesystem-using objects out of this
-# archive. It is part of the standard library, not a project dependency,
-# so the rule that fidget_core links no project library still holds.
+# archive. It is part of the standard library rather than a vendored
+# runtime dependency.
 if(FIDGET_CXX17_FILESYSTEM_LIBRARY)
     target_link_libraries(fidget_core PUBLIC ${FIDGET_CXX17_FILESYSTEM_LIBRARY})
 endif()
