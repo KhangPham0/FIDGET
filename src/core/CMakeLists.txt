@@ -13,6 +13,7 @@ add_library(fidget_core STATIC
     MvmeWorkspaceExport.cpp
     ReadoutProtocol.cpp
     RecoveryJournal.cpp
+    RecoveryJournalV5.cpp
     RecoveryVerification.cpp
     ScpProfile.cpp
     ScpRegistry.cpp

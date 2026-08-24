@@ -1,5 +1,7 @@
 #include "core/RecoveryJournal.h"
 
+#include "core/RecoveryJournalV5.h"
+
 #include <charconv>
 #include <cerrno>
 #include <cstring>
@@ -641,7 +643,16 @@ void WriteRecord(std::ostream& output, const TunerRecoveryRecord& record)
 TunerRecoverySerializationResult SerializeTunerRecoveryJournal(
     const TunerRecoveryRecord& record)
 {
+    if (record.formatVersion == TunerRecoveryJournalV5FormatVersion)
+        return SerializeTunerRecoveryJournalV5(record);
+
     TunerRecoverySerializationResult result;
+    if (record.version5.has_value())
+    {
+        result.message =
+            "A legacy recovery journal cannot contain v5 evidence.";
+        return result;
+    }
     std::string validationError;
     if (!ValidateRecord(record, validationError))
     {
@@ -659,6 +670,18 @@ TunerRecoverySerializationResult SerializeTunerRecoveryJournal(
 
 TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
 {
+    {
+        std::istringstream header(text);
+        std::string headerMagic;
+        std::uint32_t headerVersion = 0U;
+        if ((header >> headerMagic >> headerVersion)
+            && headerMagic == JournalMagic
+            && headerVersion == TunerRecoveryJournalV5FormatVersion)
+        {
+            return ParseTunerRecoveryJournalV5(text);
+        }
+    }
+
     TunerRecoveryParseResult result;
     std::istringstream input(text);
     TunerRecoveryRecord record;

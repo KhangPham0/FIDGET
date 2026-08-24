@@ -169,6 +169,14 @@ target_link_libraries(recovery_journal_tests PRIVATE
 
 add_test(NAME recovery_journal_tests COMMAND recovery_journal_tests)
 
+add_executable(recovery_journal_v5_tests recovery_journal_v5_tests.cpp)
+target_link_libraries(recovery_journal_v5_tests PRIVATE
+    fidget_core
+    doctest::doctest
+)
+
+add_test(NAME recovery_journal_v5_tests COMMAND recovery_journal_v5_tests)
+
 add_executable(recovery_verification_tests recovery_verification_tests.cpp)
 target_link_libraries(recovery_verification_tests PRIVATE
     fidget_core
