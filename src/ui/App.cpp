@@ -132,14 +132,11 @@ void DrawActivityFilterChip(
     ImGui::PushStyleColor(
         ImGuiCol_ButtonHovered,
         selected ? theme.accentHover : theme.frameHover);
-    ImGui::PushStyleColor(
-        ImGuiCol_Text,
-        selected ? theme.textOnAccent : theme.textPrimary);
     if (ImGui::SmallButton(label))
     {
         selected = !selected;
     }
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleColor(2);
 }
 
 void GlfwErrorCallback(int error, const char* description)
@@ -311,7 +308,7 @@ bool App::Init()
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
 
-    m_theme = LightTheme();
+    m_theme = DarkTheme();
     ApplyTheme(m_theme);
     m_fonts = LoadFonts();
 

@@ -77,7 +77,7 @@ bool DrawWorkflowRail(
     ImGui::PushStyleColor(ImGuiCol_Button, theme.accent);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme.accentHover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme.accentActive);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme.textOnAccent);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme.windowBackground);
     const bool pressed = ImGui::Button(
         GuidedTunerActionName(decision.nextAction),
         ImVec2(-1.0F, 0.0F));

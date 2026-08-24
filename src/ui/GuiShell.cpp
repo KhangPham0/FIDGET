@@ -152,7 +152,7 @@ float DrawGuiShellHeader(
         | ImGuiWindowFlags_NoSavedSettings
         | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, theme.panelBackground);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, theme.windowBackground);
     ImGui::PushStyleColor(ImGuiCol_Border, theme.border);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
@@ -163,10 +163,10 @@ float DrawGuiShellHeader(
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 
-    if (fonts.heading != nullptr)
-        ImGui::PushFont(fonts.heading, 19.0F);
+    if (fonts.ui != nullptr)
+        ImGui::PushFont(fonts.ui, 19.0F);
     ImGui::TextColored(theme.accent, "FIDGET");
-    if (fonts.heading != nullptr)
+    if (fonts.ui != nullptr)
         ImGui::PopFont();
 
     ImGui::SameLine(0.0F, 34.0F);
@@ -280,10 +280,10 @@ void DrawGuiShellDrawer(
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 
-    if (fonts.heading != nullptr)
-        ImGui::PushFont(fonts.heading, 18.0F);
+    if (fonts.ui != nullptr)
+        ImGui::PushFont(fonts.ui, 18.0F);
     ImGui::TextUnformatted(DrawerTitle(view.drawer));
-    if (fonts.heading != nullptr)
+    if (fonts.ui != nullptr)
         ImGui::PopFont();
 
     const char* closeLabel = "Close";
