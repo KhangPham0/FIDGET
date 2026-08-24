@@ -1,65 +1,38 @@
 #include "hardware/TransportFactory.h"
 
+#include "core/ControllerEndpoint.h"
 #include "hardware/BridgeCommandTransport.h"
 #include "hardware/BridgeDataReceiver.h"
 #include "hardware/MvlcCommandTransport.h"
 #include "hardware/MvlcDataReceiver.h"
 
-#include <algorithm>
 #include <utility>
 
 namespace fidget {
 namespace {
 
-bool ValidEndpointHost(const std::string& host)
-{
-    if (host.empty() || host.size() > 255U)
-        return false;
-
-    return std::all_of(
-        host.begin(), host.end(),
-        [](const unsigned char character) {
-            return character > 0x20U && character != 0x7FU;
-        });
-}
-
-bool ValidSingleArgument(const std::string& value, const std::size_t maximum)
-{
-    if (value.empty() || value.size() > maximum)
-        return false;
-
-    return std::all_of(
-        value.begin(), value.end(),
-        [](const unsigned char character) {
-            return character > 0x20U && character != 0x7FU;
-        });
-}
-
-std::string ValidateDirectRequest(
+ControllerEndpointRequest ValidationRequest(
     const DirectEthernetEndpointRequest& request)
 {
-    if (!ValidEndpointHost(request.mvlcHost)
-        || request.mvlcCommandPort == 0U)
-    {
-        return "The direct Ethernet endpoint is invalid.";
-    }
-    return {};
+    return {
+        ControllerEndpointKind::DirectEthernet,
+        request.mvlcHost,
+        request.mvlcCommandPort,
+        {},
+        {},
+    };
 }
 
-std::string ValidateBridgeRequest(
+ControllerEndpointRequest ValidationRequest(
     const SshBridgeEndpointRequest& request)
 {
-    if (!ValidEndpointHost(request.mvlcHost)
-        || request.mvlcCommandPort == 0U)
-    {
-        return "The SSH bridge MVLC endpoint is invalid.";
-    }
-    if (!ValidSingleArgument(request.sshDestination, 255U)
-        || !ValidSingleArgument(request.remoteBridgeCommand, 511U))
-    {
-        return "The SSH bridge destination or remote command is invalid.";
-    }
-    return {};
+    return {
+        ControllerEndpointKind::SshBridge,
+        request.mvlcHost,
+        request.mvlcCommandPort,
+        request.sshDestination,
+        request.remoteBridgeCommand,
+    };
 }
 
 } // namespace
@@ -166,9 +139,10 @@ TransportFactoryResult MvlcTransportFactory::Create(
     if (const auto* direct =
             std::get_if<DirectEthernetEndpointRequest>(&request))
     {
-        const auto error = ValidateDirectRequest(*direct);
-        if (!error.empty())
-            return {nullptr, error};
+        const auto validation =
+            ValidateControllerEndpoint(ValidationRequest(*direct));
+        if (!validation.success)
+            return {nullptr, validation.message};
         return {
             std::make_unique<TransportSession>(
                 std::make_unique<MvlcCommandTransport>(),
@@ -178,9 +152,10 @@ TransportFactoryResult MvlcTransportFactory::Create(
     }
 
     const auto& bridge = std::get<SshBridgeEndpointRequest>(request);
-    const auto validationError = ValidateBridgeRequest(bridge);
-    if (!validationError.empty())
-        return {nullptr, validationError};
+    const auto validation =
+        ValidateControllerEndpoint(ValidationRequest(bridge));
+    if (!validation.success)
+        return {nullptr, validation.message};
     if (!bridgeStarter_)
     {
         return {nullptr, "The SSH bridge process starter is unavailable."};

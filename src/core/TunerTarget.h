@@ -1,6 +1,7 @@
 #ifndef FIDGET_CORE_TUNER_TARGET_H
 #define FIDGET_CORE_TUNER_TARGET_H
 
+#include "core/ControllerEndpoint.h"
 #include "core/TargetModuleAddress.h"
 #include "core/TuningSessionState.h"
 
@@ -10,11 +11,7 @@
 
 namespace fidget {
 
-enum class TunerTargetEndpointKind
-{
-    DirectEthernet,
-    SshBridge,
-};
+using TunerTargetEndpointKind = ControllerEndpointKind;
 
 // Editable, project-independent target fields. SSH authentication is external
 // to FIDGET, so this type deliberately has no password, key, or secret field.

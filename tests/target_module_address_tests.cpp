@@ -162,3 +162,52 @@ TEST_CASE("Home target fields share one parse-level validation contract")
     input.mvlcCommandPort = 0U;
     CHECK_FALSE(ValidateTunerTargetInput(input).success);
 }
+
+TEST_CASE("Home endpoint fields use the shared transport-safe contract")
+{
+    using namespace fidget;
+
+    TunerTargetInput input;
+    input.mvlcHost = "controller.example";
+    input.moduleAddress = "0x1100";
+
+    const auto checkEndpoint = [&](const bool expected) {
+        const auto targetValidation = ValidateTunerTargetInput(input);
+        const auto endpointValidation = ValidateControllerEndpoint({
+            input.endpointKind,
+            input.mvlcHost,
+            input.mvlcCommandPort,
+            input.sshDestination,
+            input.remoteBridgeCommand,
+        });
+        CHECK(targetValidation.endpointValid == expected);
+        CHECK(endpointValidation.success == expected);
+        CHECK(targetValidation.endpointMessage == endpointValidation.message);
+    };
+
+    checkEndpoint(true);
+
+    input.mvlcHost = "controller name";
+    checkEndpoint(false);
+    input.mvlcHost = std::string(256U, 'h');
+    checkEndpoint(false);
+    input.mvlcHost = "controller.example";
+    input.mvlcCommandPort = 0U;
+    checkEndpoint(false);
+    input.mvlcCommandPort = 0xFFFFU;
+    checkEndpoint(false);
+
+    input.mvlcCommandPort = 32768U;
+    input.endpointKind = TunerTargetEndpointKind::SshBridge;
+    input.sshDestination = "bridge-alias";
+    input.remoteBridgeCommand = "/opt/fidget_bridge";
+    checkEndpoint(true);
+    input.sshDestination = "bridge alias";
+    checkEndpoint(false);
+    input.sshDestination = "bridge-alias";
+    input.remoteBridgeCommand = "fidget bridge";
+    checkEndpoint(false);
+
+    input.endpointKind = TunerTargetEndpointKind::DirectEthernet;
+    checkEndpoint(true);
+}

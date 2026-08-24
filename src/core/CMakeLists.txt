@@ -3,6 +3,7 @@ add_library(fidget_core STATIC
     ActivityLogFile.cpp
     ApplicationStorage.cpp
     BridgeProtocol.cpp
+    ControllerEndpoint.cpp
     CrateProject.cpp
     GuidedWorkflow.cpp
     MvmeInitScript.cpp

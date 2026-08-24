@@ -1,5 +1,7 @@
 #include "core/CrateProject.h"
 
+#include "core/ControllerEndpoint.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
@@ -114,20 +116,6 @@ bool ValidDisplayText(const std::string& text, std::size_t maximum)
         text.end(),
         [](const unsigned char character) {
             return character >= 0x20U && character != 0x7FU;
-        });
-}
-
-bool ValidSingleArgument(const std::string& text, std::size_t maximum)
-{
-    if (text.empty() || text.size() > maximum)
-    {
-        return false;
-    }
-    return std::all_of(
-        text.begin(),
-        text.end(),
-        [](const unsigned char character) {
-            return character > 0x20U && character != 0x7FU;
         });
 }
 
@@ -266,19 +254,29 @@ CrateProjectValidationResult ValidateCrateProject(const CrateProject& project)
         result.message = "The controller endpoint kind is unknown.";
         return result;
     }
-    if (project.endpointKind == CrateProjectEndpointKind::SshBridge
-        && (!ValidSingleArgument(project.sshDestination, 255U)
-            || !ValidSingleArgument(
-                project.remoteBridgeCommand, 511U)))
+    const auto endpoint = ValidateControllerEndpoint({
+        project.endpointKind == CrateProjectEndpointKind::SshBridge
+            ? ControllerEndpointKind::SshBridge
+            : ControllerEndpointKind::DirectEthernet,
+        project.mvlcHost,
+        project.mvlcCommandPort,
+        project.sshDestination,
+        project.remoteBridgeCommand,
+    });
+    if (!endpoint.success)
     {
-        result.message =
-            "The SSH bridge destination or remote command is invalid.";
-        return result;
-    }
-    if (!ValidEndpointHost(project.mvlcHost)
-        || project.mvlcCommandPort == 0U)
-    {
-        result.message = "The MVLC command endpoint is invalid.";
+        if (endpoint.issue
+                == ControllerEndpointValidationIssue::InvalidSshDestination
+            || endpoint.issue
+                == ControllerEndpointValidationIssue::InvalidRemoteBridgeCommand)
+        {
+            result.message =
+                "The SSH bridge destination or remote command is invalid.";
+        }
+        else
+        {
+            result.message = "The MVLC command endpoint is invalid.";
+        }
         return result;
     }
     if (!ValidEndpointHost(project.streamHost) || project.streamPort == 0U)

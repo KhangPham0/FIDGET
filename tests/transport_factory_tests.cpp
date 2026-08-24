@@ -1,6 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include "core/ControllerEndpoint.h"
+#include "core/TunerTarget.h"
 #include "hardware/BridgeCommandTransport.h"
 #include "hardware/BridgeDataReceiver.h"
 #include "hardware/MvlcCommandTransport.h"
@@ -181,5 +183,74 @@ TEST_CASE("endpoint requests fail closed before transport creation")
     });
     CHECK(invalidBridge.session == nullptr);
     CHECK_FALSE(invalidBridge.error.empty());
+    CHECK_FALSE(bridgeStarted);
+}
+
+TEST_CASE("Home and transport creation share exact endpoint validation")
+{
+    using namespace fidget;
+
+    bool bridgeStarted = false;
+    MvlcTransportFactory factory(
+        [&](const std::string&,
+            const std::string&,
+            const std::string&,
+            const std::uint16_t) {
+            bridgeStarted = true;
+            return SshBridgeProcessStartResult{};
+        });
+
+    const auto checkInvalid = [&](TunerTargetInput input,
+                                  TransportEndpointRequest request) {
+        input.moduleAddress = "0x1100";
+        const auto home = ValidateTunerTargetInput(input);
+        REQUIRE_FALSE(home.endpointValid);
+        const auto created = factory.Create(request);
+        CHECK(created.session == nullptr);
+        CHECK(created.error == home.endpointMessage);
+    };
+
+    TunerTargetInput direct;
+    direct.mvlcHost = "controller name";
+    checkInvalid(
+        direct,
+        DirectEthernetEndpointRequest{
+            direct.mvlcHost,
+            direct.mvlcCommandPort,
+        });
+
+    direct.mvlcHost = "controller.example";
+    direct.mvlcCommandPort = 0xFFFFU;
+    checkInvalid(
+        direct,
+        DirectEthernetEndpointRequest{
+            direct.mvlcHost,
+            direct.mvlcCommandPort,
+        });
+
+    TunerTargetInput bridge;
+    bridge.endpointKind = TunerTargetEndpointKind::SshBridge;
+    bridge.mvlcHost = "controller.example";
+    bridge.sshDestination = "bridge alias";
+    bridge.remoteBridgeCommand = "fidget_bridge";
+    checkInvalid(
+        bridge,
+        SshBridgeEndpointRequest{
+            bridge.mvlcHost,
+            bridge.mvlcCommandPort,
+            bridge.sshDestination,
+            bridge.remoteBridgeCommand,
+        });
+
+    bridge.sshDestination = "bridge-alias";
+    bridge.remoteBridgeCommand = "fidget bridge";
+    checkInvalid(
+        bridge,
+        SshBridgeEndpointRequest{
+            bridge.mvlcHost,
+            bridge.mvlcCommandPort,
+            bridge.sshDestination,
+            bridge.remoteBridgeCommand,
+        });
     CHECK_FALSE(bridgeStarted);
 }
