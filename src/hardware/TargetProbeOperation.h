@@ -15,9 +15,9 @@ namespace fidget {
 inline constexpr std::uint32_t TargetProbeExpectedMvlcHardwareId = 0x5008U;
 inline constexpr std::uint32_t TargetProbeExpectedMvlcFirmware = 0x0046U;
 
-// The probe always performs these read-only checks in this documented order:
-// MVLC identity, MVLC firmware, MVLC DAQ mode, target identity, target
-// firmware, then target acquisition control.
+// The staged Home checks use this documented order: Connect reads MVLC
+// identity, MVLC firmware, and MVLC DAQ mode; Check then reads target identity,
+// target firmware, and target acquisition control.
 inline constexpr std::array<std::uint16_t, 3U>
     TargetProbeMvlcRegisterOrder{{0x6008U, 0x600EU, 0x1300U}};
 inline constexpr std::array<std::uint16_t, 3U>
@@ -33,9 +33,22 @@ struct TargetProbeRequest
     TargetModuleAddress targetAddress;
 };
 
-// This operation never calls WriteVmeD16 or WriteLocalRegisters. Target reads
-// use ReadVmeD16, whose accepted immediate-stack plumbing transiently writes
-// stack memory and stack execution controls but performs no VME-bus write.
+struct ControllerProbeRequest
+{
+    TransportEndpointRequest endpoint;
+};
+
+// Connect reads only the three MVLC-local registers above in one batch. It
+// performs no local-register write and no VME-bus transaction.
+[[nodiscard]] ControllerProbeResult RunControllerProbe(
+    ITransportFactory& transportFactory,
+    const ControllerProbeRequest& request,
+    const std::atomic<bool>& cancellationRequested);
+
+// Check reads only the three target registers above. It never calls
+// WriteVmeD16 or WriteLocalRegisters. ReadVmeD16's accepted immediate-stack
+// plumbing transiently writes stack memory and stack execution controls but
+// performs no VME-bus write or module-setting write.
 [[nodiscard]] TargetProbeResult RunTargetProbe(
     ITransportFactory& transportFactory,
     const TargetProbeRequest& request,

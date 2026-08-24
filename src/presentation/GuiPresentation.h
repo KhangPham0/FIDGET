@@ -147,6 +147,8 @@ struct GuiPresentationSelection
 // is verified, restored, or released.
 struct GuiEvidenceClaims
 {
+    bool controllerEndpointVerified = false;
+    bool targetModuleVerified = false;
     bool controllerReady = false;
     bool controlHeldAndVerified = false;
     bool controllerAndTargetIdentitiesVerified = false;

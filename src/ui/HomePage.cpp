@@ -51,11 +51,26 @@ ImVec4 ProbeColor(const TargetProbeOutcome outcome, const Theme& theme)
     {
     case TargetProbeOutcome::VerifiedIdle:
         return theme.statusGood;
-    case TargetProbeOutcome::ControllerDaqActive:
     case TargetProbeOutcome::TargetAcquisitionActive:
         return theme.statusWarning;
     case TargetProbeOutcome::NotRun:
     case TargetProbeOutcome::InProgress:
+        return theme.textDisabled;
+    default:
+        return theme.statusError;
+    }
+}
+
+ImVec4 ProbeColor(const ControllerProbeOutcome outcome, const Theme& theme)
+{
+    switch (outcome)
+    {
+    case ControllerProbeOutcome::VerifiedIdle:
+        return theme.statusGood;
+    case ControllerProbeOutcome::ControllerDaqActive:
+        return theme.statusWarning;
+    case ControllerProbeOutcome::NotRun:
+    case ControllerProbeOutcome::InProgress:
         return theme.textDisabled;
     default:
         return theme.statusError;
@@ -273,12 +288,14 @@ void HomePage::DrawHome(
         const auto connectionValidation = ValidateTunerTargetInput(draft_);
         const bool connectEnabled =
             Allows(view.allowedActions, GuiAction::Connect)
-            && connectionValidation.success
+            && connectionValidation.endpointValid
             && draftPublished
             && !inputChanged;
         ImGui::SameLine();
         if (DrawPrimaryButton(
-                "Connect",
+                snapshot.target.controllerVerification.inProgress
+                    ? "Connecting..."
+                    : "Connect",
                 connectEnabled,
                 theme,
                 ImVec2(actionWidth, 0.0F)))
@@ -287,14 +304,14 @@ void HomePage::DrawHome(
         }
         if (draft_.mvlcHost.empty())
         {
-            ImGui::TextDisabled("Enter an MVLC hostname or IP address.");
+            ImGui::TextDisabled("Enter an MVLC hostname or IPv4 address.");
         }
         else if (!connectionValidation.endpointValid)
         {
             DrawValidationMessage(
                 connectionValidation.endpointMessage, false, theme);
         }
-        else if (ready)
+        else if (view.claims.controllerEndpointVerified && !inputChanged)
         {
             ImGui::TextColored(
                 theme.statusGood,
@@ -305,8 +322,7 @@ void HomePage::DrawHome(
         else
         {
             ImGui::TextDisabled(
-                "The host and module address from the last successful Check "
-                "are remembered.");
+                "Connect verifies MVLC identity, FW0046, and idle DAQ.");
         }
         ImGui::EndChild();
 
@@ -325,7 +341,7 @@ void HomePage::DrawHome(
         const auto targetValidation = ValidateTunerTargetInput(draft_);
         const bool checkEnabled =
             Allows(view.allowedActions, GuiAction::Check)
-            && selectionCurrent
+            && draftPublished
             && !inputChanged;
         ImGui::SameLine();
         if (DrawPrimaryButton(
@@ -341,7 +357,7 @@ void HomePage::DrawHome(
         if (targetValidation.moduleAddressValid
             && targetValidation.normalizedModuleAddress)
         {
-            if (ready && !inputChanged
+            if (view.claims.targetModuleVerified && !inputChanged
                 && view.targetModuleAddressA32.has_value())
             {
                 const auto shorthand = GuiTargetAddressText(
@@ -482,7 +498,19 @@ void HomePage::DrawHome(
             "FIDGET checks for active acquisition before taking control.");
     }
 
-    if (selectionCurrent
+    if (ControllerProbeEvidenceIsCurrent(snapshot.target)
+        && snapshot.target.controllerVerification.result.outcome
+            != ControllerProbeOutcome::NotRun)
+    {
+        ImGui::Spacing();
+        ImGui::TextColored(
+            ProbeColor(
+                snapshot.target.controllerVerification.result.outcome,
+                theme),
+            "%s",
+            snapshot.target.controllerVerification.result.message.c_str());
+    }
+    if (selectionCurrent && TargetProbeEvidenceIsCurrent(snapshot.target)
         && snapshot.target.verification.result.outcome
             != TargetProbeOutcome::NotRun)
     {
@@ -569,7 +597,17 @@ void HomePage::DrawControllerConflict(
     const bool checkAgain = Allows(
         view.allowedActions, GuiAction::CheckAgain);
     if (DrawPrimaryButton("Check again", checkAgain, theme))
-        tunerControl.Submit(ProbeTunerTargetCommand{});
+    {
+        if (snapshot.target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::ControllerDaqActive)
+        {
+            tunerControl.Submit(SelectTunerTargetCommand{});
+        }
+        else
+        {
+            tunerControl.Submit(ProbeTunerTargetCommand{});
+        }
+    }
     ImGui::SameLine();
     const bool returnHome = Allows(
         view.allowedActions, GuiAction::ReturnHome);

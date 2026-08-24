@@ -17,13 +17,26 @@ void Allow(GuiActionSet& actions, const GuiAction action) noexcept
     actions.set(Index(action));
 }
 
-bool ControllerReady(const Evidence& evidence) noexcept
+bool ControllerEndpointVerified(const Evidence& evidence) noexcept
 {
     return evidence.controllerConnected
         && evidence.controllerIdentityVerified
-        && evidence.targetIdentityAndFirmwareVerified
         && evidence.controllerIdleVerified
+        && evidence.controllerVerificationFresh;
+}
+
+bool TargetModuleVerified(const Evidence& evidence) noexcept
+{
+    return ControllerEndpointVerified(evidence)
+        && evidence.targetIdentityAndFirmwareVerified
+        && evidence.targetAcquisitionStoppedVerified
+        && evidence.targetVerificationFresh
         && evidence.connectionVerificationFresh;
+}
+
+bool ControllerReady(const Evidence& evidence) noexcept
+{
+    return TargetModuleVerified(evidence);
 }
 
 bool ControlHeldAndVerified(const Evidence& evidence) noexcept
@@ -226,13 +239,16 @@ GuiEvidenceClaims MakeClaims(
     const Evidence& evidence) noexcept
 {
     GuiEvidenceClaims claims;
+    claims.controllerEndpointVerified =
+        ControllerEndpointVerified(evidence);
+    claims.targetModuleVerified = TargetModuleVerified(evidence);
     claims.controllerReady = ControllerReady(evidence);
     claims.controlHeldAndVerified = ControlHeldAndVerified(evidence);
     claims.controllerAndTargetIdentitiesVerified =
-        evidence.controllerConnected
+        claims.controllerEndpointVerified
         && evidence.controllerIdentityVerified
         && evidence.targetIdentityAndFirmwareVerified
-        && evidence.connectionVerificationFresh;
+        && claims.targetModuleVerified;
     claims.liveRestoreSnapshotCaptured =
         evidence.liveRestoreSnapshotCaptured;
     claims.recoveryRecordDurable = evidence.recoveryRecordDurable;
@@ -544,7 +560,8 @@ void AddHomeActions(
 {
     if (evidence.endpointInputsValid && evidence.operationIdle)
         Allow(view.allowedActions, GuiAction::Connect);
-    if (evidence.currentConnectionRequestValid
+    if (ControllerEndpointVerified(evidence)
+        && evidence.targetModuleAddressValid
         && evidence.operationIdle)
     {
         Allow(view.allowedActions, GuiAction::Check);

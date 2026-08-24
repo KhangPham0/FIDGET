@@ -43,7 +43,8 @@ public:
 
 private:
     void EditTarget(EditTunerTargetCommand command);
-    void SelectTarget();
+    void ConnectController(
+        const std::shared_ptr<std::atomic<bool>>& cancellation);
     void ProbeTarget(
         const std::shared_ptr<std::atomic<bool>>& cancellation);
     void OpenTargetSession();

@@ -39,12 +39,16 @@ enum class TuningRecoveryComparison
 struct TuningSessionEvidence
 {
     bool endpointInputsValid = false;
+    bool targetModuleAddressValid = false;
     bool endpointEditingAllowed = false;
     bool currentConnectionRequestValid = false;
     bool controllerConnected = false;
     bool controllerIdentityVerified = false;
+    bool controllerVerificationFresh = false;
     bool targetIdentityAndFirmwareVerified = false;
     bool controllerIdleVerified = false;
+    bool targetAcquisitionStoppedVerified = false;
+    bool targetVerificationFresh = false;
     bool connectionVerificationFresh = false;
     bool noRecoveryPending = false;
     bool operationIdle = false;

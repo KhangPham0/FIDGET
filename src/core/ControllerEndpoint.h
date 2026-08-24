@@ -25,6 +25,13 @@ struct ControllerEndpointRequest
     std::string remoteBridgeCommand = "fidget_bridge";
 };
 
+[[nodiscard]] bool operator==(
+    const ControllerEndpointRequest& left,
+    const ControllerEndpointRequest& right) noexcept;
+[[nodiscard]] bool operator!=(
+    const ControllerEndpointRequest& left,
+    const ControllerEndpointRequest& right) noexcept;
+
 enum class ControllerEndpointValidationIssue
 {
     None,

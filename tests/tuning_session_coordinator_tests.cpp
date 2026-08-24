@@ -10,6 +10,7 @@
 #include "hardware/TargetProbeOperation.h"
 #include "vme_test_support.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -163,23 +164,16 @@ fidget::TunerTargetInput TargetInput(
     return input;
 }
 
-void EditAndSelect(
+void EditTarget(
     fidget::OwnershipService& service,
     const fidget::TunerTargetInput& input)
 {
     service.Submit(fidget::EditTunerTargetCommand{input});
     REQUIRE(WaitFor(service, [&input](const fidget::TunerSnapshot& snapshot) {
         return snapshot.target.input == input
-            && snapshot.target.verification.invalidated;
+            && snapshot.target.verification.invalidated
+            && snapshot.target.controllerVerification.invalidated;
     }));
-
-    service.Submit(fidget::SelectTunerTargetCommand{});
-    REQUIRE(WaitFor(service, [](const fidget::TunerSnapshot& snapshot) {
-        return snapshot.target.selection.has_value();
-    }));
-    CHECK(service.CurrentSnapshot()
-              ->target.selection->moduleAddress.FullA32Value()
-          == TargetBase);
 }
 
 void QueueMvlcProbeRead(
@@ -220,14 +214,13 @@ void QueueMvlcProbeRead(
     });
 }
 
-void QueueSuccessfulTargetProbe(
+void QueueSuccessfulTargetCheck(
     fidget::test::FakeCommandTransport& transport)
 {
     using namespace fidget;
     using namespace fidget::test;
 
-    QueueMvlcProbeRead(transport);
-    TransactionReferences references{2U, 1U};
+    TransactionReferences references{1U, 1U};
     QueueRead(
         transport,
         references,
@@ -303,27 +296,46 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     fixture.service->Submit(EditTunerTargetCommand{input});
     REQUIRE(WaitFor(*fixture.service, [&input](const TunerSnapshot& snapshot) {
         return snapshot.target.input == input
-            && snapshot.target.verification.invalidated;
+            && snapshot.target.verification.invalidated
+            && snapshot.target.controllerVerification.invalidated;
     }));
     CHECK(fixture.service->CurrentSnapshot()
               ->tuningSession.evidence.endpointInputsValid);
     CHECK_FALSE(fixture.service->CurrentSnapshot()
                     ->tuningSession.evidence.currentConnectionRequestValid);
 
+    QueueMvlcProbeRead(*fixture.transport);
+    const auto beforeConnect = fixture.service->CurrentSnapshot()->revision;
+    const auto submittingThread = std::this_thread::get_id();
+    std::thread::id probeThread;
+    fixture.transport->SetSendHook(
+        [&probeThread](const std::vector<std::byte>&) {
+            probeThread = std::this_thread::get_id();
+        });
     fixture.service->Submit(SelectTunerTargetCommand{});
     REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
-        return snapshot.target.selection.has_value();
+        return snapshot.target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::VerifiedIdle;
     }));
-    REQUIRE(fixture.service->CurrentSnapshot()->target.selection.has_value());
-    CHECK(fixture.service->CurrentSnapshot()->target.selection->input == input);
-    CHECK(fixture.service->CurrentSnapshot()
-              ->tuningSession.evidence.endpointInputsValid);
-    CHECK(fixture.service->CurrentSnapshot()
-              ->tuningSession.evidence.currentConnectionRequestValid);
-    CHECK_FALSE(fixture.service->CurrentSnapshot()
-                    ->tuningSession.evidence.controllerConnected);
-    CHECK_FALSE(fixture.service->CurrentSnapshot()
-                    ->tuningSession.evidence.connectionVerificationFresh);
+
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->revision == beforeConnect + 2U);
+    REQUIRE(snapshot->target.selection.has_value());
+    CHECK(snapshot->target.selection->input == input);
+    CHECK(snapshot->target.selection->moduleAddress.FullA32Value()
+          == TargetBase);
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
+    CHECK_FALSE(TargetVerificationIsFresh(snapshot->target));
+    CHECK(snapshot->tuningSession.evidence.controllerConnected);
+    CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
+    CHECK_FALSE(snapshot->tuningSession.evidence.targetVerificationFresh);
+    CHECK_FALSE(snapshot->tuningSession.evidence.connectionVerificationFresh);
+    CHECK(probeThread != std::thread::id{});
+    CHECK(probeThread != submittingThread);
+    CHECK_FALSE(fixture.transport->IsOpen());
+    CHECK(fixture.transport->SentRequests().size() == 1U);
+    CHECK(DecodeWireOperations(*fixture.transport).empty());
+    REQUIRE(fixture.factory->CreateCount() == 1U);
 
     const auto connectionPreferences = LoadApplicationPreferences(
         fixture.storage);
@@ -336,35 +348,38 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK(connectionPreferences.preferences.remoteBridgeCommand
           == input.remoteBridgeCommand);
 
-    std::thread::id probeThread;
-    fixture.transport->SetSendHook(
-        [&probeThread](const std::vector<std::byte>&) {
-            probeThread = std::this_thread::get_id();
-        });
-    QueueSuccessfulTargetProbe(*fixture.transport);
+    QueueSuccessfulTargetCheck(*fixture.transport);
     const auto beforeProbe = fixture.service->CurrentSnapshot()->revision;
-    const auto submittingThread = std::this_thread::get_id();
     fixture.service->Submit(ProbeTunerTargetCommand{});
     REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
         return snapshot.target.verification.result.outcome
             == TargetProbeOutcome::VerifiedIdle;
     }));
 
-    auto snapshot = fixture.service->CurrentSnapshot();
+    snapshot = fixture.service->CurrentSnapshot();
     CHECK(snapshot->revision == beforeProbe + 2U);
     CHECK(TargetVerificationIsFresh(snapshot->target));
     CHECK(snapshot->tuningSession.evidence.connectionVerificationFresh);
     CHECK(probeThread != std::thread::id{});
     CHECK(probeThread != submittingThread);
     CHECK_FALSE(fixture.transport->IsOpen());
-    REQUIRE(fixture.factory->CreateCount() == 1U);
+    REQUIRE(fixture.factory->CreateCount() == 2U);
+    const auto operations = DecodeWireOperations(*fixture.transport);
+    REQUIRE(operations.size() == 3U);
+    CHECK(std::none_of(
+        operations.begin(), operations.end(),
+        [](const auto& operation) { return operation.write; }));
+    CHECK(fixture.transport->SentRequests().size() == 7U);
     const auto requests = fixture.factory->Requests();
-    REQUIRE(requests.size() == 1U);
-    const auto& endpoint = std::get<SshBridgeEndpointRequest>(requests[0U]);
-    CHECK(endpoint.mvlcHost == input.mvlcHost);
-    CHECK(endpoint.mvlcCommandPort == input.mvlcCommandPort);
-    CHECK(endpoint.sshDestination == input.sshDestination);
-    CHECK(endpoint.remoteBridgeCommand == input.remoteBridgeCommand);
+    REQUIRE(requests.size() == 2U);
+    for (const auto& request : requests)
+    {
+        const auto& endpoint = std::get<SshBridgeEndpointRequest>(request);
+        CHECK(endpoint.mvlcHost == input.mvlcHost);
+        CHECK(endpoint.mvlcCommandPort == input.mvlcCommandPort);
+        CHECK(endpoint.sshDestination == input.sshDestination);
+        CHECK(endpoint.remoteBridgeCommand == input.remoteBridgeCommand);
+    }
 
     const auto savedPreferences = LoadApplicationPreferences(fixture.storage);
     INFO(savedPreferences.message);
@@ -378,18 +393,37 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     CHECK(savedPreferences.preferences.remoteBridgeCommand
           == input.remoteBridgeCommand);
 
-    auto edited = input;
-    edited.mvlcHost = "replacement-controller";
-    fixture.service->Submit(EditTunerTargetCommand{edited});
-    REQUIRE(WaitFor(*fixture.service, [&edited](const TunerSnapshot& value) {
-        return value.target.input == edited
-            && value.target.verification.invalidated;
+    auto moduleEdited = input;
+    moduleEdited.moduleAddress = "0x2200";
+    fixture.service->Submit(EditTunerTargetCommand{moduleEdited});
+    REQUIRE(WaitFor(*fixture.service, [&moduleEdited](const TunerSnapshot& value) {
+        return value.target.input == moduleEdited
+            && value.target.verification.invalidated
+            && !value.target.controllerVerification.invalidated;
     }));
     snapshot = fixture.service->CurrentSnapshot();
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
     CHECK_FALSE(TargetProbeEvidenceIsCurrent(snapshot->target));
+    CHECK(snapshot->tuningSession.evidence.controllerConnected);
+    CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
     CHECK_FALSE(snapshot->tuningSession.evidence.connectionVerificationFresh);
+    CHECK(snapshot->tuningSession.evidence.targetModuleAddressValid);
     CHECK(snapshot->target.sessionGate.outcome
           == TunerTargetSessionGateOutcome::NotRequested);
+
+    auto endpointEdited = moduleEdited;
+    endpointEdited.mvlcHost = "replacement-controller";
+    fixture.service->Submit(EditTunerTargetCommand{endpointEdited});
+    REQUIRE(WaitFor(*fixture.service, [&endpointEdited](
+        const TunerSnapshot& value) {
+        return value.target.input == endpointEdited
+            && value.target.verification.invalidated
+            && value.target.controllerVerification.invalidated;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK_FALSE(ControllerVerificationIsFresh(snapshot->target));
+    CHECK_FALSE(snapshot->tuningSession.evidence.controllerConnected);
+    CHECK_FALSE(snapshot->tuningSession.evidence.controllerVerificationFresh);
     const auto preferencesAfterEdit = LoadApplicationPreferences(
         fixture.storage);
     REQUIRE(preferencesAfterEdit.success);
@@ -405,8 +439,50 @@ TEST_CASE("direct-target commands dispatch through the coordinator")
     }));
     snapshot = fixture.service->CurrentSnapshot();
     CHECK_FALSE(snapshot->target.verification.invalidated);
+    CHECK_FALSE(snapshot->target.controllerVerification.invalidated);
     CHECK(snapshot->target.verification.result.outcome
           == TargetProbeOutcome::NotRun);
+    CHECK(snapshot->target.controllerVerification.result.outcome
+          == ControllerProbeOutcome::NotRun);
+}
+
+TEST_CASE("Connect ignores an invalid module address and Check does not")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    auto input = TargetInput(TunerTargetEndpointKind::DirectEthernet);
+    input.moduleAddress = "not-an-address";
+    EditTarget(*fixture.service, input);
+
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->tuningSession.evidence.endpointInputsValid);
+    CHECK_FALSE(snapshot->tuningSession.evidence.targetModuleAddressValid);
+
+    QueueMvlcProbeRead(*fixture.transport);
+    fixture.service->Submit(SelectTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::VerifiedIdle;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
+    CHECK_FALSE(snapshot->target.selection.has_value());
+    CHECK(fixture.transport->SentRequests().size() == 1U);
+    CHECK(DecodeWireOperations(*fixture.transport).empty());
+    CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
+    CHECK_FALSE(snapshot->tuningSession.evidence.targetVerificationFresh);
+
+    input.moduleAddress = "0x1100";
+    fixture.service->Submit(EditTunerTargetCommand{input});
+    REQUIRE(WaitFor(*fixture.service, [&input](const TunerSnapshot& value) {
+        return value.target.input == input
+            && value.target.verification.invalidated;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
+    CHECK(snapshot->tuningSession.evidence.controllerVerificationFresh);
+    CHECK(snapshot->tuningSession.evidence.targetModuleAddressValid);
 }
 
 TEST_CASE("clearing a target cancels a probe on the command worker")
@@ -414,7 +490,7 @@ TEST_CASE("clearing a target cancels a probe on the command worker")
     using namespace fidget;
 
     ServiceFixture fixture;
-    EditAndSelect(*fixture.service, TargetInput(
+    EditTarget(*fixture.service, TargetInput(
         TunerTargetEndpointKind::DirectEthernet));
     QueueMvlcProbeRead(*fixture.transport);
 
@@ -430,7 +506,7 @@ TEST_CASE("clearing a target cancels a probe on the command worker")
             condition.wait(lock, [&] { return releaseReceive; });
         });
 
-    fixture.service->Submit(ProbeTunerTargetCommand{});
+    fixture.service->Submit(SelectTunerTargetCommand{});
     bool entered = false;
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -482,8 +558,13 @@ TEST_CASE("opening a target session is an evidence-only gate")
     CHECK_FALSE(std::filesystem::exists(fixture.storage.stateDirectory));
 
     const auto input = TargetInput();
-    EditAndSelect(*fixture.service, input);
-    QueueSuccessfulTargetProbe(*fixture.transport);
+    EditTarget(*fixture.service, input);
+    QueueMvlcProbeRead(*fixture.transport);
+    fixture.service->Submit(SelectTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return ControllerVerificationIsFresh(value.target);
+    }));
+    QueueSuccessfulTargetCheck(*fixture.transport);
     fixture.service->Submit(ProbeTunerTargetCommand{});
     REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
         return TargetVerificationIsFresh(value.target);
@@ -527,6 +608,7 @@ TEST_CASE("opening a target session is an evidence-only gate")
     }));
     snapshot = fixture.service->CurrentSnapshot();
     CHECK(snapshot->target.verification.invalidated);
+    CHECK(snapshot->target.controllerVerification.invalidated);
     CHECK(snapshot->target.sessionGate.activityLogPath.empty());
     CHECK(snapshot->target.sessionGate.recoveryJournalPath.empty());
     CHECK(fixture.factory->CreateCount() == requestCount);
@@ -565,6 +647,8 @@ TEST_CASE("legacy project dispatch and adjacent recovery discovery are unchanged
         CHECK(snapshot->activityLogPath == files.ActivityPath());
         CHECK(snapshot->target.verification.result.outcome
               == TargetProbeOutcome::NotRun);
+        CHECK(snapshot->target.controllerVerification.result.outcome
+              == ControllerProbeOutcome::NotRun);
         REQUIRE(fixture.factory->Projects().size() == 1U);
         CHECK(fixture.factory->CreateCount() == 1U);
     }

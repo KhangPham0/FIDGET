@@ -50,6 +50,8 @@ struct TunerTargetInputValidation
 
 [[nodiscard]] TunerTargetInputValidation ValidateTunerTargetInput(
     const TunerTargetInput& input);
+[[nodiscard]] ControllerEndpointRequest ControllerEndpointForTarget(
+    const TunerTargetInput& input);
 
 // A selection contains the one normalized address used by hardware and
 // workspace matching. The optional selection in TunerTargetState avoids using
@@ -60,15 +62,26 @@ struct TunerTargetSelection
     TargetModuleAddress moduleAddress;
 };
 
-enum class TargetProbeOutcome
+enum class ControllerProbeOutcome
 {
     NotRun,
     InProgress,
     VerifiedIdle,
     ControllerDaqActive,
-    TargetAcquisitionActive,
     WrongMvlcIdentity,
     WrongMvlcFirmware,
+    TransportUnavailable,
+    Timeout,
+    MalformedResponse,
+    Cancelled,
+};
+
+enum class TargetProbeOutcome
+{
+    NotRun,
+    InProgress,
+    VerifiedIdle,
+    TargetAcquisitionActive,
     WrongTargetIdentity,
     WrongTargetFirmware,
     TransportUnavailable,
@@ -77,13 +90,34 @@ enum class TargetProbeOutcome
     Cancelled,
 };
 
-// Positive facts established by a read-only probe. The DAQ and target stopped
-// facts stay separate here; the GUI's combined idle claim requires both.
-struct TargetProbeEvidence
+// Positive facts established by the controller-only Connect operation.
+struct ControllerProbeEvidence
 {
     bool controllerConnected = false;
     bool controllerIdentityAndFirmwareVerified = false;
     bool controllerDaqIdleVerified = false;
+    bool activeControllerUseDetected = false;
+    bool noControlTaken = false;
+    bool noVmeOrModuleSettingWritesSent = false;
+};
+
+struct ControllerProbeResult
+{
+    ControllerProbeOutcome outcome = ControllerProbeOutcome::NotRun;
+    ControllerProbeEvidence evidence;
+    bool temporaryConnectionOpened = false;
+    bool temporaryConnectionClosed = false;
+    std::optional<std::uint32_t> mvlcHardwareId;
+    std::optional<std::uint32_t> mvlcFirmwareRevision;
+    std::optional<std::uint32_t> mvlcDaqMode;
+    std::string message;
+};
+
+// Positive facts established by the target-only Check operation. Current,
+// verified controller evidence is a separate prerequisite owned by the
+// coordinator and is never inferred from these target reads.
+struct TargetProbeEvidence
+{
     bool targetIdentityAndFirmwareVerified = false;
     bool targetAcquisitionStoppedVerified = false;
     bool activeControllerUseDetected = false;
@@ -97,13 +131,18 @@ struct TargetProbeResult
     TargetProbeEvidence evidence;
     bool temporaryConnectionOpened = false;
     bool temporaryConnectionClosed = false;
-    std::optional<std::uint32_t> mvlcHardwareId;
-    std::optional<std::uint32_t> mvlcFirmwareRevision;
-    std::optional<std::uint32_t> mvlcDaqMode;
     std::optional<std::uint16_t> targetHardwareId;
     std::optional<std::uint16_t> targetFirmwareRevision;
     std::optional<std::uint16_t> targetAcquisitionControl;
     std::string message;
+};
+
+struct TunerControllerVerification
+{
+    bool inProgress = false;
+    bool invalidated = false;
+    std::optional<ControllerEndpointRequest> probedEndpoint;
+    ControllerProbeResult result;
 };
 
 struct TunerTargetVerification
@@ -138,14 +177,19 @@ struct TunerTargetState
 {
     TunerTargetInput input;
     std::optional<TunerTargetSelection> selection;
+    TunerControllerVerification controllerVerification;
     TunerTargetVerification verification;
     TunerTargetSessionGateResult sessionGate;
 };
 
-// Freshness compares every editable connection field, including inactive SSH
-// fields. Consequently, editing the host, module address, transport kind, SSH
-// destination, or remote bridge command invalidates old evidence by structure,
-// even before a coordinator clears the explicit invalidated flag.
+// Controller freshness compares only endpoint fields. Target freshness also
+// compares the module address and requires current controller verification.
+// This makes a module-only edit preserve controller evidence while preventing
+// stale target evidence from authorizing Check completion or session opening.
+[[nodiscard]] bool ControllerProbeEvidenceIsCurrent(
+    const TunerTargetState& target) noexcept;
+[[nodiscard]] bool ControllerVerificationIsFresh(
+    const TunerTargetState& target) noexcept;
 [[nodiscard]] bool TargetProbeEvidenceIsCurrent(
     const TunerTargetState& target) noexcept;
 [[nodiscard]] bool TargetVerificationIsFresh(

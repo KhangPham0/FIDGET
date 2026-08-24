@@ -107,13 +107,26 @@ SessionPathResult MakeSessionPaths(
     return result;
 }
 
+TunerStatusLevel ProbeStatusLevel(const ControllerProbeOutcome outcome)
+{
+    switch (outcome)
+    {
+    case ControllerProbeOutcome::VerifiedIdle:
+        return TunerStatusLevel::Success;
+    case ControllerProbeOutcome::ControllerDaqActive:
+    case ControllerProbeOutcome::Cancelled:
+        return TunerStatusLevel::Warning;
+    default:
+        return TunerStatusLevel::Error;
+    }
+}
+
 TunerStatusLevel ProbeStatusLevel(const TargetProbeOutcome outcome)
 {
     switch (outcome)
     {
     case TargetProbeOutcome::VerifiedIdle:
         return TunerStatusLevel::Success;
-    case TargetProbeOutcome::ControllerDaqActive:
     case TargetProbeOutcome::TargetAcquisitionActive:
     case TargetProbeOutcome::Cancelled:
         return TunerStatusLevel::Warning;
@@ -187,7 +200,10 @@ void TuningSessionCoordinator::Submit(TunerCommand command)
     if (std::holds_alternative<SelectTunerTargetCommand>(command))
     {
         CancelPendingProbe();
-        (void)worker_.Post([this] { SelectTarget(); });
+        auto cancellation = BeginProbe();
+        (void)worker_.Post([this, cancellation = std::move(cancellation)] {
+            ConnectController(cancellation);
+        });
         return;
     }
     if (std::holds_alternative<ProbeTunerTargetCommand>(command))
@@ -220,102 +236,197 @@ void TuningSessionCoordinator::CancelPendingProbe() noexcept
 void TuningSessionCoordinator::EditTarget(EditTunerTargetCommand command)
 {
     auto snapshot = SnapshotCopy();
+    const auto previousInput = snapshot.target.input;
+    const bool endpointChanged =
+        ControllerEndpointForTarget(previousInput)
+        != ControllerEndpointForTarget(command.input);
+    const bool moduleChanged =
+        previousInput.moduleAddress != command.input.moduleAddress;
     snapshot.target.input = std::move(command.input);
-    snapshot.target.verification.inProgress = false;
-    snapshot.target.verification.invalidated = true;
+    if (endpointChanged
+        || (!moduleChanged && snapshot.target.input == previousInput))
+    {
+        snapshot.target.controllerVerification.inProgress = false;
+        snapshot.target.controllerVerification.invalidated = true;
+        snapshot.target.verification.inProgress = false;
+        snapshot.target.verification.invalidated = true;
+    }
+    else if (moduleChanged)
+    {
+        snapshot.target.verification.inProgress = false;
+        snapshot.target.verification.invalidated = true;
+    }
     snapshot.target.sessionGate = {};
     RefreshPresentationEvidence(snapshot);
+    const bool controllerStillFresh =
+        ControllerVerificationIsFresh(snapshot.target);
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
-        "The tuner target fields were updated. Verification is no longer "
-        "current.");
+        endpointChanged
+            ? "The controller and target fields were updated. Both "
+              "verification stages are no longer current."
+            : moduleChanged
+                ? "The module address was updated. Target verification is "
+                  "no longer current."
+                : "The current controller and target verification was "
+                  "cleared.",
+        moduleChanged && controllerStillFresh
+            ? "The verified controller connection remains current."
+            : std::string{});
 }
 
-void TuningSessionCoordinator::SelectTarget()
+void TuningSessionCoordinator::ConnectController(
+    const std::shared_ptr<std::atomic<bool>>& cancellation)
 {
     auto snapshot = SnapshotCopy();
     const auto validation = ValidateTunerTargetInput(snapshot.target.input);
-    snapshot.target.verification.inProgress = false;
-    snapshot.target.verification.invalidated = true;
     snapshot.target.sessionGate = {};
 
-    if (!validation.success || !validation.normalizedModuleAddress)
+    if (!validation.endpointValid)
     {
-        snapshot.target.selection.reset();
+        snapshot.target.controllerVerification.inProgress = false;
+        snapshot.target.controllerVerification.invalidated = true;
+        snapshot.target.controllerVerification.result = {};
+        snapshot.target.controllerVerification.result.message =
+            "The controller connection was not started because the endpoint "
+            "fields are invalid.";
         RefreshPresentationEvidence(snapshot);
         PublishStatus(
             std::move(snapshot),
             TunerStatusLevel::Warning,
-            "The tuner target was not selected.",
-            validation.endpointValid
-                ? validation.moduleAddressMessage
-                : validation.endpointMessage);
+            "The controller connection was not started.",
+            validation.endpointMessage);
+        FinishProbe(cancellation);
         return;
     }
 
-    snapshot.target.selection = TunerTargetSelection{
-        snapshot.target.input,
-        *validation.normalizedModuleAddress,
-    };
+    const auto input = snapshot.target.input;
+    if (validation.moduleAddressValid && validation.normalizedModuleAddress)
+    {
+        snapshot.target.selection = TunerTargetSelection{
+            input,
+            *validation.normalizedModuleAddress,
+        };
+    }
+    else
+    {
+        snapshot.target.selection.reset();
+    }
+    snapshot.target.controllerVerification.inProgress = true;
+    snapshot.target.controllerVerification.invalidated = false;
+    snapshot.target.controllerVerification.probedEndpoint =
+        ControllerEndpointForTarget(input);
+    snapshot.target.controllerVerification.result = {};
+    snapshot.target.controllerVerification.result.outcome =
+        ControllerProbeOutcome::InProgress;
+    snapshot.target.controllerVerification.result.message =
+        "Connecting to the MVLC controller with read-only checks.";
+    snapshot.target.verification.inProgress = false;
+    snapshot.target.verification.invalidated = true;
     const auto savedBridgeFields = SaveBridgeConvenienceFields(
-        storagePaths_, snapshot.target.input);
+        storagePaths_, input);
+    RefreshPresentationEvidence(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Connecting to the MVLC controller with read-only checks.",
+        savedBridgeFields.success
+            ? std::string{}
+            : "The SSH destination and bridge command could not be saved: "
+                + savedBridgeFields.message);
+
+    const auto result = RunControllerProbe(
+        transportFactory_,
+        ControllerProbeRequest{MakeEndpointRequest(input)},
+        *cancellation);
+
+    snapshot = SnapshotCopy();
+    snapshot.target.controllerVerification.inProgress = false;
+    snapshot.target.controllerVerification.invalidated = false;
+    snapshot.target.controllerVerification.probedEndpoint =
+        ControllerEndpointForTarget(input);
+    snapshot.target.controllerVerification.result = result;
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
         savedBridgeFields.success
-            ? TunerStatusLevel::Success
+            ? ProbeStatusLevel(result.outcome)
             : TunerStatusLevel::Warning,
-        "The endpoint request and normalized target were selected.",
+        result.message,
         savedBridgeFields.success
-            ? "Run Check to connect and verify the controller and target."
+            ? std::string{}
             : "The SSH destination and bridge command could not be saved: "
                 + savedBridgeFields.message);
+    FinishProbe(cancellation);
 }
 
 void TuningSessionCoordinator::ProbeTarget(
     const std::shared_ptr<std::atomic<bool>>& cancellation)
 {
     auto snapshot = SnapshotCopy();
-    if (!snapshot.target.selection
-        || snapshot.target.selection->input != snapshot.target.input)
+    if (!ControllerVerificationIsFresh(snapshot.target))
     {
         snapshot.target.verification.inProgress = false;
         snapshot.target.verification.invalidated = true;
         snapshot.target.verification.result = {};
         snapshot.target.verification.result.message =
-            "Select the current target fields before running the read-only "
-            "probe.";
+            "The target check requires a current verified controller "
+            "connection.";
         RefreshPresentationEvidence(snapshot);
         PublishStatus(
             std::move(snapshot),
             TunerStatusLevel::Warning,
-            "The read-only target probe was not started.",
-            "Select the current target fields first.");
+            "The read-only target check was not started.",
+            "Run Connect successfully for the current endpoint first.");
         FinishProbe(cancellation);
         return;
     }
 
-    const auto selected = *snapshot.target.selection;
+    const auto validation = ValidateTunerTargetInput(snapshot.target.input);
+    if (!validation.moduleAddressValid || !validation.normalizedModuleAddress)
+    {
+        snapshot.target.selection.reset();
+        snapshot.target.verification.inProgress = false;
+        snapshot.target.verification.invalidated = true;
+        snapshot.target.verification.result = {};
+        snapshot.target.verification.result.message =
+            "The target check requires a valid module address.";
+        RefreshPresentationEvidence(snapshot);
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Warning,
+            "The read-only target check was not started.",
+            validation.moduleAddressMessage);
+        FinishProbe(cancellation);
+        return;
+    }
+
+    const auto input = snapshot.target.input;
+    const TunerTargetSelection selected{
+        input,
+        *validation.normalizedModuleAddress,
+    };
+    snapshot.target.selection = selected;
     snapshot.target.verification.inProgress = true;
     snapshot.target.verification.invalidated = false;
-    snapshot.target.verification.probedInput = selected.input;
+    snapshot.target.verification.probedInput = input;
     snapshot.target.verification.result = {};
     snapshot.target.verification.result.outcome =
         TargetProbeOutcome::InProgress;
     snapshot.target.verification.result.message =
-        "Running the read-only target probe.";
+        "Checking the target module with read-only VME accesses.";
     snapshot.target.sessionGate = {};
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
-        "Running the read-only target probe.");
+        "Checking the target module with read-only VME accesses.");
 
     const auto result = RunTargetProbe(
         transportFactory_,
         TargetProbeRequest{
-            MakeEndpointRequest(selected.input),
+            MakeEndpointRequest(input),
             selected.moduleAddress,
         },
         *cancellation);
@@ -324,10 +435,10 @@ void TuningSessionCoordinator::ProbeTarget(
     if (result.outcome == TargetProbeOutcome::VerifiedIdle)
     {
         const ApplicationPreferences preferences{
-            selected.input.mvlcHost,
-            selected.input.moduleAddress,
-            selected.input.sshDestination,
-            selected.input.remoteBridgeCommand,
+            input.mvlcHost,
+            input.moduleAddress,
+            input.sshDestination,
+            input.remoteBridgeCommand,
         };
         const auto saved = SaveApplicationPreferences(
             storagePaths_, preferences);
@@ -338,7 +449,7 @@ void TuningSessionCoordinator::ProbeTarget(
     snapshot = SnapshotCopy();
     snapshot.target.verification.inProgress = false;
     snapshot.target.verification.invalidated = false;
-    snapshot.target.verification.probedInput = selected.input;
+    snapshot.target.verification.probedInput = input;
     snapshot.target.verification.result = result;
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
@@ -349,7 +460,8 @@ void TuningSessionCoordinator::ProbeTarget(
         result.message,
         persistenceError.empty()
             ? std::string{}
-            : "Verification succeeded, but the verified Ethernet host and "
+            : "Target verification succeeded, but the verified Ethernet "
+              "host and "
               "module address and the SSH convenience fields could not be "
               "saved: " + persistenceError);
     FinishProbe(cancellation);
@@ -371,7 +483,7 @@ void TuningSessionCoordinator::OpenTargetSession()
             std::move(snapshot),
             TunerStatusLevel::Warning,
             "The target session was not opened.",
-            "Run a successful read-only target probe for the current fields "
+            "Run Connect and Check successfully for the current fields "
             "first.");
         return;
     }
@@ -414,15 +526,17 @@ void TuningSessionCoordinator::ClearTarget()
     auto snapshot = SnapshotCopy();
     const bool cancelledProbe =
         snapshot.target.verification.result.outcome
-        == TargetProbeOutcome::Cancelled;
+            == TargetProbeOutcome::Cancelled
+        || snapshot.target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::Cancelled;
     snapshot.target = {};
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
         TunerStatusLevel::Information,
         cancelledProbe
-            ? "The read-only target probe was cancelled and the tuner target "
-              "was cleared."
+            ? "The read-only connection or target check was cancelled and "
+              "the tuner target was cleared."
             : "The tuner target was cleared.");
 }
 
@@ -477,11 +591,15 @@ void TuningSessionCoordinator::RefreshPresentationEvidence(
         && snapshot.target.selection->input == snapshot.target.input;
     const auto validation = ValidateTunerTargetInput(snapshot.target.input);
     snapshot.tuningSession.evidence.endpointInputsValid =
-        validation.success;
+        validation.endpointValid;
+    snapshot.tuningSession.evidence.targetModuleAddressValid =
+        validation.moduleAddressValid;
     snapshot.tuningSession.evidence.endpointEditingAllowed =
-        !snapshot.target.verification.inProgress;
+        !snapshot.target.controllerVerification.inProgress
+        && !snapshot.target.verification.inProgress;
     snapshot.tuningSession.evidence.operationIdle =
-        !snapshot.target.verification.inProgress
+        !snapshot.target.controllerVerification.inProgress
+        && !snapshot.target.verification.inProgress
         && snapshot.activeOperation == GuidedTunerOperation::None;
     if (snapshot.tuningSession.phase == TuningSessionPhase::Home
         && !snapshot.tuningSession.evidence.recoveryContextEstablished

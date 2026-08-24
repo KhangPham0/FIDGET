@@ -29,12 +29,19 @@ fidget::TunerTargetState VerifiedTarget()
         target.input,
         address.address.value(),
     };
+    target.controllerVerification.probedEndpoint =
+        ControllerEndpointForTarget(target.input);
+    target.controllerVerification.result.outcome =
+        ControllerProbeOutcome::VerifiedIdle;
+    auto& controller = target.controllerVerification.result.evidence;
+    controller.controllerConnected = true;
+    controller.controllerIdentityAndFirmwareVerified = true;
+    controller.controllerDaqIdleVerified = true;
+    controller.noControlTaken = true;
+    controller.noVmeOrModuleSettingWritesSent = true;
     target.verification.probedInput = target.input;
     target.verification.result.outcome = TargetProbeOutcome::VerifiedIdle;
     auto& evidence = target.verification.result.evidence;
-    evidence.controllerConnected = true;
-    evidence.controllerIdentityAndFirmwareVerified = true;
-    evidence.controllerDaqIdleVerified = true;
     evidence.targetIdentityAndFirmwareVerified = true;
     evidence.targetAcquisitionStoppedVerified = true;
     evidence.noControlTaken = true;
@@ -157,65 +164,89 @@ TEST_CASE("verified target facts feed the GUI evidence model")
     CHECK(evidence.currentConnectionRequestValid);
     CHECK(evidence.controllerConnected);
     CHECK(evidence.controllerIdentityVerified);
+    CHECK(evidence.controllerVerificationFresh);
     CHECK(evidence.targetIdentityAndFirmwareVerified);
     CHECK(evidence.controllerIdleVerified);
+    CHECK(evidence.targetAcquisitionStoppedVerified);
+    CHECK(evidence.targetVerificationFresh);
     CHECK(evidence.connectionVerificationFresh);
     CHECK(evidence.noControlTaken);
     CHECK(evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(evidence.activeControllerUseDetected);
 }
 
-TEST_CASE("every editable target connection field invalidates old evidence")
+TEST_CASE("target evidence invalidates according to field dependencies")
 {
     using namespace fidget;
 
-    const auto checkInvalidated = [](
-        const TunerTargetState& target,
-        const bool requestStillValid = false) {
+    const auto checkEndpointInvalidated = [](const TunerTargetState& target) {
         TuningSessionEvidence evidence;
-        evidence.controllerConnected = true;
-        evidence.controllerIdentityVerified = true;
-        evidence.targetIdentityAndFirmwareVerified = true;
-        evidence.controllerIdleVerified = true;
-        evidence.connectionVerificationFresh = true;
         ApplyTargetPresentationEvidence(target, evidence);
+        CHECK_FALSE(ControllerProbeEvidenceIsCurrent(target));
+        CHECK_FALSE(ControllerVerificationIsFresh(target));
         CHECK_FALSE(TargetProbeEvidenceIsCurrent(target));
         CHECK_FALSE(TargetVerificationIsFresh(target));
-        CHECK(evidence.currentConnectionRequestValid == requestStillValid);
+        CHECK_FALSE(evidence.currentConnectionRequestValid);
         CHECK_FALSE(evidence.controllerConnected);
         CHECK_FALSE(evidence.controllerIdentityVerified);
+        CHECK_FALSE(evidence.controllerVerificationFresh);
         CHECK_FALSE(evidence.targetIdentityAndFirmwareVerified);
         CHECK_FALSE(evidence.controllerIdleVerified);
+        CHECK_FALSE(evidence.targetAcquisitionStoppedVerified);
+        CHECK_FALSE(evidence.targetVerificationFresh);
         CHECK_FALSE(evidence.connectionVerificationFresh);
     };
 
     auto target = VerifiedTarget();
     target.input.mvlcHost = "another-controller";
-    checkInvalidated(target);
+    checkEndpointInvalidated(target);
 
     target = VerifiedTarget();
     target.input.mvlcCommandPort = 40000U;
-    checkInvalidated(target);
+    checkEndpointInvalidated(target);
 
     target = VerifiedTarget();
     target.input.moduleAddress = "0x2200";
-    checkInvalidated(target);
+    TuningSessionEvidence moduleEvidence;
+    ApplyTargetPresentationEvidence(target, moduleEvidence);
+    CHECK(ControllerProbeEvidenceIsCurrent(target));
+    CHECK(ControllerVerificationIsFresh(target));
+    CHECK_FALSE(TargetProbeEvidenceIsCurrent(target));
+    CHECK_FALSE(TargetVerificationIsFresh(target));
+    CHECK(moduleEvidence.currentConnectionRequestValid);
+    CHECK(moduleEvidence.controllerConnected);
+    CHECK(moduleEvidence.controllerIdentityVerified);
+    CHECK(moduleEvidence.controllerVerificationFresh);
+    CHECK(moduleEvidence.controllerIdleVerified);
+    CHECK_FALSE(moduleEvidence.targetIdentityAndFirmwareVerified);
+    CHECK_FALSE(moduleEvidence.targetAcquisitionStoppedVerified);
+    CHECK_FALSE(moduleEvidence.targetVerificationFresh);
+    CHECK_FALSE(moduleEvidence.connectionVerificationFresh);
 
     target = VerifiedTarget();
     target.input.endpointKind = TunerTargetEndpointKind::SshBridge;
-    checkInvalidated(target);
+    checkEndpointInvalidated(target);
 
     target = VerifiedTarget();
     target.input.sshDestination = "another-bridge";
-    checkInvalidated(target);
+    checkEndpointInvalidated(target);
 
     target = VerifiedTarget();
     target.input.remoteBridgeCommand = "/srv/fidget_bridge";
-    checkInvalidated(target);
+    checkEndpointInvalidated(target);
 
     target = VerifiedTarget();
     target.verification.invalidated = true;
-    checkInvalidated(target, true);
+    TuningSessionEvidence targetInvalidated;
+    ApplyTargetPresentationEvidence(target, targetInvalidated);
+    CHECK(ControllerVerificationIsFresh(target));
+    CHECK_FALSE(TargetVerificationIsFresh(target));
+    CHECK(targetInvalidated.controllerVerificationFresh);
+    CHECK_FALSE(targetInvalidated.targetVerificationFresh);
+
+    target = VerifiedTarget();
+    target.controllerVerification.invalidated = true;
+    checkEndpointInvalidated(target);
 }
 
 TEST_CASE("active-use target evidence routes into the presentation hazard facts")
@@ -224,10 +255,7 @@ TEST_CASE("active-use target evidence routes into the presentation hazard facts"
 
     auto target = VerifiedTarget();
     target.verification.result.outcome =
-        TargetProbeOutcome::ControllerDaqActive;
-    target.verification.result.evidence.controllerDaqIdleVerified = false;
-    target.verification.result.evidence
-        .targetIdentityAndFirmwareVerified = false;
+        TargetProbeOutcome::TargetAcquisitionActive;
     target.verification.result.evidence
         .targetAcquisitionStoppedVerified = false;
     target.verification.result.evidence.activeControllerUseDetected = true;
@@ -240,4 +268,27 @@ TEST_CASE("active-use target evidence routes into the presentation hazard facts"
     CHECK(evidence.noControlTaken);
     CHECK(evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(evidence.connectionVerificationFresh);
+}
+
+TEST_CASE("controller active-use evidence remains separate from target evidence")
+{
+    using namespace fidget;
+
+    auto target = VerifiedTarget();
+    target.controllerVerification.result.outcome =
+        ControllerProbeOutcome::ControllerDaqActive;
+    auto& controller = target.controllerVerification.result.evidence;
+    controller.controllerDaqIdleVerified = false;
+    controller.activeControllerUseDetected = true;
+
+    TuningSessionEvidence evidence;
+    ApplyTargetPresentationEvidence(target, evidence);
+    CHECK(ControllerProbeEvidenceIsCurrent(target));
+    CHECK_FALSE(ControllerVerificationIsFresh(target));
+    CHECK_FALSE(TargetProbeEvidenceIsCurrent(target));
+    CHECK(evidence.activeControllerUseDetected);
+    CHECK(evidence.noControlTaken);
+    CHECK(evidence.noVmeOrModuleSettingWritesSent);
+    CHECK_FALSE(evidence.controllerVerificationFresh);
+    CHECK_FALSE(evidence.targetVerificationFresh);
 }

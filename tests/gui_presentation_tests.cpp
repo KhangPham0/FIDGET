@@ -25,12 +25,16 @@ TunerSnapshot ReadySnapshot()
     TunerSnapshot snapshot;
     auto& evidence = snapshot.tuningSession.evidence;
     evidence.endpointInputsValid = true;
+    evidence.targetModuleAddressValid = true;
     evidence.endpointEditingAllowed = true;
     evidence.currentConnectionRequestValid = true;
     evidence.controllerConnected = true;
     evidence.controllerIdentityVerified = true;
+    evidence.controllerVerificationFresh = true;
     evidence.targetIdentityAndFirmwareVerified = true;
     evidence.controllerIdleVerified = true;
+    evidence.targetAcquisitionStoppedVerified = true;
+    evidence.targetVerificationFresh = true;
     evidence.connectionVerificationFresh = true;
     evidence.noRecoveryPending = true;
     evidence.operationIdle = true;
@@ -553,11 +557,14 @@ TEST_CASE("a backend phase alone never grants an action")
 TEST_CASE("ready and preparation actions require every decisive fact")
 {
     using Member = bool TuningSessionEvidence::*;
-    constexpr std::array<Member, 5> readyFacts = {{
+    constexpr std::array<Member, 8> readyFacts = {{
         &TuningSessionEvidence::controllerConnected,
         &TuningSessionEvidence::controllerIdentityVerified,
+        &TuningSessionEvidence::controllerVerificationFresh,
         &TuningSessionEvidence::targetIdentityAndFirmwareVerified,
         &TuningSessionEvidence::controllerIdleVerified,
+        &TuningSessionEvidence::targetAcquisitionStoppedVerified,
+        &TuningSessionEvidence::targetVerificationFresh,
         &TuningSessionEvidence::connectionVerificationFresh,
     }};
 
@@ -590,6 +597,8 @@ TEST_CASE("ready and preparation actions require every decisive fact")
 
     const auto preparedView = PresentGui(
         PreparedSnapshot(TuningSessionPhase::Goal));
+    CHECK(preparedView.claims.controllerEndpointVerified);
+    CHECK(preparedView.claims.targetModuleVerified);
     CHECK(preparedView.claims.controllerAndTargetIdentitiesVerified);
     CHECK(preparedView.claims.liveRestoreSnapshotCaptured);
     CHECK(preparedView.claims.recoveryRecordDurable);
@@ -994,22 +1003,38 @@ TEST_CASE("write and restoration intents require current ownership evidence")
 
 TEST_CASE("connection checks and both tuning paths have explicit gates")
 {
-    TunerSnapshot connected;
-    auto& connection = connected.tuningSession.evidence;
-    connection.currentConnectionRequestValid = true;
+    TunerSnapshot disconnected;
+    auto& connection = disconnected.tuningSession.evidence;
+    connection.endpointInputsValid = true;
+    connection.endpointEditingAllowed = true;
     connection.operationIdle = true;
-    auto view = PresentGui(connected);
+    auto view = PresentGui(disconnected);
     CHECK(view.page == GuiPage::HomeDisconnected);
-    CHECK(Allows(view.allowedActions, GuiAction::Check));
+    CHECK(Allows(view.allowedActions, GuiAction::Connect));
+    CHECK_FALSE(Allows(view.allowedActions, GuiAction::Check));
 
+    connection.targetModuleAddressValid = true;
     connection.controllerConnected = true;
-    CHECK(Allows(
-        PresentGui(connected).allowedActions,
-        GuiAction::Check));
+    connection.controllerIdentityVerified = true;
+    connection.controllerIdleVerified = true;
+    connection.controllerVerificationFresh = true;
+    view = PresentGui(disconnected);
+    CHECK(view.claims.controllerEndpointVerified);
+    CHECK(Allows(view.allowedActions, GuiAction::Check));
+    CHECK_FALSE(view.claims.targetModuleVerified);
 
-    connection.currentConnectionRequestValid = false;
+    connection.targetModuleAddressValid = false;
     CHECK_FALSE(Allows(
-        PresentGui(connected).allowedActions,
+        PresentGui(disconnected).allowedActions,
+        GuiAction::Check));
+    CHECK(Allows(
+        PresentGui(disconnected).allowedActions,
+        GuiAction::Connect));
+
+    connection.targetModuleAddressValid = true;
+    connection.controllerVerificationFresh = false;
+    CHECK_FALSE(Allows(
+        PresentGui(disconnected).allowedActions,
         GuiAction::Check));
 
     auto group = PreparedSnapshot(TuningSessionPhase::Group);

@@ -22,7 +22,7 @@
 namespace {
 
 constexpr std::uint32_t TargetBase = 0x11000000U;
-constexpr std::uint16_t FirstTargetSuperReference = 2U;
+constexpr std::uint16_t FirstTargetSuperReference = 1U;
 constexpr std::uint32_t FirstTargetStackReference = 1U;
 constexpr const char ApprovedActiveUseMessage[] =
     "Active controller use was detected. FIDGET did not take control, and "
@@ -41,10 +41,31 @@ struct ProbeValues
     std::uint16_t targetAcquisition = 0U;
 };
 
+struct ProbeFixture
+{
+    ProbeFixture()
+        : transportOwner(
+            std::make_unique<fidget::test::FakeCommandTransport>())
+        , transport(transportOwner.get())
+        , factory(std::move(transportOwner))
+    {
+    }
+
+    std::unique_ptr<fidget::test::FakeCommandTransport> transportOwner;
+    fidget::test::FakeCommandTransport* transport = nullptr;
+    fidget::test::FakeTransportFactory factory;
+    std::atomic<bool> cancelled{false};
+};
+
 fidget::TargetModuleAddress TargetAddress()
 {
     const auto parsed = fidget::ParseTargetModuleAddress("0x1100");
     return parsed.address.value();
+}
+
+fidget::TransportEndpointRequest DirectEndpoint()
+{
+    return fidget::DirectEthernetEndpointRequest{"mvlc-test", 32768U};
 }
 
 void QueueMvlcRead(
@@ -112,28 +133,19 @@ void QueueTargetReads(
     }
 }
 
-struct ProbeFixture
-{
-    explicit ProbeFixture(const ProbeValues& values, std::size_t targetReads)
-        : transportOwner(
-            std::make_unique<fidget::test::FakeCommandTransport>())
-        , transport(transportOwner.get())
-        , factory(std::move(transportOwner))
-    {
-        QueueMvlcRead(*transport, values);
-        QueueTargetReads(*transport, values, targetReads);
-    }
-
-    std::unique_ptr<fidget::test::FakeCommandTransport> transportOwner;
-    fidget::test::FakeCommandTransport* transport = nullptr;
-    fidget::test::FakeTransportFactory factory;
-    std::atomic<bool> cancelled{false};
-};
-
-fidget::TargetProbeResult Run(
+fidget::ControllerProbeResult RunController(
     ProbeFixture& fixture,
-    fidget::TransportEndpointRequest endpoint =
-        fidget::DirectEthernetEndpointRequest{"mvlc-test", 32768U})
+    fidget::TransportEndpointRequest endpoint = DirectEndpoint())
+{
+    return fidget::RunControllerProbe(
+        fixture.factory,
+        fidget::ControllerProbeRequest{std::move(endpoint)},
+        fixture.cancelled);
+}
+
+fidget::TargetProbeResult RunTarget(
+    ProbeFixture& fixture,
+    fidget::TransportEndpointRequest endpoint = DirectEndpoint())
 {
     return fidget::RunTargetProbe(
         fixture.factory,
@@ -154,45 +166,52 @@ bool IsImmediateStackPlumbingAddress(const std::uint16_t address)
         || address == MvlcStack0TriggerRegister;
 }
 
-void CheckExactReadOnlyTrace(
+void CheckExactControllerTrace(
     const fidget::test::FakeCommandTransport& transport)
 {
     using namespace fidget;
     using namespace fidget::test;
 
     const auto requests = transport.SentRequests();
-    REQUIRE(requests.size() == 7U);
-
-    const auto localWords = DecodeWords(requests.front());
-    const auto localRequest = BuildMvlcLocalRegisterBatchReadRequest(
+    REQUIRE(requests.size() == 1U);
+    const auto expected = BuildMvlcLocalRegisterBatchReadRequest(
         1U,
         TargetProbeMvlcRegisterOrder.data(),
         TargetProbeMvlcRegisterOrder.size());
-    REQUIRE(localRequest.success);
-    CHECK(localWords == localRequest.words);
+    REQUIRE(expected.success);
+    const auto words = DecodeWords(requests.front());
+    CHECK(words == expected.words);
+    CHECK(DecodeWireOperations(transport).empty());
+    CHECK(std::none_of(
+        words.begin(), words.end(), [](const std::uint32_t word) {
+            return (word & 0xFFFF0000U) == MvlcWriteLocalCommand
+                || word == MvlcVmeWriteA32D16Command;
+        }));
+}
 
-    const std::vector<WireOperation> expectedReads{
-        {false, TargetBase + TargetProbeMdppRegisterOrder[0U], 0U},
-        {false, TargetBase + TargetProbeMdppRegisterOrder[1U], 0U},
-        {false, TargetBase + TargetProbeMdppRegisterOrder[2U], 0U},
-    };
+void CheckExactTargetTrace(
+    const fidget::test::FakeCommandTransport& transport,
+    const std::size_t readCount = 3U)
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    const auto requests = transport.SentRequests();
+    REQUIRE(requests.size() == readCount * 2U);
     const auto operations = DecodeWireOperations(transport);
-    REQUIRE(operations.size() == expectedReads.size());
-    for (std::size_t index = 0U; index < operations.size(); ++index)
-    {
-        CHECK_FALSE(operations[index].write);
-        CHECK(operations[index].address == expectedReads[index].address);
-        const auto offset = operations[index].address - TargetBase;
-        CHECK(offset != Fw2051ScpSelectorRegister);
-        CHECK((offset & 0xFF00U) != 0x6100U);
-    }
+    REQUIRE(operations.size() == readCount);
 
     std::uint16_t superReference = FirstTargetSuperReference;
     std::uint32_t stackReference = FirstTargetStackReference;
-    for (std::size_t index = 0U;
-         index < TargetProbeMdppRegisterOrder.size();
-         ++index)
+    for (std::size_t index = 0U; index < readCount; ++index)
     {
+        CHECK_FALSE(operations[index].write);
+        CHECK(operations[index].address
+              == TargetBase + TargetProbeMdppRegisterOrder[index]);
+        const auto offset = operations[index].address - TargetBase;
+        CHECK(offset != Fw2051ScpSelectorRegister);
+        CHECK((offset & 0xFF00U) != 0x6100U);
+
         const auto operation = EncodeMvlcVmeReadD16Words(
             TargetBase + TargetProbeMdppRegisterOrder[index]);
         const auto expectedUpload = BuildMvlcStackUploadRequest(
@@ -200,8 +219,8 @@ void CheckExactReadOnlyTrace(
             stackReference++,
             operation.data(),
             operation.size());
-        CHECK(DecodeWords(requests[index * 2U + 1U]) == expectedUpload);
-        CHECK(DecodeWords(requests[index * 2U + 2U])
+        CHECK(DecodeWords(requests[index * 2U]) == expectedUpload);
+        CHECK(DecodeWords(requests[index * 2U + 1U])
               == BuildMvlcStackExecuteRequest(superReference++));
     }
 
@@ -212,24 +231,37 @@ void CheckExactReadOnlyTrace(
         CHECK(std::find(
                   words.begin(), words.end(), MvlcVmeWriteA32D16Command)
               == words.end());
-        for (std::size_t index = 0U; index < words.size(); ++index)
+        for (const auto word : words)
         {
-            if ((words[index] & 0xFFFF0000U) != MvlcWriteLocalCommand)
+            if ((word & 0xFFFF0000U) != MvlcWriteLocalCommand)
                 continue;
-
             ++localWriteCount;
-            const auto address = static_cast<std::uint16_t>(words[index]);
+            const auto address = static_cast<std::uint16_t>(word);
             CHECK(IsImmediateStackPlumbingAddress(address));
             CHECK(address != 0x1300U);
             CHECK(address != Fw2051ScpSelectorRegister);
             CHECK((address & 0xFF00U) != 0x6100U);
         }
     }
-    CHECK(localWriteCount == 30U);
+    CHECK(localWriteCount == readCount * 10U);
+}
+
+fidget::ControllerProbeResult VerifiedControllerResult()
+{
+    using namespace fidget;
+    ControllerProbeResult result;
+    result.outcome = ControllerProbeOutcome::VerifiedIdle;
+    result.evidence.controllerConnected = true;
+    result.evidence.controllerIdentityAndFirmwareVerified = true;
+    result.evidence.controllerDaqIdleVerified = true;
+    result.evidence.noControlTaken = true;
+    result.evidence.noVmeOrModuleSettingWritesSent = true;
+    return result;
 }
 
 fidget::TunerSnapshot PresentationSnapshot(
-    const fidget::TargetProbeResult& result)
+    const fidget::ControllerProbeResult& controller,
+    const fidget::TargetProbeResult& target = {})
 {
     using namespace fidget;
 
@@ -240,12 +272,16 @@ fidget::TunerSnapshot PresentationSnapshot(
         snapshot.target.input,
         TargetAddress(),
     };
+    snapshot.target.controllerVerification.probedEndpoint =
+        ControllerEndpointForTarget(snapshot.target.input);
+    snapshot.target.controllerVerification.result = controller;
     snapshot.target.verification.probedInput = snapshot.target.input;
-    snapshot.target.verification.result = result;
+    snapshot.target.verification.result = target;
     ApplyTargetPresentationEvidence(
         snapshot.target,
         snapshot.tuningSession.evidence);
     snapshot.tuningSession.evidence.endpointInputsValid = true;
+    snapshot.tuningSession.evidence.targetModuleAddressValid = true;
     snapshot.tuningSession.evidence.operationIdle = true;
     snapshot.tuningSession.evidence.noRecoveryPending = true;
     return snapshot;
@@ -257,9 +293,37 @@ void CheckClosed(const ProbeFixture& fixture)
     REQUIRE(fixture.factory.CreateCount() == 1U);
 }
 
+void CheckEndpointRequest(
+    const fidget::test::FakeTransportFactory& factory,
+    const fidget::TransportEndpointRequest& expected)
+{
+    using namespace fidget;
+
+    const auto requests = factory.Requests();
+    REQUIRE(requests.size() == 1U);
+    CHECK(requests.front().index() == expected.index());
+    if (const auto* direct =
+            std::get_if<DirectEthernetEndpointRequest>(&expected))
+    {
+        const auto& observed =
+            std::get<DirectEthernetEndpointRequest>(requests.front());
+        CHECK(observed.mvlcHost == direct->mvlcHost);
+        CHECK(observed.mvlcCommandPort == direct->mvlcCommandPort);
+        return;
+    }
+
+    const auto& bridge = std::get<SshBridgeEndpointRequest>(expected);
+    const auto& observed =
+        std::get<SshBridgeEndpointRequest>(requests.front());
+    CHECK(observed.mvlcHost == bridge.mvlcHost);
+    CHECK(observed.mvlcCommandPort == bridge.mvlcCommandPort);
+    CHECK(observed.sshDestination == bridge.sshDestination);
+    CHECK(observed.remoteBridgeCommand == bridge.remoteBridgeCommand);
+}
+
 } // namespace
 
-TEST_CASE("the target probe has one exact read-only trace over both endpoints")
+TEST_CASE("Connect has one controller-only trace over both endpoints")
 {
     using namespace fidget;
 
@@ -271,74 +335,75 @@ TEST_CASE("the target probe has one exact read-only trace over both endpoints")
     SUBCASE("SSH bridge")
     {
         endpoint = SshBridgeEndpointRequest{
-            "mvlc-test",
-            32768U,
-            "bridge-test",
-            "fidget_bridge",
-        };
+            "mvlc-test", 32768U, "bridge-test", "fidget_bridge"};
     }
 
-    ProbeFixture fixture(ProbeValues{}, 3U);
-    const auto result = Run(fixture, endpoint);
+    ProbeFixture fixture;
+    QueueMvlcRead(*fixture.transport, ProbeValues{});
+    const auto result = RunController(fixture, endpoint);
 
     INFO(result.message);
-    CHECK(result.outcome == TargetProbeOutcome::VerifiedIdle);
+    CHECK(result.outcome == ControllerProbeOutcome::VerifiedIdle);
     CHECK(result.temporaryConnectionOpened);
     CHECK(result.temporaryConnectionClosed);
     CHECK(result.evidence.controllerConnected);
     CHECK(result.evidence.controllerIdentityAndFirmwareVerified);
     CHECK(result.evidence.controllerDaqIdleVerified);
+    CHECK(result.evidence.noControlTaken);
+    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
+    CHECK_FALSE(result.evidence.activeControllerUseDetected);
+    CheckExactControllerTrace(*fixture.transport);
+    CheckClosed(fixture);
+    CheckEndpointRequest(fixture.factory, endpoint);
+}
+
+TEST_CASE("Check has one target-only trace over both endpoints")
+{
+    using namespace fidget;
+
+    TransportEndpointRequest endpoint;
+    SUBCASE("direct Ethernet")
+    {
+        endpoint = DirectEthernetEndpointRequest{"mvlc-test", 32768U};
+    }
+    SUBCASE("SSH bridge")
+    {
+        endpoint = SshBridgeEndpointRequest{
+            "mvlc-test", 32768U, "bridge-test", "fidget_bridge"};
+    }
+
+    ProbeFixture fixture;
+    QueueTargetReads(*fixture.transport, ProbeValues{});
+    const auto result = RunTarget(fixture, endpoint);
+
+    INFO(result.message);
+    CHECK(result.outcome == TargetProbeOutcome::VerifiedIdle);
+    CHECK(result.temporaryConnectionOpened);
+    CHECK(result.temporaryConnectionClosed);
     CHECK(result.evidence.targetIdentityAndFirmwareVerified);
     CHECK(result.evidence.targetAcquisitionStoppedVerified);
     CHECK(result.evidence.noControlTaken);
     CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
     CHECK_FALSE(result.evidence.activeControllerUseDetected);
-    REQUIRE(result.targetAcquisitionControl.has_value());
-    CHECK(*result.targetAcquisitionControl == 0U);
-    CheckExactReadOnlyTrace(*fixture.transport);
+    CheckExactTargetTrace(*fixture.transport);
     CheckClosed(fixture);
-
-    const auto requests = fixture.factory.Requests();
-    REQUIRE(requests.size() == 1U);
-    CHECK(requests.front().index() == endpoint.index());
-    if (const auto* direct =
-            std::get_if<DirectEthernetEndpointRequest>(&endpoint))
-    {
-        const auto& observed =
-            std::get<DirectEthernetEndpointRequest>(requests.front());
-        CHECK(observed.mvlcHost == direct->mvlcHost);
-        CHECK(observed.mvlcCommandPort == direct->mvlcCommandPort);
-    }
-    else
-    {
-        const auto& expected =
-            std::get<SshBridgeEndpointRequest>(endpoint);
-        const auto& observed =
-            std::get<SshBridgeEndpointRequest>(requests.front());
-        CHECK(observed.mvlcHost == expected.mvlcHost);
-        CHECK(observed.mvlcCommandPort == expected.mvlcCommandPort);
-        CHECK(observed.sshDestination == expected.sshDestination);
-        CHECK(observed.remoteBridgeCommand
-              == expected.remoteBridgeCommand);
-    }
+    CheckEndpointRequest(fixture.factory, endpoint);
 }
 
-TEST_CASE("active MVLC DAQ routes to controller conflict without target traffic")
+TEST_CASE("active MVLC DAQ routes to conflict with controller-only traffic")
 {
     using namespace fidget;
 
     ProbeValues values;
     values.mvlcDaqMode = 0x0005U;
-    ProbeFixture fixture(values, 0U);
-    const auto result = Run(fixture);
+    ProbeFixture fixture;
+    QueueMvlcRead(*fixture.transport, values);
+    const auto result = RunController(fixture);
 
-    CHECK(result.outcome == TargetProbeOutcome::ControllerDaqActive);
+    CHECK(result.outcome == ControllerProbeOutcome::ControllerDaqActive);
     CHECK(result.message == ApprovedActiveUseMessage);
     CHECK(result.evidence.activeControllerUseDetected);
-    CHECK(result.evidence.noControlTaken);
-    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
-    CHECK(fixture.transport->SentRequests().size() == 1U);
-    CHECK(DecodeWireOperations(*fixture.transport).empty());
+    CheckExactControllerTrace(*fixture.transport);
     const auto view = PresentGui(PresentationSnapshot(result));
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
@@ -346,29 +411,31 @@ TEST_CASE("active MVLC DAQ routes to controller conflict without target traffic"
     CheckClosed(fixture);
 }
 
-TEST_CASE("an active target routes to controller conflict after read-only checks")
+TEST_CASE("an active target routes to conflict after target-only reads")
 {
     using namespace fidget;
 
     ProbeValues values;
     values.targetAcquisition = 1U;
-    ProbeFixture fixture(values, 3U);
-    const auto result = Run(fixture);
+    ProbeFixture fixture;
+    QueueTargetReads(*fixture.transport, values);
+    const auto result = RunTarget(fixture);
 
     CHECK(result.outcome == TargetProbeOutcome::TargetAcquisitionActive);
     CHECK(result.message == ApprovedActiveUseMessage);
     CHECK(result.evidence.activeControllerUseDetected);
     CHECK(result.evidence.targetIdentityAndFirmwareVerified);
     CHECK_FALSE(result.evidence.targetAcquisitionStoppedVerified);
-    CheckExactReadOnlyTrace(*fixture.transport);
-    const auto view = PresentGui(PresentationSnapshot(result));
+    CheckExactTargetTrace(*fixture.transport);
+    const auto view = PresentGui(
+        PresentationSnapshot(VerifiedControllerResult(), result));
     CHECK(view.page == GuiPage::ControllerConflict);
     CHECK(view.claims.noControlTaken);
     CHECK(view.claims.noVmeOrModuleSettingWritesSent);
     CheckClosed(fixture);
 }
 
-TEST_CASE("wrong MVLC identity and firmware have specific outcomes")
+TEST_CASE("wrong MVLC identity and firmware have controller outcomes")
 {
     using namespace fidget;
 
@@ -378,20 +445,20 @@ TEST_CASE("wrong MVLC identity and firmware have specific outcomes")
     SUBCASE("firmware")
         values.mvlcFirmware = 0x0045U;
 
-    ProbeFixture fixture(values, 0U);
-    const auto result = Run(fixture);
+    ProbeFixture fixture;
+    QueueMvlcRead(*fixture.transport, values);
+    const auto result = RunController(fixture);
     CHECK(result.outcome == (
         values.mvlcHardwareId == TargetProbeExpectedMvlcHardwareId
-            ? TargetProbeOutcome::WrongMvlcFirmware
-            : TargetProbeOutcome::WrongMvlcIdentity));
+            ? ControllerProbeOutcome::WrongMvlcFirmware
+            : ControllerProbeOutcome::WrongMvlcIdentity));
     CHECK(result.evidence.controllerConnected);
     CHECK_FALSE(result.evidence.controllerIdentityAndFirmwareVerified);
-    CHECK_FALSE(result.evidence.activeControllerUseDetected);
-    CHECK(DecodeWireOperations(*fixture.transport).empty());
+    CheckExactControllerTrace(*fixture.transport);
     CheckClosed(fixture);
 }
 
-TEST_CASE("wrong target identity and firmware have specific outcomes")
+TEST_CASE("wrong target identity and firmware have target outcomes")
 {
     using namespace fidget;
 
@@ -407,20 +474,15 @@ TEST_CASE("wrong target identity and firmware have specific outcomes")
         targetReads = 2U;
     }
 
-    ProbeFixture fixture(values, targetReads);
-    const auto result = Run(fixture);
+    ProbeFixture fixture;
+    QueueTargetReads(*fixture.transport, values, targetReads);
+    const auto result = RunTarget(fixture);
     CHECK(result.outcome == (
         values.targetHardwareId == 0x1234U
             ? TargetProbeOutcome::WrongTargetIdentity
             : TargetProbeOutcome::WrongTargetFirmware));
-    CHECK(result.evidence.controllerIdentityAndFirmwareVerified);
-    CHECK(result.evidence.controllerDaqIdleVerified);
     CHECK_FALSE(result.evidence.targetIdentityAndFirmwareVerified);
-    const auto operations = DecodeWireOperations(*fixture.transport);
-    REQUIRE(operations.size() == targetReads);
-    CHECK(std::none_of(
-        operations.begin(), operations.end(),
-        [](const auto& operation) { return operation.write; }));
+    CheckExactTargetTrace(*fixture.transport, targetReads);
     CheckClosed(fixture);
 }
 
@@ -435,94 +497,121 @@ TEST_CASE("both MDPP-32 identities require exact SCP FW2051")
 
         ProbeValues accepted;
         accepted.targetHardwareId = hardwareId;
-        ProbeFixture acceptedFixture(accepted, 3U);
-        const auto acceptedResult = Run(acceptedFixture);
+        ProbeFixture acceptedFixture;
+        QueueTargetReads(*acceptedFixture.transport, accepted);
+        const auto acceptedResult = RunTarget(acceptedFixture);
         CHECK(acceptedResult.outcome == TargetProbeOutcome::VerifiedIdle);
         CHECK(acceptedResult.evidence.targetIdentityAndFirmwareVerified);
-        CheckExactReadOnlyTrace(*acceptedFixture.transport);
+        CheckExactTargetTrace(*acceptedFixture.transport);
         CheckClosed(acceptedFixture);
 
         ProbeValues wrongFirmware;
         wrongFirmware.targetHardwareId = hardwareId;
         wrongFirmware.targetFirmware = 0x2050U;
-        ProbeFixture wrongFirmwareFixture(wrongFirmware, 2U);
-        const auto wrongFirmwareResult = Run(wrongFirmwareFixture);
+        ProbeFixture wrongFirmwareFixture;
+        QueueTargetReads(*wrongFirmwareFixture.transport, wrongFirmware, 2U);
+        const auto wrongFirmwareResult = RunTarget(wrongFirmwareFixture);
         CHECK(wrongFirmwareResult.outcome
               == TargetProbeOutcome::WrongTargetFirmware);
         CHECK_FALSE(
             wrongFirmwareResult.evidence.targetIdentityAndFirmwareVerified);
-        const auto operations =
-            DecodeWireOperations(*wrongFirmwareFixture.transport);
-        REQUIRE(operations.size() == 2U);
-        CHECK(std::none_of(
-            operations.begin(), operations.end(),
-            [](const auto& operation) { return operation.write; }));
+        CheckExactTargetTrace(*wrongFirmwareFixture.transport, 2U);
         CheckClosed(wrongFirmwareFixture);
     }
 }
 
-TEST_CASE("target probe timeout is specific and closes the connection")
+TEST_CASE("controller and target timeouts stay stage-specific")
 {
     using namespace fidget;
     using namespace fidget::test;
 
-    auto owner = std::make_unique<FakeCommandTransport>();
-    auto* transport = owner.get();
-    const auto request = BuildMvlcLocalRegisterBatchReadRequest(
-        1U,
-        TargetProbeMvlcRegisterOrder.data(),
-        TargetProbeMvlcRegisterOrder.size());
-    REQUIRE(request.success);
-    for (int attempt = 0; attempt < MvlcFingerprintReadAttemptCount; ++attempt)
+    SUBCASE("controller")
     {
-        transport->QueueExchange({
-            EncodeWords(request.words),
-            {FakeReceiveAction::Timeout()},
-        });
-    }
-    FakeTransportFactory factory(std::move(owner));
-    const std::atomic<bool> cancelled{false};
-    const auto result = RunTargetProbe(
-        factory,
-        TargetProbeRequest{
-            DirectEthernetEndpointRequest{"mvlc-test", 32768U},
-            TargetAddress(),
-        },
-        cancelled);
-
-    CHECK(result.outcome == TargetProbeOutcome::Timeout);
-    CHECK(result.temporaryConnectionClosed);
-    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
-    CHECK(transport->SentRequests().size()
-          == static_cast<std::size_t>(MvlcFingerprintReadAttemptCount));
-    CHECK(DecodeWireOperations(*transport).empty());
-    CHECK_FALSE(transport->IsOpen());
-}
-
-TEST_CASE("malformed local and VME responses have a specific outcome")
-{
-    using namespace fidget;
-    using namespace fidget::test;
-
-    auto owner = std::make_unique<FakeCommandTransport>();
-    auto* transport = owner.get();
-
-    SUBCASE("local response")
-    {
+        ProbeFixture fixture;
         const auto request = BuildMvlcLocalRegisterBatchReadRequest(
             1U,
             TargetProbeMvlcRegisterOrder.data(),
             TargetProbeMvlcRegisterOrder.size());
         REQUIRE(request.success);
-        transport->QueueExchange({
+        for (int attempt = 0;
+             attempt < MvlcFingerprintReadAttemptCount;
+             ++attempt)
+        {
+            fixture.transport->QueueExchange({
+                EncodeWords(request.words),
+                {FakeReceiveAction::Timeout()},
+            });
+        }
+        const auto result = RunController(fixture);
+        CHECK(result.outcome == ControllerProbeOutcome::Timeout);
+        CHECK(result.temporaryConnectionClosed);
+        CHECK(DecodeWireOperations(*fixture.transport).empty());
+        CheckClosed(fixture);
+    }
+
+    SUBCASE("target")
+    {
+        ProbeFixture fixture;
+        for (int attempt = 0;
+             attempt < MvlcTransactionAttemptCount;
+             ++attempt)
+        {
+            const auto super = static_cast<std::uint16_t>(1U + attempt * 2U);
+            const auto stack = static_cast<std::uint32_t>(1U + attempt);
+            const auto operation = EncodeMvlcVmeReadD16Words(
+                TargetBase + TargetProbeMdppRegisterOrder[0U]);
+            const auto upload = BuildMvlcStackUploadRequest(
+                super, stack, operation.data(), operation.size());
+            fixture.transport->QueueExchange({
+                EncodeWords(upload),
+                {FakeReceiveAction::Datagram(
+                    MakeCommandPacket({MakeSuperFrame(super)}))},
+            });
+            fixture.transport->QueueExchange({
+                EncodeWords(BuildMvlcStackExecuteRequest(super + 1U)),
+                {FakeReceiveAction::Timeout()},
+            });
+        }
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::Timeout);
+        CHECK(result.temporaryConnectionClosed);
+        const auto operations = DecodeWireOperations(*fixture.transport);
+        REQUIRE(operations.size()
+                == static_cast<std::size_t>(MvlcTransactionAttemptCount));
+        CHECK(std::none_of(
+            operations.begin(), operations.end(),
+            [](const auto& operation) { return operation.write; }));
+        CheckClosed(fixture);
+    }
+}
+
+TEST_CASE("malformed controller and target responses stay stage-specific")
+{
+    using namespace fidget;
+    using namespace fidget::test;
+
+    SUBCASE("controller")
+    {
+        ProbeFixture fixture;
+        const auto request = BuildMvlcLocalRegisterBatchReadRequest(
+            1U,
+            TargetProbeMvlcRegisterOrder.data(),
+            TargetProbeMvlcRegisterOrder.size());
+        REQUIRE(request.success);
+        fixture.transport->QueueExchange({
             EncodeWords(request.words),
             {FakeReceiveAction::Datagram(
                 std::vector<std::byte>{std::byte{0x01U}})},
         });
+        const auto result = RunController(fixture);
+        CHECK(result.outcome == ControllerProbeOutcome::MalformedResponse);
+        CHECK(result.temporaryConnectionClosed);
+        CheckClosed(fixture);
     }
-    SUBCASE("VME response")
+
+    SUBCASE("target")
     {
-        QueueMvlcRead(*transport, ProbeValues{});
+        ProbeFixture fixture;
         const auto operation = EncodeMvlcVmeReadD16Words(
             TargetBase + TargetProbeMdppRegisterOrder[0U]);
         const auto upload = BuildMvlcStackUploadRequest(
@@ -530,13 +619,13 @@ TEST_CASE("malformed local and VME responses have a specific outcome")
             FirstTargetStackReference,
             operation.data(),
             operation.size());
-        transport->QueueExchange({
+        fixture.transport->QueueExchange({
             EncodeWords(upload),
             {FakeReceiveAction::Datagram(MakeCommandPacket({
                 MakeSuperFrame(FirstTargetSuperReference),
             }))},
         });
-        transport->QueueExchange({
+        fixture.transport->QueueExchange({
             EncodeWords(BuildMvlcStackExecuteRequest(
                 FirstTargetSuperReference + 1U)),
             {FakeReceiveAction::Datagram(MakeCommandPacket({
@@ -550,21 +639,10 @@ TEST_CASE("malformed local and VME responses have a specific outcome")
                 },
             }))},
         });
+        const auto result = RunTarget(fixture);
+        CHECK(result.outcome == TargetProbeOutcome::MalformedResponse);
+        CHECK(result.temporaryConnectionClosed);
+        CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
+        CheckClosed(fixture);
     }
-
-    FakeTransportFactory factory(std::move(owner));
-    const std::atomic<bool> cancelled{false};
-    const auto result = RunTargetProbe(
-        factory,
-        TargetProbeRequest{
-            DirectEthernetEndpointRequest{"mvlc-test", 32768U},
-            TargetAddress(),
-        },
-        cancelled);
-
-    INFO(result.message);
-    CHECK(result.outcome == TargetProbeOutcome::MalformedResponse);
-    CHECK(result.temporaryConnectionClosed);
-    CHECK(result.evidence.noVmeOrModuleSettingWritesSent);
-    CHECK_FALSE(transport->IsOpen());
 }

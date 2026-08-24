@@ -43,10 +43,51 @@ TunerTargetInputValidation ValidateTunerTargetInput(
     return result;
 }
 
+ControllerEndpointRequest ControllerEndpointForTarget(
+    const TunerTargetInput& input)
+{
+    return {
+        input.endpointKind,
+        input.mvlcHost,
+        input.mvlcCommandPort,
+        input.sshDestination,
+        input.remoteBridgeCommand,
+    };
+}
+
+bool ControllerProbeEvidenceIsCurrent(
+    const TunerTargetState& target) noexcept
+{
+    if (!target.controllerVerification.probedEndpoint)
+        return false;
+
+    const auto& endpoint = *target.controllerVerification.probedEndpoint;
+    const auto& input = target.input;
+    return !target.controllerVerification.invalidated
+        && endpoint.kind == input.endpointKind
+        && endpoint.mvlcHost == input.mvlcHost
+        && endpoint.mvlcCommandPort == input.mvlcCommandPort
+        && endpoint.sshDestination == input.sshDestination
+        && endpoint.remoteBridgeCommand == input.remoteBridgeCommand
+        && target.controllerVerification.result.outcome
+            != ControllerProbeOutcome::NotRun
+        && target.controllerVerification.result.outcome
+            != ControllerProbeOutcome::InProgress;
+}
+
+bool ControllerVerificationIsFresh(
+    const TunerTargetState& target) noexcept
+{
+    return ControllerProbeEvidenceIsCurrent(target)
+        && target.controllerVerification.result.outcome
+            == ControllerProbeOutcome::VerifiedIdle;
+}
+
 bool TargetProbeEvidenceIsCurrent(
     const TunerTargetState& target) noexcept
 {
-    return !target.verification.invalidated
+    return ControllerVerificationIsFresh(target)
+        && !target.verification.invalidated
         && target.verification.probedInput.has_value()
         && *target.verification.probedInput == target.input
         && target.verification.result.outcome != TargetProbeOutcome::NotRun
@@ -66,36 +107,57 @@ void ApplyTargetPresentationEvidence(
     TuningSessionEvidence& evidence) noexcept
 {
     evidence.currentConnectionRequestValid =
-        target.selection.has_value()
-        && target.selection->input == target.input;
+        ControllerProbeEvidenceIsCurrent(target);
     evidence.controllerConnected = false;
     evidence.controllerIdentityVerified = false;
+    evidence.controllerVerificationFresh = false;
     evidence.targetIdentityAndFirmwareVerified = false;
     evidence.controllerIdleVerified = false;
+    evidence.targetAcquisitionStoppedVerified = false;
+    evidence.targetVerificationFresh = false;
     evidence.connectionVerificationFresh = false;
     evidence.activeControllerUseDetected = false;
     evidence.noControlTaken = false;
     evidence.noVmeOrModuleSettingWritesSent = false;
 
+    if (ControllerProbeEvidenceIsCurrent(target))
+    {
+        const auto& controller =
+            target.controllerVerification.result.evidence;
+        evidence.controllerConnected = controller.controllerConnected;
+        evidence.controllerIdentityVerified =
+            controller.controllerIdentityAndFirmwareVerified;
+        evidence.controllerIdleVerified =
+            controller.controllerDaqIdleVerified;
+        evidence.controllerVerificationFresh =
+            ControllerVerificationIsFresh(target);
+        evidence.activeControllerUseDetected =
+            controller.activeControllerUseDetected;
+        evidence.noControlTaken = controller.noControlTaken;
+        evidence.noVmeOrModuleSettingWritesSent =
+            controller.noVmeOrModuleSettingWritesSent;
+    }
+
     if (!TargetProbeEvidenceIsCurrent(target))
         return;
 
     const auto& probe = target.verification.result.evidence;
-    evidence.controllerConnected = probe.controllerConnected;
-    evidence.controllerIdentityVerified =
-        probe.controllerIdentityAndFirmwareVerified;
     evidence.targetIdentityAndFirmwareVerified =
         probe.targetIdentityAndFirmwareVerified;
-    evidence.controllerIdleVerified =
-        probe.controllerDaqIdleVerified
-        && probe.targetAcquisitionStoppedVerified;
+    evidence.targetAcquisitionStoppedVerified =
+        probe.targetAcquisitionStoppedVerified;
+    evidence.targetVerificationFresh =
+        TargetVerificationIsFresh(target);
     evidence.connectionVerificationFresh =
         TargetVerificationIsFresh(target);
     evidence.activeControllerUseDetected =
-        probe.activeControllerUseDetected;
-    evidence.noControlTaken = probe.noControlTaken;
+        evidence.activeControllerUseDetected
+        || probe.activeControllerUseDetected;
+    evidence.noControlTaken =
+        evidence.noControlTaken && probe.noControlTaken;
     evidence.noVmeOrModuleSettingWritesSent =
-        probe.noVmeOrModuleSettingWritesSent;
+        evidence.noVmeOrModuleSettingWritesSent
+        && probe.noVmeOrModuleSettingWritesSent;
 }
 
 } // namespace fidget

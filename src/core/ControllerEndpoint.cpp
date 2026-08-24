@@ -34,6 +34,24 @@ ControllerEndpointValidationResult Failure(
 
 } // namespace
 
+bool operator==(
+    const ControllerEndpointRequest& left,
+    const ControllerEndpointRequest& right) noexcept
+{
+    return left.kind == right.kind
+        && left.mvlcHost == right.mvlcHost
+        && left.mvlcCommandPort == right.mvlcCommandPort
+        && left.sshDestination == right.sshDestination
+        && left.remoteBridgeCommand == right.remoteBridgeCommand;
+}
+
+bool operator!=(
+    const ControllerEndpointRequest& left,
+    const ControllerEndpointRequest& right) noexcept
+{
+    return !(left == right);
+}
+
 ControllerEndpointValidationResult ValidateControllerEndpoint(
     const ControllerEndpointRequest& request)
 {
