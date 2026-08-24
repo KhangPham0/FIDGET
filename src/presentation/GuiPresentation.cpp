@@ -1,5 +1,7 @@
 #include "presentation/GuiPresentation.h"
 
+#include <cstdio>
+
 namespace fidget {
 namespace {
 
@@ -735,6 +737,12 @@ GuiViewState PresentGui(
     const auto& evidence = snapshot.tuningSession.evidence;
 
     GuiViewState view;
+    if (snapshot.target.selection.has_value()
+        && snapshot.target.selection->input == snapshot.target.input)
+    {
+        view.targetModuleAddressA32 =
+            snapshot.target.selection->moduleAddress.FullA32Value();
+    }
     view.claims = MakeClaims(snapshot, evidence);
     view.drawer = SelectDrawer(selection.drawer, evidence);
     view.headerConnection = SelectHeader(snapshot, evidence);
@@ -799,6 +807,30 @@ const char* GuiHeaderConnectionStatusText(
     }
 
     return "Controller status unknown";
+}
+
+std::string GuiTargetAddressText(
+    const std::uint32_t fullA32Address,
+    const GuiTargetAddressDisplay display)
+{
+    char buffer[16]{};
+    if (display == GuiTargetAddressDisplay::HomeMvmeShorthand)
+    {
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "0x%04X",
+            static_cast<unsigned>(fullA32Address >> 16U));
+    }
+    else
+    {
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "0x%08X",
+            static_cast<unsigned>(fullA32Address));
+    }
+    return buffer;
 }
 
 } // namespace fidget

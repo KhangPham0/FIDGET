@@ -5,6 +5,9 @@
 
 #include <bitset>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
 
 namespace fidget {
 
@@ -74,6 +77,12 @@ enum class GuiTuningOutcome
     None,
     ModuleCouldNotBeArmed,
     InsufficientData,
+};
+
+enum class GuiTargetAddressDisplay
+{
+    HomeMvmeShorthand,
+    DetailsExpandedA32,
 };
 
 enum class GuiAction
@@ -184,6 +193,9 @@ struct GuiViewState
     GuiTuningOutcome tuningOutcome = GuiTuningOutcome::None;
     GuiActionSet allowedActions;
     GuiEvidenceClaims claims;
+    // This is a display projection of TunerTargetSelection's one canonical
+    // parsed address. No second address is parsed or stored as authority.
+    std::optional<std::uint32_t> targetModuleAddressA32;
 };
 
 [[nodiscard]] GuiViewState PresentGui(
@@ -192,6 +204,10 @@ struct GuiViewState
 
 [[nodiscard]] const char* GuiHeaderConnectionStatusText(
     GuiHeaderConnectionStatus status) noexcept;
+
+[[nodiscard]] std::string GuiTargetAddressText(
+    std::uint32_t fullA32Address,
+    GuiTargetAddressDisplay display);
 
 } // namespace fidget
 

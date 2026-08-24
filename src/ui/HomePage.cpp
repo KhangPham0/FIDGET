@@ -1,6 +1,5 @@
 #include "ui/HomePage.h"
 
-#include "core/TargetModuleAddress.h"
 #include "core/TunerTarget.h"
 #include "ui/fonts/IconsFontAwesome5.h"
 
@@ -8,7 +7,6 @@
 #include "imgui_stdlib.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -123,17 +121,6 @@ bool DrawPrimaryButton(
     ImGui::EndDisabled();
     ImGui::PopStyleColor(3);
     return pressed && enabled;
-}
-
-std::string NormalizedAddressText(const TargetModuleAddress& address)
-{
-    char buffer[16]{};
-    std::snprintf(
-        buffer,
-        sizeof(buffer),
-        "0x%08X",
-        static_cast<unsigned>(address.FullA32Value()));
-    return buffer;
 }
 
 bool CurrentDraftIsPublished(
@@ -354,14 +341,16 @@ void HomePage::DrawHome(
         if (targetValidation.moduleAddressValid
             && targetValidation.normalizedModuleAddress)
         {
-            if (ready && !inputChanged)
+            if (ready && !inputChanged
+                && view.targetModuleAddressA32.has_value())
             {
-                const auto normalized = NormalizedAddressText(
-                    *targetValidation.normalizedModuleAddress);
+                const auto shorthand = GuiTargetAddressText(
+                    *view.targetModuleAddressA32,
+                    GuiTargetAddressDisplay::HomeMvmeShorthand);
                 ImGui::TextColored(
                     theme.statusGood,
                     "MDPP-32 SCP FW2051 found at %s.",
-                    normalized.c_str());
+                    shorthand.c_str());
             }
             else
             {

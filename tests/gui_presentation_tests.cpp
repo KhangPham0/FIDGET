@@ -422,6 +422,37 @@ TEST_CASE("drawers are evidence-gated overlays on primary pages")
         GuiAction::NavigateTune));
 }
 
+TEST_CASE("Home and Details present one canonical target address differently")
+{
+    auto snapshot = ReadySnapshot();
+    snapshot.target.input.mvlcHost = "controller.example";
+    snapshot.target.input.moduleAddress = "0x1100";
+    const auto parsed = ParseTargetModuleAddress(
+        snapshot.target.input.moduleAddress);
+    REQUIRE(parsed.address.has_value());
+    snapshot.target.selection = TunerTargetSelection{
+        snapshot.target.input,
+        *parsed.address,
+    };
+
+    const auto view = PresentGui(snapshot);
+    REQUIRE(view.targetModuleAddressA32.has_value());
+    CHECK(*view.targetModuleAddressA32 == 0x11000000U);
+    CHECK(GuiTargetAddressText(
+              *view.targetModuleAddressA32,
+              GuiTargetAddressDisplay::HomeMvmeShorthand)
+          == "0x1100");
+    CHECK(GuiTargetAddressText(
+              *view.targetModuleAddressA32,
+              GuiTargetAddressDisplay::DetailsExpandedA32)
+          == "0x11000000");
+    CHECK(snapshot.target.input.moduleAddress == "0x1100");
+
+    snapshot.target.input.moduleAddress = "0x2200";
+    const auto stale = PresentGui(snapshot);
+    CHECK_FALSE(stale.targetModuleAddressA32.has_value());
+}
+
 TEST_CASE("header states use explicit evidence and safety precedence")
 {
     auto unknown = TunerSnapshot{};

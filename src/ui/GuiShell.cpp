@@ -300,6 +300,23 @@ void DrawGuiShellDrawer(
     ImGui::EndDisabled();
     ImGui::Separator();
 
+    if (view.drawer == GuiDrawer::Details)
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Target module");
+        if (view.targetModuleAddressA32.has_value())
+        {
+            const auto expanded = GuiTargetAddressText(
+                *view.targetModuleAddressA32,
+                GuiTargetAddressDisplay::DetailsExpandedA32);
+            ImGui::Text("Expanded A32: %s", expanded.c_str());
+        }
+        else
+        {
+            ImGui::TextDisabled("No normalized target address selected.");
+        }
+    }
+
     ImGui::End();
 }
 
