@@ -38,6 +38,9 @@ enum class MvmeInitScriptUnresolvedReason
     InvalidSelector,
     SelectorUnresolved,
     ConditionalAfterAccuTest,
+    ArithmeticRequiresExpression,
+    ExpansionLimitReached,
+    MalformedVariableTable,
     MalformedScript,
 };
 

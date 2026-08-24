@@ -241,18 +241,12 @@ TEST_CASE("workspace and script variable tables use MVME scope order")
         "0x6100 ${quad}\n"
         "0x6110 $(${timing} + ${adjustment})");
     script["variable_table"] = {
-        {"name", "script_scope"},
-        {"variables", {
-            {"quad", {{"value", "3"}}},
-            {"adjustment", {{"value", "4"}}},
-        }},
+        {"quad", {{"value", "3"}, {"unit", "count"}}},
+        {"adjustment", {{"value", "4"}, {"unit", "count"}}},
     };
     const nlohmann::ordered_json moduleVariables = {
-        {"name", "module_scope"},
-        {"variables", {
-            {"quad", {{"value", "6"}}},
-            {"timing", {{"value", "12.5"}}},
-        }},
+        {"quad", {{"value", "6"}, {"unit", "count"}}},
+        {"timing", {{"value", "12.5"}, {"unit", "count"}}},
     };
     const nlohmann::ordered_json eventVariables = {
         {"timing", {{"value", 20}}},
@@ -270,6 +264,121 @@ TEST_CASE("workspace and script variable tables use MVME scope order")
     CHECK(evaluation.frontendWrites[0].value == 17U);
     REQUIRE(FinalValue(evaluation, 3U, 0x6110U) != nullptr);
     CHECK(FinalValue(evaluation, 3U, 0x6110U)->value == 17U);
+}
+
+// MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// performs one initial expansion/evaluation pass, then reparses and expands
+// most commands exactly once more. Arithmetic is evaluated only inside $().
+TEST_CASE("MVME arithmetic and variable expansion are strict and bounded")
+{
+    using namespace fidget;
+
+    SUBCASE("bare arithmetic is not a numeric literal")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "bare_arithmetic",
+            "0x6100 0\n"
+            "0x6110 1+2")});
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK(std::any_of(
+            evaluation.unresolvedStatements.begin(),
+            evaluation.unresolvedStatements.end(),
+            [](const MvmeInitScriptUnresolvedStatement& item) {
+                return item.impact
+                        == MvmeInitScriptUnresolvedImpact::Frontend
+                    && item.reason
+                        == MvmeInitScriptUnresolvedReason::
+                            ArithmeticRequiresExpression;
+            }));
+    }
+
+    SUBCASE("explicit arithmetic remains supported")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "explicit_arithmetic",
+            "0x6100 0\n"
+            "0x6110 $(1+2)\n"
+            "0x611A $(5*3)")});
+        REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Complete);
+        REQUIRE(evaluation.frontendWrites.size() == 2U);
+        CHECK(evaluation.frontendWrites[0U].value == 3U);
+        CHECK(evaluation.frontendWrites[1U].value == 15U);
+    }
+
+    SUBCASE("one command-specific reparse expands a complete command")
+    {
+        auto script = Script(
+            "command_reparse",
+            "0x6100 0\n"
+            "${command}");
+        script["variable_table"] = {
+            {"command", {
+                {"value", "write a32 d16 0x6110 ${gain}"},
+                {"unit", "count"},
+            }},
+            {"gain", {{"value", 24}, {"unit", "count"}}},
+        };
+        const auto evaluation = EvaluateScripts({script});
+        REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Complete);
+        REQUIRE(evaluation.frontendWrites.size() == 1U);
+        CHECK(evaluation.frontendWrites[0U].registerOffset == 0x6110U);
+        CHECK(evaluation.frontendWrites[0U].value == 24U);
+    }
+
+    SUBCASE("a third expansion is never guessed")
+    {
+        auto script = Script(
+            "bounded_expansion",
+            "0x6100 0\n"
+            "0x6110 ${outer}");
+        script["variable_table"] = {
+            {"outer", {{"value", "${middle}"}, {"unit", "count"}}},
+            {"middle", {{"value", "${inner}"}, {"unit", "count"}}},
+            {"inner", {{"value", 24}, {"unit", "count"}}},
+        };
+        const auto evaluation = EvaluateScripts({script});
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK(std::any_of(
+            evaluation.unresolvedStatements.begin(),
+            evaluation.unresolvedStatements.end(),
+            [](const MvmeInitScriptUnresolvedStatement& item) {
+                return item.impact
+                        == MvmeInitScriptUnresolvedImpact::Frontend
+                    && item.reason
+                        == MvmeInitScriptUnresolvedReason::
+                            ExpansionLimitReached;
+            }));
+    }
+}
+
+TEST_CASE("workspace variable tables reject shapes MVME does not deserialize")
+{
+    using namespace fidget;
+
+    const std::vector<nlohmann::ordered_json> malformedTables = {
+        42,
+        {{"variables", {{"gain", {{"value", 20}}}}}},
+        {{"gain", {{"unit", "count"}}}},
+        {{"gain", {{"value", true}}}},
+        {{"gain", {{"value", 20}, {"unit", 1}}}},
+    };
+    for (const auto& table : malformedTables)
+    {
+        const auto evaluation = EvaluateScripts(
+            {Script("bad_table", "0x6100 0\n0x6110 20")}, table);
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK(evaluation.frontendWrites.empty());
+        CHECK(std::any_of(
+            evaluation.unresolvedStatements.begin(),
+            evaluation.unresolvedStatements.end(),
+            [](const MvmeInitScriptUnresolvedStatement& item) {
+                return item.impact
+                        == MvmeInitScriptUnresolvedImpact::Frontend
+                    && item.reason
+                        == MvmeInitScriptUnresolvedReason::
+                            MalformedVariableTable;
+            }));
+    }
 }
 
 TEST_CASE("unsupported non-frontend statements remain visible without guessing")

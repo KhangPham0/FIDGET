@@ -4,9 +4,13 @@
 #include "core/ScpRegistry.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
+#include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -67,18 +71,6 @@ std::string Lower(std::string_view text)
             return static_cast<char>(std::tolower(character));
         });
     return result;
-}
-
-std::pair<std::string_view, std::string_view> TakeToken(
-    std::string_view text)
-{
-    text = Trim(text);
-    const auto end = std::find_if(
-        text.begin(), text.end(), [](const unsigned char character) {
-            return std::isspace(character) != 0;
-        });
-    const auto tokenLength = static_cast<std::size_t>(end - text.begin());
-    return {text.substr(0U, tokenLength), Trim(text.substr(tokenLength))};
 }
 
 bool IsIdentifier(const std::string_view text)
@@ -338,32 +330,13 @@ public:
         return result;
     }
 
-    ValueResult Set(
+    void SetLiteral(
         const std::string_view name,
-        const std::string_view source)
+        const std::string_view value)
     {
-        const auto number = ResolveFloating(source);
         auto& binding = tables_.front()[std::string(name)];
-        binding.resolved = number.success;
-        if (number.success)
-            binding.value = FormatNumber(number.value);
-        else
-            binding.value.clear();
-
-        ValueResult result;
-        result.success = number.success;
-        result.reason = number.reason;
-        if (number.success)
-        {
-            const auto rounded = std::round(number.value);
-            if (rounded >= 0.0L
-                && rounded <= static_cast<long double>(
-                    std::numeric_limits<std::uint32_t>::max()))
-            {
-                result.value = static_cast<std::uint32_t>(rounded);
-            }
-        }
-        return result;
+        binding.resolved = true;
+        binding.value = std::string(value);
     }
 
     void Invalidate(const std::string_view name)
@@ -371,36 +344,117 @@ public:
         tables_.front()[std::string(name)] = {};
     }
 
+    struct TextResult
+    {
+        bool success = false;
+        std::string text;
+        MvmeInitScriptUnresolvedReason reason =
+            MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+    };
+
+    TextResult ExpandAndEvaluateOnce(const std::string_view source) const
+    {
+        const auto expanded = ExpandVariablesOnce(source);
+        if (!expanded.success)
+            return expanded;
+        return EvaluateExpressionsOnce(expanded.text);
+    }
+
 private:
     FloatingValueResult ResolveFloating(const std::string_view source) const
     {
-        std::vector<std::string> activeVariables;
-        const auto expanded = ExpandVariables(source, activeVariables);
-        if (!expanded.has_value())
+        const auto text = Trim(source);
+        if (text.find("${") != std::string_view::npos
+            || text.find("$(") != std::string_view::npos)
         {
             FloatingValueResult result;
-            result.reason = MvmeInitScriptUnresolvedReason::UndefinedVariable;
+            result.reason =
+                MvmeInitScriptUnresolvedReason::ExpansionLimitReached;
             return result;
         }
+        if (text.empty())
+            return {};
 
-        auto text = Trim(*expanded);
         std::optional<long double> number;
-        if (text.size() >= 3U && text.substr(0U, 2U) == "$("
-            && text.back() == ')')
+        if (text.size() > 2U && text[0U] == '0'
+            && (text[1U] == 'x' || text[1U] == 'X'))
         {
-            number = ArithmeticParser(text.substr(2U, text.size() - 3U))
-                         .Parse();
+            std::uint64_t value = 0U;
+            const auto converted = std::from_chars(
+                text.data() + 2U,
+                text.data() + text.size(),
+                value,
+                16);
+            if (converted.ec == std::errc{}
+                && converted.ptr == text.data() + text.size())
+            {
+                number = static_cast<long double>(value);
+            }
         }
-        else
+        else if (text.size() > 2U && text[0U] == '0'
+                 && (text[1U] == 'b' || text[1U] == 'B'))
         {
-            number = ArithmeticParser(text).Parse();
+            std::uint64_t value = 0U;
+            bool digitSeen = false;
+            bool valid = true;
+            for (const auto character : text.substr(2U))
+            {
+                if (character == '\'')
+                    continue;
+                if (character != '0' && character != '1')
+                {
+                    valid = false;
+                    break;
+                }
+                digitSeen = true;
+                if (value > (std::numeric_limits<std::uint64_t>::max() >> 1U))
+                {
+                    valid = false;
+                    break;
+                }
+                value = (value << 1U)
+                    | static_cast<std::uint64_t>(character - '0');
+            }
+            if (valid && digitSeen)
+                number = static_cast<long double>(value);
+        }
+        else if (text.find('.') != std::string_view::npos)
+        {
+            std::string valueText(text);
+            char* end = nullptr;
+            errno = 0;
+            const auto value = std::strtof(valueText.c_str(), &end);
+            if (errno != ERANGE && end == valueText.c_str() + valueText.size()
+                && std::isfinite(value))
+            {
+                number = value;
+            }
+        }
+        else if (std::all_of(
+                     text.begin(), text.end(), [](const unsigned char value) {
+                         return std::isdigit(value) != 0;
+                     }))
+        {
+            std::uint64_t value = 0U;
+            const auto converted = std::from_chars(
+                text.data(), text.data() + text.size(), value, 10);
+            if (converted.ec == std::errc{}
+                && converted.ptr == text.data() + text.size())
+            {
+                number = static_cast<long double>(value);
+            }
         }
 
         if (!number.has_value())
         {
             FloatingValueResult result;
-            result.reason =
-                MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+            const auto firstOperator = text.find_first_of("+*/()");
+            const auto nonLeadingMinus = text.find('-', 1U);
+            result.reason = firstOperator != std::string_view::npos
+                    || nonLeadingMinus != std::string_view::npos
+                ? MvmeInitScriptUnresolvedReason::
+                    ArithmeticRequiresExpression
+                : MvmeInitScriptUnresolvedReason::UnsupportedExpression;
             return result;
         }
         if (!std::isfinite(*number))
@@ -415,9 +469,8 @@ private:
         result.value = *number;
         return result;
     }
-    std::optional<std::string> ExpandVariables(
-        const std::string_view source,
-        std::vector<std::string>& activeVariables) const
+
+    TextResult ExpandVariablesOnce(const std::string_view source) const
     {
         std::string expanded;
         std::size_t position = 0U;
@@ -432,32 +485,88 @@ private:
             expanded.append(source.substr(position, variableStart - position));
             const auto variableEnd = source.find('}', variableStart + 2U);
             if (variableEnd == std::string_view::npos)
-                return std::nullopt;
+            {
+                TextResult result;
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UndefinedVariable;
+                return result;
+            }
             const auto name = std::string(
                 source.substr(
                     variableStart + 2U,
                     variableEnd - variableStart - 2U));
-            if (!IsIdentifier(name)
-                || std::find(
-                    activeVariables.begin(), activeVariables.end(), name)
-                    != activeVariables.end())
+            if (!IsIdentifier(name))
             {
-                return std::nullopt;
+                TextResult result;
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UndefinedVariable;
+                return result;
             }
 
             const auto binding = Lookup(name);
             if (!binding.has_value() || !binding->resolved)
-                return std::nullopt;
+            {
+                TextResult result;
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UndefinedVariable;
+                return result;
+            }
 
-            activeVariables.push_back(name);
-            const auto nested = ExpandVariables(binding->value, activeVariables);
-            activeVariables.pop_back();
-            if (!nested.has_value())
-                return std::nullopt;
-            expanded.append(*nested);
+            expanded.append(binding->value);
             position = variableEnd + 1U;
         }
-        return expanded;
+        TextResult result;
+        result.success = true;
+        result.text = std::move(expanded);
+        return result;
+    }
+
+    static TextResult EvaluateExpressionsOnce(const std::string_view source)
+    {
+        TextResult result;
+        std::size_t position = 0U;
+        while (position < source.size())
+        {
+            const auto expressionStart = source.find("$(", position);
+            if (expressionStart == std::string_view::npos)
+            {
+                result.text.append(source.substr(position));
+                break;
+            }
+            result.text.append(
+                source.substr(position, expressionStart - position));
+
+            std::size_t expressionEnd = expressionStart + 2U;
+            unsigned depth = 1U;
+            for (; expressionEnd < source.size(); ++expressionEnd)
+            {
+                if (source[expressionEnd] == '(')
+                    ++depth;
+                else if (source[expressionEnd] == ')' && --depth == 0U)
+                    break;
+            }
+            if (depth != 0U)
+            {
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+                return result;
+            }
+
+            const auto expression = source.substr(
+                expressionStart + 2U,
+                expressionEnd - expressionStart - 2U);
+            const auto value = ArithmeticParser(expression).Parse();
+            if (!value.has_value())
+            {
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+                return result;
+            }
+            result.text += FormatNumber(*value);
+            position = expressionEnd + 1U;
+        }
+        result.success = true;
+        return result;
     }
 
     std::optional<VariableBinding> Lookup(const std::string& name) const
@@ -474,63 +583,63 @@ private:
     std::vector<VariableTable> tables_;
 };
 
-VariableBinding JsonVariableBinding(const Json& value)
+struct VariableTableResult
 {
-    const Json* storedValue = &value;
-    if (value.is_object())
-    {
-        const auto found = value.find("value");
-        if (found == value.end())
-            return {};
-        storedValue = &*found;
-    }
+    bool success = false;
+    VariableTable table;
+    std::string message;
+};
 
-    VariableBinding result;
-    if (storedValue->is_string())
-    {
-        result.resolved = true;
-        result.value = storedValue->get<std::string>();
-    }
-    else if (storedValue->is_number())
-    {
-        result.resolved = true;
-        result.value = storedValue->dump();
-    }
-    return result;
-}
-
-VariableTable JsonVariableTable(const Json* table)
+VariableTableResult JsonVariableTable(
+    const Json& owner,
+    const char* fieldName)
 {
-    VariableTable result;
-    if (table == nullptr || !table->is_object())
+    VariableTableResult result;
+    const auto found = owner.find(fieldName);
+    if (found == owner.end())
+    {
+        result.success = true;
         return result;
-
-    const Json* variables = table;
-    const auto nested = table->find("variables");
-    if (nested != table->end())
+    }
+    if (!found->is_object())
     {
-        if (!nested->is_object())
+        result.message = "A variable_table field is not an object.";
+        return result;
+    }
+
+    for (const auto& item : found->items())
+    {
+        if (!IsIdentifier(item.key()) || !item.value().is_object())
+        {
+            result.message =
+                "A variable_table entry is not a named variable object.";
             return result;
-        variables = &*nested;
-    }
+        }
+        const auto value = item.value().find("value");
+        if (value == item.value().end()
+            || (!value->is_string() && !value->is_number()))
+        {
+            result.message =
+                "A variable_table entry has no string or numeric value.";
+            return result;
+        }
+        const auto unit = item.value().find("unit");
+        if (unit != item.value().end() && !unit->is_string())
+        {
+            result.message =
+                "A variable_table entry has a non-string unit.";
+            return result;
+        }
 
-    for (const auto& item : variables->items())
-    {
-        if (variables == table && item.key() == "name")
-            continue;
-        result.emplace(item.key(), JsonVariableBinding(item.value()));
+        VariableBinding binding;
+        binding.resolved = true;
+        binding.value = value->is_string()
+            ? value->get<std::string>()
+            : value->dump();
+        result.table.emplace(item.key(), std::move(binding));
     }
+    result.success = true;
     return result;
-}
-
-const Json* OptionalObjectField(const Json& object, const char* key)
-{
-    if (!object.is_object())
-        return nullptr;
-    const auto found = object.find(key);
-    if (found == object.end() || !found->is_object())
-        return nullptr;
-    return &*found;
 }
 
 struct CommentStripResult
@@ -589,6 +698,178 @@ CommentStripResult StripComments(const std::string_view script)
             result.text.push_back(character);
     }
     result.unterminatedBlock = inBlock;
+    return result;
+}
+
+struct AtomicPartsResult
+{
+    bool success = false;
+    std::vector<std::string> parts;
+    MvmeInitScriptUnresolvedReason reason =
+        MvmeInitScriptUnresolvedReason::MalformedScript;
+};
+
+// Mirrors MVME's split_into_atomic_parts(): quoted strings, ${...} variable
+// references, and $(...) expressions each remain atomic and may be
+// concatenated without whitespace.
+AtomicPartsResult SplitAtomicParts(const std::string_view line)
+{
+    AtomicPartsResult result;
+    std::string part;
+    const auto flush = [&]() {
+        if (!part.empty())
+        {
+            result.parts.push_back(std::move(part));
+            part.clear();
+        }
+    };
+
+    for (std::size_t index = 0U; index < line.size();)
+    {
+        const auto character = line[index];
+        if (std::isspace(static_cast<unsigned char>(character)) != 0)
+        {
+            flush();
+            ++index;
+            continue;
+        }
+        if (character == '"')
+        {
+            ++index;
+            bool closed = false;
+            while (index < line.size())
+            {
+                if (line[index] == '\\' && index + 1U < line.size())
+                {
+                    part.push_back(line[index + 1U]);
+                    index += 2U;
+                    continue;
+                }
+                if (line[index] == '"')
+                {
+                    ++index;
+                    closed = true;
+                    break;
+                }
+                part.push_back(line[index++]);
+            }
+            if (!closed)
+                return result;
+            continue;
+        }
+        if (character == '$' && index + 1U < line.size()
+            && (line[index + 1U] == '{' || line[index + 1U] == '('))
+        {
+            const auto opening = line[index + 1U];
+            const auto closing = opening == '{' ? '}' : ')';
+            const auto start = index;
+            index += 2U;
+            unsigned depth = 1U;
+            while (index < line.size() && depth != 0U)
+            {
+                if (opening == '(' && line[index] == opening)
+                    ++depth;
+                else if (line[index] == closing)
+                    --depth;
+                ++index;
+            }
+            if (depth != 0U)
+            {
+                result.reason = opening == '{'
+                    ? MvmeInitScriptUnresolvedReason::UndefinedVariable
+                    : MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+                return result;
+            }
+            part.append(line.substr(start, index - start));
+            continue;
+        }
+        part.push_back(character);
+        ++index;
+    }
+    flush();
+    result.success = true;
+    return result;
+}
+
+struct PreparedLine
+{
+    bool success = false;
+    std::vector<std::string> parts;
+    std::vector<std::string> rawParts;
+    MvmeInitScriptUnresolvedReason reason =
+        MvmeInitScriptUnresolvedReason::MalformedScript;
+};
+
+PreparedLine PrepareLine(
+    const std::string_view line,
+    const ValueResolver& resolver)
+{
+    PreparedLine result;
+    auto initial = SplitAtomicParts(line);
+    result.rawParts = initial.parts;
+    if (!initial.success || initial.parts.empty())
+    {
+        result.reason = initial.reason;
+        return result;
+    }
+
+    auto expand = [&](std::vector<std::string>& parts) {
+        for (auto& part : parts)
+        {
+            const auto expanded = resolver.ExpandAndEvaluateOnce(part);
+            if (!expanded.success)
+            {
+                result.reason = expanded.reason;
+                return false;
+            }
+            part = expanded.text;
+        }
+        return true;
+    };
+
+    if (!expand(initial.parts) || initial.parts.empty())
+        return result;
+    initial.parts.front() = Lower(initial.parts.front());
+
+    // MVME src/vme_script.cc performs exactly one optional command-specific
+    // reparse/expansion pass. Fixed-arity set and accumulator tests skip it.
+    const auto& command = initial.parts.front();
+    if (command != "set" && command != "accu_test"
+        && command != "accu_test_warn")
+    {
+        std::vector<std::string> reparsed;
+        for (const auto& part : initial.parts)
+        {
+            auto split = SplitAtomicParts(part);
+            if (!split.success)
+            {
+                result.reason = split.reason;
+                return result;
+            }
+            reparsed.insert(
+                reparsed.end(),
+                std::make_move_iterator(split.parts.begin()),
+                std::make_move_iterator(split.parts.end()));
+        }
+        if (reparsed.empty() || !expand(reparsed))
+            return result;
+        reparsed.front() = Lower(reparsed.front());
+        initial.parts = std::move(reparsed);
+    }
+
+    if (std::any_of(
+            initial.parts.begin(), initial.parts.end(),
+            [](const std::string& part) {
+                return part.find("${") != std::string::npos
+                    || part.find("$(") != std::string::npos;
+            }))
+    {
+        result.reason = MvmeInitScriptUnresolvedReason::ExpansionLimitReached;
+        return result;
+    }
+
+    result.success = true;
+    result.parts = std::move(initial.parts);
     return result;
 }
 
@@ -676,16 +957,33 @@ public:
                     continue;
                 }
 
-                std::vector<VariableTable> tables;
-                tables.emplace_back();
-                tables.push_back(JsonVariableTable(
-                    OptionalObjectField(script, "variable_table")));
-                tables.push_back(JsonVariableTable(
-                    OptionalObjectField(module, "variable_table")));
-                tables.push_back(JsonVariableTable(
-                    OptionalObjectField(event, "variable_table")));
-                tables.push_back(JsonVariableTable(
-                    OptionalObjectField(daq, "variable_table")));
+                std::vector<VariableTable> tables(1U);
+                bool tablesValid = true;
+                const auto addTable = [&](const Json& owner) {
+                    const auto parsed = JsonVariableTable(
+                        owner, "variable_table");
+                    if (!parsed.success)
+                    {
+                        AddIssue(
+                            {scriptIndex, 0U},
+                            MvmeInitScriptUnresolvedImpact::Frontend,
+                            MvmeInitScriptUnresolvedReason::
+                                MalformedVariableTable,
+                            parsed.message);
+                        tablesValid = false;
+                        return;
+                    }
+                    tables.push_back(parsed.table);
+                };
+                addTable(script);
+                addTable(module);
+                addTable(event);
+                addTable(daq);
+                if (!tablesValid)
+                {
+                    selector_.reset();
+                    continue;
+                }
                 EvaluateScript(
                     scriptIndex,
                     text->get_ref<const std::string&>(),
@@ -756,11 +1054,17 @@ private:
         const std::string_view line,
         ValueResolver& resolver)
     {
-        const auto first = TakeToken(line);
-        const auto command = Lower(first.first);
+        const auto prepared = PrepareLine(line, resolver);
+        if (!prepared.success)
+        {
+            ReportPreparationFailure(location, prepared, resolver);
+            return;
+        }
+        const auto& parts = prepared.parts;
+        const auto& command = parts.front();
         if (statementsConditional_)
         {
-            EvaluateConditionalLine(location, command, first, resolver);
+            EvaluateConditionalLine(location, parts, resolver);
             return;
         }
         if (command == "accu_test")
@@ -778,13 +1082,13 @@ private:
         }
         if (command == "set")
         {
-            EvaluateSet(location, first.second, resolver);
+            EvaluateSet(location, parts, resolver);
             return;
         }
         if (command == "write" || command == "writeabs")
         {
             EvaluateLongWrite(
-                location, command == "writeabs", first.second, resolver);
+                location, command == "writeabs", parts, resolver);
             return;
         }
         if (IsKnownNonFrontendCommand(command))
@@ -797,7 +1101,7 @@ private:
             return;
         }
 
-        const auto address = resolver.Resolve(first.first);
+        const auto address = resolver.Resolve(parts.front());
         if (!address.success)
         {
             AddIssue(
@@ -809,24 +1113,92 @@ private:
             selector_.reset();
             return;
         }
+        if (parts.size() != 2U)
+        {
+            AddIssue(
+                location,
+                IsFrontendAddress(address.value)
+                    ? MvmeInitScriptUnresolvedImpact::Frontend
+                    : MvmeInitScriptUnresolvedImpact::NonFrontend,
+                parts.size() < 2U
+                    ? MvmeInitScriptUnresolvedReason::UnsupportedExpression
+                    : MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "A shorthand write does not have exactly one value.");
+            if (address.value == Fw2051ScpSelectorRegister)
+                selector_.reset();
+            return;
+        }
         EvaluateRelativeWrite(
-            location, address.value, first.second, resolver, true);
+            location, address.value, parts[1U], resolver, true);
+    }
+
+    void ReportPreparationFailure(
+        const MvmeInitScriptLocation location,
+        const PreparedLine& prepared,
+        ValueResolver& resolver)
+    {
+        const auto command = prepared.rawParts.empty()
+            ? std::string{}
+            : Lower(prepared.rawParts.front());
+        auto nonFrontend = command == "set"
+            || command == "accu_test"
+            || IsKnownNonFrontendCommand(command);
+        if (!nonFrontend && !prepared.rawParts.empty())
+        {
+            if ((command == "write" || command == "writeabs")
+                && prepared.rawParts.size() > 3U)
+            {
+                const auto address = resolver.Resolve(prepared.rawParts[3U]);
+                if (address.success)
+                {
+                    const auto relative = command == "writeabs"
+                        ? RelativeAbsoluteAddress(address.value)
+                        : std::optional<std::uint32_t>(address.value);
+                    nonFrontend = relative.has_value()
+                        && !IsFrontendAddress(*relative);
+                }
+            }
+            else
+            {
+                const auto address = resolver.Resolve(
+                    prepared.rawParts.front());
+                nonFrontend = address.success
+                    && !IsFrontendAddress(address.value);
+            }
+        }
+        if (command == "set" && prepared.rawParts.size() > 1U
+            && IsIdentifier(prepared.rawParts[1U]))
+        {
+            resolver.Invalidate(prepared.rawParts[1U]);
+        }
+        AddIssue(
+            location,
+            nonFrontend
+                ? MvmeInitScriptUnresolvedImpact::NonFrontend
+                : MvmeInitScriptUnresolvedImpact::Frontend,
+            prepared.reason,
+            nonFrontend
+                ? "A non-frontend statement could not be expanded using "
+                  "MVME's bounded parsing model."
+                : "A possible frontend write could not be expanded using "
+                  "MVME's bounded parsing model.");
+        if (!nonFrontend)
+            selector_.reset();
     }
 
     void EvaluateConditionalLine(
         const MvmeInitScriptLocation location,
-        const std::string_view command,
-        const std::pair<std::string_view, std::string_view>& first,
+        const std::vector<std::string>& parts,
         ValueResolver& resolver)
     {
+        const auto& command = parts.front();
         auto impact = MvmeInitScriptUnresolvedImpact::Frontend;
         std::optional<std::uint32_t> frontendAddress;
         std::string_view valueText;
         if (command == "set")
         {
-            const auto nameAndValue = TakeToken(first.second);
-            if (IsIdentifier(nameAndValue.first))
-                resolver.Invalidate(nameAndValue.first);
+            if (parts.size() > 1U && IsIdentifier(parts[1U]))
+                resolver.Invalidate(parts[1U]);
             impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
         }
         else if (IsKnownNonFrontendCommand(command)
@@ -836,36 +1208,38 @@ private:
         }
         else if (command == "write" || command == "writeabs")
         {
-            const auto mode = TakeToken(first.second);
-            const auto width = TakeToken(mode.second);
-            const auto addressToken = TakeToken(width.second);
-            const auto address = resolver.Resolve(addressToken.first);
-            if (address.success)
+            if (parts.size() >= 4U)
             {
-                const auto relativeAddress = command == "writeabs"
-                    ? RelativeAbsoluteAddress(address.value)
-                    : std::optional<std::uint32_t>(address.value);
-                if (relativeAddress.has_value()
-                    && !IsFrontendAddress(*relativeAddress))
+                const auto address = resolver.Resolve(parts[3U]);
+                if (address.success)
                 {
-                    impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
-                }
-                else
-                {
-                    frontendAddress = relativeAddress;
-                    valueText = addressToken.second;
+                    const auto relativeAddress = command == "writeabs"
+                        ? RelativeAbsoluteAddress(address.value)
+                        : std::optional<std::uint32_t>(address.value);
+                    if (relativeAddress.has_value()
+                        && !IsFrontendAddress(*relativeAddress))
+                    {
+                        impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
+                    }
+                    else
+                    {
+                        frontendAddress = relativeAddress;
+                        if (parts.size() > 4U)
+                            valueText = parts[4U];
+                    }
                 }
             }
         }
         else
         {
-            const auto address = resolver.Resolve(first.first);
+            const auto address = resolver.Resolve(parts.front());
             if (address.success && !IsFrontendAddress(address.value))
                 impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
             else if (address.success)
             {
                 frontendAddress = address.value;
-                valueText = first.second;
+                if (parts.size() > 1U)
+                    valueText = parts[1U];
             }
         }
 
@@ -933,43 +1307,43 @@ private:
 
     void EvaluateSet(
         const MvmeInitScriptLocation location,
-        const std::string_view arguments,
+        const std::vector<std::string>& parts,
         ValueResolver& resolver)
     {
-        const auto nameAndValue = TakeToken(arguments);
-        if (!IsIdentifier(nameAndValue.first) || nameAndValue.second.empty())
+        const auto nameValid = parts.size() > 1U
+            && IsIdentifier(parts[1U]);
+        if (parts.size() != 3U || !nameValid)
         {
-            if (IsIdentifier(nameAndValue.first))
-                resolver.Invalidate(nameAndValue.first);
+            if (nameValid)
+                resolver.Invalidate(parts[1U]);
             AddIssue(
                 location,
                 MvmeInitScriptUnresolvedImpact::NonFrontend,
                 MvmeInitScriptUnresolvedReason::UnsupportedStatement,
-                "A set statement does not match the supported numeric form.");
+                "A set statement does not match MVME's exact three-part "
+                "form.");
             return;
         }
-
-        const auto value = resolver.Set(nameAndValue.first, nameAndValue.second);
-        if (!value.success)
-        {
-            AddIssue(
-                location,
-                MvmeInitScriptUnresolvedImpact::NonFrontend,
-                value.reason,
-                "A set statement value could not be resolved.");
-        }
+        resolver.SetLiteral(parts[1U], parts[2U]);
     }
 
     void EvaluateLongWrite(
         const MvmeInitScriptLocation location,
         const bool absolute,
-        const std::string_view arguments,
+        const std::vector<std::string>& parts,
         ValueResolver& resolver)
     {
-        const auto mode = TakeToken(arguments);
-        const auto width = TakeToken(mode.second);
-        const auto addressToken = TakeToken(width.second);
-        const auto address = resolver.Resolve(addressToken.first);
+        if (parts.size() < 4U)
+        {
+            AddIssue(
+                location,
+                MvmeInitScriptUnresolvedImpact::Frontend,
+                MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "A write form has no provable target address.");
+            selector_.reset();
+            return;
+        }
+        const auto address = resolver.Resolve(parts[3U]);
         if (!address.success)
         {
             AddIssue(
@@ -985,8 +1359,9 @@ private:
         const auto relativeAddress = absolute
             ? RelativeAbsoluteAddress(address.value)
             : std::optional<std::uint32_t>(address.value);
-        const auto supportedForm = Lower(mode.first) == "a32"
-            && Lower(width.first) == "d16" && !absolute;
+        const auto supportedForm = parts.size() == 5U
+            && Lower(parts[1U]) == "a32" && Lower(parts[2U]) == "d16"
+            && !absolute;
         if (!supportedForm)
         {
             const auto frontend = relativeAddress.has_value()
@@ -1013,7 +1388,7 @@ private:
         EvaluateRelativeWrite(
             location,
             *relativeAddress,
-            addressToken.second,
+            parts[4U],
             resolver,
             true);
     }
