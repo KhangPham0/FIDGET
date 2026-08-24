@@ -272,12 +272,17 @@ bool App::Init()
     // to avoid a jump. The work area is already in screen coordinates, so
     // no DPI scaling is applied here.
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-    float scale = ImGui_ImplGlfw_GetContentScaleForMonitor(monitor);
+    float scale = 1.0f;
     int workX = 0;
     int workY = 0;
     int workWidth = 1280;
     int workHeight = 800;
-    glfwGetMonitorWorkarea(monitor, &workX, &workY, &workWidth, &workHeight);
+    if (monitor != nullptr)
+    {
+        scale = ImGui_ImplGlfw_GetContentScaleForMonitor(monitor);
+        glfwGetMonitorWorkarea(
+            monitor, &workX, &workY, &workWidth, &workHeight);
+    }
 
     int width = static_cast<int>(workWidth * 0.8f);
     int height = static_cast<int>(workHeight * 0.8f);
