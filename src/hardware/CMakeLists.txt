@@ -21,6 +21,7 @@ add_library(fidget_hardware STATIC
     ScpSingleRepairOperation.cpp
     SshBridgeProcess.cpp
     StartupPreparationOperation.cpp
+    TargetProbeOperation.cpp
     Transport.cpp
     TransportFactory.cpp
     VmeTransaction.cpp

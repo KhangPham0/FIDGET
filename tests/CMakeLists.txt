@@ -227,6 +227,15 @@ target_link_libraries(target_module_address_tests PRIVATE
 
 add_test(NAME target_module_address_tests COMMAND target_module_address_tests)
 
+add_executable(target_probe_operation_tests target_probe_operation_tests.cpp)
+target_link_libraries(target_probe_operation_tests PRIVATE
+    fidget_hardware
+    fidget_gui_presentation
+    doctest::doctest
+)
+
+add_test(NAME target_probe_operation_tests COMMAND target_probe_operation_tests)
+
 add_executable(
     startup_preparation_operation_tests
     startup_preparation_operation_tests.cpp
