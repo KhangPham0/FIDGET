@@ -210,7 +210,7 @@ TargetProbeResult RunTargetProbe(
     if (!hardware.success)
         return failRead(hardware);
     result.targetHardwareId = hardware.value;
-    if (hardware.value != Mdpp32HardwareId)
+    if (!IsSupportedMdpp32HardwareId(hardware.value))
     {
         result.outcome = TargetProbeOutcome::WrongTargetIdentity;
         result.message =

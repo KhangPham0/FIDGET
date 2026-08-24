@@ -12,6 +12,13 @@ namespace fidget {
 inline constexpr std::uint16_t Mdpp32HardwareId = 0x5007U;
 inline constexpr std::uint16_t Mdpp32AlternateHardwareId = 0x500CU;
 inline constexpr std::uint16_t Mdpp32ScpFirmwareRevisionFw2051 = 0x2051U;
+
+constexpr bool IsSupportedMdpp32HardwareId(const std::uint16_t hardwareId)
+{
+    return hardwareId == Mdpp32HardwareId
+        || hardwareId == Mdpp32AlternateHardwareId;
+}
+
 inline constexpr std::uint16_t Fw2051AcquisitionControlRegister = 0x603AU;
 inline constexpr std::uint16_t Fw2051FifoResetRegister = 0x603CU;
 inline constexpr std::uint16_t Fw2051ReadoutResetRegister = 0x6034U;

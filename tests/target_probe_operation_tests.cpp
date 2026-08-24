@@ -410,9 +410,9 @@ TEST_CASE("wrong target identity and firmware have specific outcomes")
     ProbeFixture fixture(values, targetReads);
     const auto result = Run(fixture);
     CHECK(result.outcome == (
-        values.targetHardwareId == Mdpp32HardwareId
-            ? TargetProbeOutcome::WrongTargetFirmware
-            : TargetProbeOutcome::WrongTargetIdentity));
+        values.targetHardwareId == 0x1234U
+            ? TargetProbeOutcome::WrongTargetIdentity
+            : TargetProbeOutcome::WrongTargetFirmware));
     CHECK(result.evidence.controllerIdentityAndFirmwareVerified);
     CHECK(result.evidence.controllerDaqIdleVerified);
     CHECK_FALSE(result.evidence.targetIdentityAndFirmwareVerified);
@@ -422,6 +422,43 @@ TEST_CASE("wrong target identity and firmware have specific outcomes")
         operations.begin(), operations.end(),
         [](const auto& operation) { return operation.write; }));
     CheckClosed(fixture);
+}
+
+TEST_CASE("both MDPP-32 identities require exact SCP FW2051")
+{
+    using namespace fidget;
+
+    for (const auto hardwareId :
+         {Mdpp32HardwareId, Mdpp32AlternateHardwareId})
+    {
+        CAPTURE(hardwareId);
+
+        ProbeValues accepted;
+        accepted.targetHardwareId = hardwareId;
+        ProbeFixture acceptedFixture(accepted, 3U);
+        const auto acceptedResult = Run(acceptedFixture);
+        CHECK(acceptedResult.outcome == TargetProbeOutcome::VerifiedIdle);
+        CHECK(acceptedResult.evidence.targetIdentityAndFirmwareVerified);
+        CheckExactReadOnlyTrace(*acceptedFixture.transport);
+        CheckClosed(acceptedFixture);
+
+        ProbeValues wrongFirmware;
+        wrongFirmware.targetHardwareId = hardwareId;
+        wrongFirmware.targetFirmware = 0x2050U;
+        ProbeFixture wrongFirmwareFixture(wrongFirmware, 2U);
+        const auto wrongFirmwareResult = Run(wrongFirmwareFixture);
+        CHECK(wrongFirmwareResult.outcome
+              == TargetProbeOutcome::WrongTargetFirmware);
+        CHECK_FALSE(
+            wrongFirmwareResult.evidence.targetIdentityAndFirmwareVerified);
+        const auto operations =
+            DecodeWireOperations(*wrongFirmwareFixture.transport);
+        REQUIRE(operations.size() == 2U);
+        CHECK(std::none_of(
+            operations.begin(), operations.end(),
+            [](const auto& operation) { return operation.write; }));
+        CheckClosed(wrongFirmwareFixture);
+    }
 }
 
 TEST_CASE("target probe timeout is specific and closes the connection")

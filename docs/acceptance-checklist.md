@@ -21,6 +21,9 @@ evidence.
 - [ ] MVLC reports hardware ID `0x5008` and firmware FW0046.
 - [ ] The target reports MDPP-32 hardware ID `0x5007` or `0x500C` and SCP
   firmware FW2051.
+- [ ] MDPP-32 v2 (`0x500C`) hardware acceptance has been run through every
+  applicable tier below before write-capable support is treated as bench
+  accepted. This acceptance remains unrun until that evidence is recorded.
 - [ ] A real input signal is available on a known physical channel for the
   acquisition checks.
 - [ ] Another crate owner, if present, has acknowledged the test window and
