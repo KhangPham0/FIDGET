@@ -629,6 +629,7 @@ void AcquisitionStage::Draw(
         ImGui::PushStyleColor(ImGuiCol_Button, theme.accent);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme.highlight);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme.accent);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme.textOnAccent);
         if (ImGui::Button("Freeze reference and apply temporary preview"))
         {
             if (history != nullptr && !history->waveforms.empty())
@@ -641,7 +642,7 @@ void AcquisitionStage::Draw(
                 static_cast<std::uint16_t>(m_proposedParameterValue),
             });
         }
-        ImGui::PopStyleColor(3);
+        ImGui::PopStyleColor(4);
         ImGui::EndDisabled();
         if (!m_parameterValueEdited)
         {

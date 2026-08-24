@@ -9,13 +9,15 @@ namespace fidget {
 // runtime. Sizes are dynamic: pass a size to ImGui::PushFont when a
 // different size is needed.
 //
-// FIDGET uses one typeface throughout: Cascadia Code Bold. It is
-// monospaced, so it serves both the interface text and the numeric
-// columns (register values, sample counts, rates) where digits must align.
+// The approved shell uses a readable proportional face for interface text,
+// a medium-weight face for headings, and a monospaced face only where values
+// must align. All three are generated into C++ data from vendored fonts at
+// build time, so startup never reads a font outside the application binary.
 struct Fonts
 {
-    ImFont* ui = nullptr;   // interface text (the default font)
-    ImFont* mono = nullptr; // numbers and tables (same face, aligned digits)
+    ImFont* ui = nullptr;
+    ImFont* heading = nullptr;
+    ImFont* mono = nullptr;
 };
 
 // Loads the embedded fonts into the ImGui font atlas. Call once at startup,

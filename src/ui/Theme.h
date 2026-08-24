@@ -9,8 +9,7 @@
 namespace fidget {
 
 // Every color that defines FIDGET's appearance, kept as plain data so that
-// alternative themes (light, university colors, ...) can be added later
-// without touching any drawing code.
+// later theme variants do not require changes to drawing code.
 struct Theme
 {
     const char* name = "";
@@ -26,6 +25,7 @@ struct Theme
     ImVec4 accent;
     ImVec4 accentHover;
     ImVec4 accentActive;
+    ImVec4 textOnAccent;
 
     // A second highlight, distinct from the accent, marking the focused
     // panel and the frozen reference trace.
@@ -70,8 +70,8 @@ struct Theme
     }
 };
 
-// The default FIDGET theme, shared with GIGGLE V3.
-Theme DarkTheme();
+// The approved default FIDGET light theme.
+Theme LightTheme();
 
 // Writes a theme into the global ImGui and ImPlot styles.
 void ApplyTheme(const Theme& theme);

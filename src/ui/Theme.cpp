@@ -13,50 +13,52 @@ static ImVec4 Hex(unsigned int rgb, float alpha = 1.0f)
     return ImVec4(r, g, b, alpha);
 }
 
-Theme DarkTheme()
+Theme LightTheme()
 {
     Theme t;
-    t.name = "Dark";
+    t.name = "FIDGET Light";
 
-    t.windowBackground = Hex(0x131316);
-    t.panelBackground  = Hex(0x1B1B1F);
-    t.childBackground  = Hex(0x18181C);
-    t.popupBackground  = Hex(0x1F1F24);
+    t.windowBackground = Hex(0xF6F8FB);
+    t.panelBackground  = Hex(0xFFFFFF);
+    t.childBackground  = Hex(0xFFFFFF);
+    t.popupBackground  = Hex(0xFFFFFF);
 
-    t.accent       = Hex(0x29BFAE);
-    t.accentHover  = Hex(0x3BD9C8);
-    t.accentActive = Hex(0x1FA396);
+    t.accent       = Hex(0x26374B);
+    t.accentHover  = Hex(0x334B66);
+    t.accentActive = Hex(0x1E2C3D);
+    t.textOnAccent = Hex(0xFFFFFF);
 
-    t.highlight = Hex(0xE0A24A); // warm gold
+    t.highlight = Hex(0xD97B29);
 
-    t.textPrimary  = Hex(0xE8E8EC);
-    t.textDisabled = Hex(0x8B8B95);
+    t.textPrimary  = Hex(0x17202B);
+    t.textDisabled = Hex(0x667085);
 
-    t.frame       = Hex(0x26262C);
-    t.frameHover  = Hex(0x2E2E35);
-    t.frameActive = Hex(0x35353D);
+    t.frame       = Hex(0xFFFFFF);
+    t.frameHover  = Hex(0xEEF2F6);
+    t.frameActive = Hex(0xE4EAF1);
 
-    t.border = Hex(0x2A2A31);
+    t.border = Hex(0xD8DEE8);
 
-    t.statusGood    = Hex(0x58C97D);
-    t.statusWarning = Hex(0xE5B454);
-    t.statusError   = Hex(0xE25563);
+    t.statusGood    = Hex(0x16824A);
+    t.statusWarning = Hex(0xD97B29);
+    t.statusError   = Hex(0xC43D32);
 
-    t.plotBackground = Hex(0x161619);
-    t.plotGrid       = Hex(0x2A2A31, 0.50f);
-    t.waveformLive   = t.accent;
-    t.waveformTrail  = Hex(0xB9C2CC);
+    t.plotBackground = Hex(0xFFFFFF);
+    t.plotGrid       = Hex(0xD8DEE8, 0.75f);
+    t.waveformLive   = Hex(0x2878C8);
+    t.waveformTrail  = Hex(0x8CB8E2);
     t.referenceTrace = t.highlight;
 
-    // Okabe-Ito palette: distinguishable under common color blindness.
+    // The first colors are the approved waveform and comparison tokens. The
+    // remaining colors extend the cycle while preserving visible contrast.
     t.channelColors = {
-        Hex(0xE69F00), // orange
-        Hex(0xCC79A7), // purple
-        Hex(0x56B4E9), // sky blue
-        Hex(0x009E73), // green
-        Hex(0xD55E00), // vermillion
-        Hex(0xF0E442), // yellow
-        Hex(0x0072B2), // blue
+        Hex(0x2878C8),
+        Hex(0xD97B29),
+        Hex(0x7A5ABD),
+        Hex(0x258A85),
+        Hex(0x16824A),
+        Hex(0xC43D32),
+        Hex(0x667085),
     };
 
     return t;
@@ -66,19 +68,19 @@ void ApplyTheme(const Theme& t)
 {
     ImGuiStyle& style = ImGui::GetStyle();
 
-    style.WindowRounding    = 0.0f;
-    style.ChildRounding     = 4.0f;
-    style.FrameRounding     = 4.0f;
-    style.PopupRounding     = 4.0f;
-    style.GrabRounding      = 4.0f;
-    style.TabRounding       = 4.0f;
+    style.WindowRounding    = 8.0f;
+    style.ChildRounding     = 8.0f;
+    style.FrameRounding     = 6.0f;
+    style.PopupRounding     = 8.0f;
+    style.GrabRounding      = 6.0f;
+    style.TabRounding       = 6.0f;
     style.ScrollbarRounding = 8.0f;
 
     style.WindowPadding    = ImVec2(10.0f, 10.0f);
     style.FramePadding     = ImVec2(8.0f, 5.0f);
     style.ItemSpacing      = ImVec2(8.0f, 6.0f);
-    style.WindowBorderSize = 0.0f;
-    style.FrameBorderSize  = 0.0f;
+    style.WindowBorderSize = 1.0f;
+    style.FrameBorderSize  = 1.0f;
 
     ImVec4* colors = style.Colors;
 
@@ -126,22 +128,22 @@ void ApplyTheme(const Theme& t)
     colors[ImGuiCol_ResizeGripHovered] = t.accentHover;
     colors[ImGuiCol_ResizeGripActive]  = t.accentActive;
 
-    // Panel names read in teal by default; the focused panel switches to the
-    // gold highlight, so the active panel stands out among the teal tabs.
+    // Legacy dock tabs remain quiet under the new shell. The selected tab uses
+    // a pale navy tint and an explicit overline.
     auto mix = [](const ImVec4& base, const ImVec4& tint, float amount) {
         return ImVec4((1.0f - amount) * base.x + amount * tint.x,
                       (1.0f - amount) * base.y + amount * tint.y,
                       (1.0f - amount) * base.z + amount * tint.z, 1.0f);
     };
-    ImVec4 tealTab      = mix(t.panelBackground, t.accent, 0.28f);
-    ImVec4 tealTabHover = mix(t.panelBackground, t.accent, 0.42f);
-    ImVec4 goldTab      = mix(t.panelBackground, t.highlight, 0.30f);
-    colors[ImGuiCol_Tab]                       = tealTab;
-    colors[ImGuiCol_TabHovered]                = tealTabHover;
-    colors[ImGuiCol_TabSelected]               = goldTab;
-    colors[ImGuiCol_TabSelectedOverline]       = t.highlight;
-    colors[ImGuiCol_TabDimmed]                 = tealTab;
-    colors[ImGuiCol_TabDimmedSelected]         = tealTab;
+    ImVec4 quietTab    = mix(t.panelBackground, t.accent, 0.06f);
+    ImVec4 hoveredTab  = mix(t.panelBackground, t.accent, 0.12f);
+    ImVec4 selectedTab = mix(t.panelBackground, t.accent, 0.16f);
+    colors[ImGuiCol_Tab]                       = quietTab;
+    colors[ImGuiCol_TabHovered]                = hoveredTab;
+    colors[ImGuiCol_TabSelected]               = selectedTab;
+    colors[ImGuiCol_TabSelectedOverline]       = t.accent;
+    colors[ImGuiCol_TabDimmed]                 = quietTab;
+    colors[ImGuiCol_TabDimmedSelected]         = quietTab;
     colors[ImGuiCol_TabDimmedSelectedOverline] = t.accent;
 
     colors[ImGuiCol_DockingPreview] = ImVec4(t.accent.x, t.accent.y, t.accent.z, 0.55f);
@@ -151,13 +153,13 @@ void ApplyTheme(const Theme& t)
     colors[ImGuiCol_TableBorderStrong] = t.border;
     colors[ImGuiCol_TableBorderLight]  = t.border;
     colors[ImGuiCol_TableRowBg]        = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_TableRowBgAlt]     = ImVec4(1, 1, 1, 0.02f);
+    colors[ImGuiCol_TableRowBgAlt]     = Hex(0xF6F8FB);
 
     colors[ImGuiCol_TextSelectedBg]        = ImVec4(t.accent.x, t.accent.y, t.accent.z, 0.35f);
     colors[ImGuiCol_DragDropTarget]        = t.accentHover;
     colors[ImGuiCol_NavCursor]             = t.accent;
     colors[ImGuiCol_NavWindowingHighlight] = t.accent;
-    colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.50f);
+    colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.10f, 0.14f, 0.20f, 0.28f);
 
     ImPlotStyle& plotStyle = ImPlot::GetStyle();
     ImVec4* plotColors = plotStyle.Colors;

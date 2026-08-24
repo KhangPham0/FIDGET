@@ -4,6 +4,8 @@
 #include "core/ApplicationStorage.h"
 #include "core/GuidedWorkflow.h"
 #include "core/TunerSnapshot.h"
+#include "presentation/GuiPresentation.h"
+#include "ui/GuiShell.h"
 #include "ui/WorkflowRail.h"
 #include "ui/fonts/IconsFontAwesome5.h"
 
@@ -130,11 +132,14 @@ void DrawActivityFilterChip(
     ImGui::PushStyleColor(
         ImGuiCol_ButtonHovered,
         selected ? theme.accentHover : theme.frameHover);
+    ImGui::PushStyleColor(
+        ImGuiCol_Text,
+        selected ? theme.textOnAccent : theme.textPrimary);
     if (ImGui::SmallButton(label))
     {
         selected = !selected;
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
 }
 
 void GlfwErrorCallback(int error, const char* description)
@@ -306,7 +311,7 @@ bool App::Init()
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
 
-    m_theme = DarkTheme();
+    m_theme = LightTheme();
     ApplyTheme(m_theme);
     m_fonts = LoadFonts();
 
@@ -319,18 +324,30 @@ bool App::Init()
 void App::DrawFrame()
 {
     DrawMainMenu();
-    HandleShortcuts();
 
-    // The status strip is fixed chrome above the dockspace; everything
-    // else docks below it.
     const auto snapshot = m_tunerControl.CurrentSnapshot();
     m_profileStage.ReportFileOperationResult(*snapshot, m_dialogs);
-    const float stripHeight = ImGui::GetFrameHeight() + 8.0f;
-    DrawStatusStrip(stripHeight, *snapshot);
+
+    GuiViewState guiView = PresentGui(*snapshot, m_guiSelection);
+    m_guiSelection.drawer = guiView.drawer;
+    HandleShortcuts(guiView);
+    guiView = PresentGui(*snapshot, m_guiSelection);
+
+    GuiShellResult shellResult;
+    const float shellHeight = DrawGuiShellHeader(
+        guiView, m_theme, m_fonts, shellResult);
+    if (shellResult.requestedDrawer != GuiDrawer::Count)
+    {
+        m_guiSelection.drawer = shellResult.requestedDrawer;
+        guiView = PresentGui(*snapshot, m_guiSelection);
+        m_guiSelection.drawer = guiView.drawer;
+    }
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + stripHeight));
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, viewport->WorkSize.y - stripHeight));
+    ImGui::SetNextWindowPos(ImVec2(
+        viewport->WorkPos.x, viewport->WorkPos.y + shellHeight));
+    ImGui::SetNextWindowSize(ImVec2(
+        viewport->WorkSize.x, viewport->WorkSize.y - shellHeight));
     ImGui::SetNextWindowViewport(viewport->ID);
     ImGuiWindowFlags hostFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
         | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBringToFrontOnFocus
@@ -360,6 +377,10 @@ void App::DrawFrame()
     {
         DrawActivityLogPanel(*snapshot);
     }
+    DrawGuiShellDrawer(
+        guiView, shellHeight, m_theme, m_fonts, shellResult);
+    if (shellResult.closeDrawer)
+        m_guiSelection.drawer = GuiDrawer::None;
     DrawAboutWindow();
     DrawErrorPopup();
 }
@@ -483,50 +504,6 @@ void App::DrawErrorPopup()
         }
         ImGui::EndPopup();
     }
-}
-
-void App::DrawStatusStrip(float height, const TunerSnapshot& snapshot)
-{
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
-    ImGui::SetNextWindowViewport(viewport->ID);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
-        | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings
-        | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, m_theme.windowBackground);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 4.0f));
-    ImGui::Begin("##status_strip", nullptr, flags);
-
-    ImGui::TextColored(m_theme.accent, "FIDGET");
-
-    ImGui::SameLine(0.0f, 24.0f);
-    if (snapshot.projectActive)
-    {
-        ImGui::Text(
-            "%s",
-            snapshot.activeModuleName.empty()
-                ? "crate project active"
-                : snapshot.activeModuleName.c_str());
-    }
-    else
-    {
-        ImGui::TextDisabled("no project");
-    }
-
-    const auto decision = PlanGuidedTunerWorkflow(
-        MakeGuidedTunerInputs(snapshot));
-    ImGui::SameLine(0.0f, 24.0f);
-    ImGui::Text(
-        "step %zu/%zu: %s",
-        decision.step,
-        decision.totalSteps,
-        GuidedTunerStageName(decision.stage));
-
-    ImGui::End();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 }
 
 void App::DrawWorkflowPanel(const TunerSnapshot& snapshot)
@@ -690,8 +667,16 @@ void App::DrawActivityLogPanel(const TunerSnapshot& snapshot)
     ImGui::End();
 }
 
-void App::HandleShortcuts()
+void App::HandleShortcuts(const GuiViewState& view)
 {
+    if (view.drawer != GuiDrawer::None
+        && Allows(view.allowedActions, GuiAction::CloseDrawer)
+        && ImGui::IsKeyPressed(ImGuiKey_Escape))
+    {
+        m_guiSelection.drawer = GuiDrawer::None;
+        return;
+    }
+
     // Do not treat shortcuts as commands while the user is editing a field.
     if (ImGui::GetIO().WantTextInput)
     {

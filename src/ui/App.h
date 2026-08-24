@@ -2,6 +2,7 @@
 #define FIDGET_UI_APP_H
 
 #include "core/TunerControl.h"
+#include "presentation/GuiPresentation.h"
 #include "ui/AcquisitionStage.h"
 #include "ui/ConfigurationStage.h"
 #include "ui/Fonts.h"
@@ -41,11 +42,10 @@ private:
     void DrawMainMenu();
     void DrawAboutWindow();
     void DrawErrorPopup();
-    void DrawStatusStrip(float height, const TunerSnapshot& snapshot);
     void DrawWorkflowPanel(const TunerSnapshot& snapshot);
     void DrawStagePanel(const TunerSnapshot& snapshot);
     void DrawActivityLogPanel(const TunerSnapshot& snapshot);
-    void HandleShortcuts();
+    void HandleShortcuts(const GuiViewState& view);
     void ChangeFontScale(int direction);
     void BuildDefaultLayout(unsigned int dockspaceId);
     // Window geometry persistence: first run opens at a default size, later
@@ -67,6 +67,7 @@ private:
     ConfigurationStage m_configurationStage;
     StartupStage m_startupStage;
     AcquisitionStage m_acquisitionStage;
+    GuiPresentationSelection m_guiSelection;
 
     long m_frameLimit = -1;
 
