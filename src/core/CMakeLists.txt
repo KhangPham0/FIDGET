@@ -9,6 +9,7 @@ add_library(fidget_core STATIC
     MvmeExport.cpp
     MvmeExportFile.cpp
     MvmeWorkspace.cpp
+    MvmeWorkspaceExport.cpp
     ReadoutProtocol.cpp
     RecoveryJournal.cpp
     RecoveryVerification.cpp
