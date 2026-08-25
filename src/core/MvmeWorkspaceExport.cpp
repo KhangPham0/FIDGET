@@ -4,11 +4,14 @@
 #include "core/ScpRegistry.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <ostream>
+#include <random>
 #include <sstream>
 #include <system_error>
 #include <tuple>
@@ -18,6 +21,7 @@ namespace fidget {
 namespace {
 
 constexpr std::size_t MaximumTemporaryCollisions = 100U;
+constexpr std::size_t MaximumScriptIdAttempts = 64U;
 
 struct FrontendKey
 {
@@ -193,25 +197,123 @@ FenceState InspectFidgetFence(const std::string_view text)
     return FenceState::Complete;
 }
 
-std::string UniqueFidgetScriptId(
-    const MvmeWorkspace::JsonDocument& scripts)
+bool IsHexadecimal(const char value) noexcept
 {
-    constexpr const char* base = "script_fidget_tuned_frontend_settings";
-    for (std::size_t suffix = 1U; suffix <= scripts.size() + 1U; ++suffix)
+    return std::isxdigit(static_cast<unsigned char>(value)) != 0;
+}
+
+bool IsUuidV4(const std::string_view value) noexcept
+{
+    if (value.size() != 36U
+        || value[8] != '-' || value[13] != '-'
+        || value[18] != '-' || value[23] != '-')
     {
-        const std::string candidate = suffix == 1U
-            ? base
-            : std::string(base) + '_' + std::to_string(suffix);
-        const auto used = std::any_of(
-            scripts.begin(), scripts.end(), [&candidate](const auto& script) {
-                const auto id = script.is_object()
-                    ? script.find("id")
-                    : script.end();
-                return script.is_object() && id != script.end()
-                    && id->is_string() && id->template get<std::string>()
-                    == candidate;
-            });
-        if (!used)
+        return false;
+    }
+    for (std::size_t index = 0U; index < value.size(); ++index)
+    {
+        if (index == 8U || index == 13U || index == 18U || index == 23U)
+            continue;
+        if (!IsHexadecimal(value[index]))
+            return false;
+    }
+    const auto variant = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(value[19])));
+    return value[14] == '4'
+        && (variant == '8' || variant == '9'
+            || variant == 'a' || variant == 'b');
+}
+
+bool WorkspaceContainsId(
+    const MvmeWorkspace::JsonDocument& value,
+    const std::string_view sought)
+{
+    if (value.is_object())
+    {
+        const auto id = value.find("id");
+        if (id != value.end() && id->is_string()
+            && id->get_ref<const std::string&>() == sought)
+        {
+            return true;
+        }
+        for (const auto& member : value.items())
+        {
+            if (WorkspaceContainsId(member.value(), sought))
+                return true;
+        }
+    }
+    else if (value.is_array())
+    {
+        for (const auto& member : value)
+        {
+            if (WorkspaceContainsId(member, sought))
+                return true;
+        }
+    }
+    return false;
+}
+
+std::string GenerateUuidV4()
+{
+    std::array<unsigned char, 16U> bytes{};
+    try
+    {
+        std::random_device entropy;
+        for (auto& byte : bytes)
+            byte = static_cast<unsigned char>(entropy() & 0xFFU);
+    }
+    catch (...)
+    {
+        return {};
+    }
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0FU) | 0x40U);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3FU) | 0x80U);
+
+    char text[37]{};
+    std::snprintf(
+        text,
+        sizeof(text),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+        "%02x%02x%02x%02x%02x%02x",
+        static_cast<unsigned>(bytes[0]),
+        static_cast<unsigned>(bytes[1]),
+        static_cast<unsigned>(bytes[2]),
+        static_cast<unsigned>(bytes[3]),
+        static_cast<unsigned>(bytes[4]),
+        static_cast<unsigned>(bytes[5]),
+        static_cast<unsigned>(bytes[6]),
+        static_cast<unsigned>(bytes[7]),
+        static_cast<unsigned>(bytes[8]),
+        static_cast<unsigned>(bytes[9]),
+        static_cast<unsigned>(bytes[10]),
+        static_cast<unsigned>(bytes[11]),
+        static_cast<unsigned>(bytes[12]),
+        static_cast<unsigned>(bytes[13]),
+        static_cast<unsigned>(bytes[14]),
+        static_cast<unsigned>(bytes[15]));
+    return text;
+}
+
+std::string UniqueFidgetScriptId(
+    const MvmeWorkspace::JsonDocument& document,
+    const MvmeWorkspaceScriptIdGenerator& generator)
+{
+    for (std::size_t attempt = 0U;
+         attempt < MaximumScriptIdAttempts;
+         ++attempt)
+    {
+        std::string candidate;
+        try
+        {
+            candidate = generator ? generator() : GenerateUuidV4();
+        }
+        catch (...)
+        {
+            return {};
+        }
+        if (!IsUuidV4(candidate))
+            return {};
+        if (!WorkspaceContainsId(document, candidate))
             return candidate;
     }
     return {};
@@ -328,17 +430,17 @@ Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
             output << "# Quad " << currentQuad << '\n'
                    << "write a32 d16 0x6100 "
                    << Hexadecimal16(currentQuad) << '\n'
-                   << "wait 50000ns\n";
+                   << "wait 1ms\n";
         }
         output << "write a32 d16 "
                << Hexadecimal16(item.first.registerOffset) << ' '
                << Hexadecimal16(item.second->value) << '\n'
-               << "wait 20000ns\n";
+               << "wait 1ms\n";
     }
 
     output << "\n# Park the FW2051 bank selector at quad 0\n"
            << "write a32 d16 0x6100 0x0000\n"
-           << "wait 50000ns\n"
+           << "wait 1ms\n"
            << FidgetTunedFrontendFenceEnd << '\n';
     if (!output)
     {
@@ -358,7 +460,8 @@ Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
 MvmeWorkspaceCopyExportResult ExportFw2051MvmeWorkspaceCopy(
     const MvmeWorkspace& workspace,
     const MvmeWorkspaceTarget& target,
-    const Fw2051WorkspaceStartingState& startingState)
+    const Fw2051WorkspaceStartingState& startingState,
+    const MvmeWorkspaceScriptIdGenerator& scriptIdGenerator)
 {
     MvmeWorkspaceCopyExportResult result;
     const auto located = workspace.FindEnabledMdpp32ScpTarget(target.address);
@@ -440,11 +543,13 @@ MvmeWorkspaceCopyExportResult ExportFw2051MvmeWorkspaceCopy(
         }
         else
         {
-            const auto id = UniqueFidgetScriptId(*scripts);
+            const auto id = UniqueFidgetScriptId(
+                document, scriptIdGenerator);
             if (id.empty())
             {
                 result.message =
-                    "Could not allocate an identifier for the FIDGET script.";
+                    "Could not allocate a unique UUID-v4 identifier for the "
+                    "FIDGET script.";
                 return result;
             }
             fidgetScript = MvmeWorkspace::JsonDocument{
@@ -454,10 +559,18 @@ MvmeWorkspaceCopyExportResult ExportFw2051MvmeWorkspaceCopy(
                 {"vme_script", script.text},
             };
         }
-        if (!fidgetScript.contains("id")
-            || !fidgetScript.at("id").is_string())
+        if (ownedIndex.has_value())
         {
-            fidgetScript["id"] = UniqueFidgetScriptId(*scripts);
+            const auto id = UniqueFidgetScriptId(
+                document, scriptIdGenerator);
+            if (id.empty())
+            {
+                result.message =
+                    "Could not allocate a unique UUID-v4 identifier for the "
+                    "FIDGET script.";
+                return result;
+            }
+            fidgetScript["id"] = id;
         }
         fidgetScript["name"] = FidgetTunedFrontendScriptName;
         fidgetScript["enabled"] = true;

@@ -73,14 +73,20 @@ struct MvmeWorkspaceCopyExportResult
     std::size_t valueCount = 0U;
 };
 
+using MvmeWorkspaceScriptIdGenerator = std::function<std::string()>;
+
 // Copies the preserved ordered workspace document and appends one final,
 // enabled FIDGET-owned fenced script to the located target. One prior script
 // carrying the exact FIDGET fence is replaced and moved last. Similar names
-// without the reserved fence remain user-owned and untouched.
+// without the reserved fence remain user-owned and untouched. The generated
+// script carries a canonical UUID-v4 identifier that is unique across every
+// identifier in the complete preserved workspace. The optional generator is a
+// deterministic collision-test seam.
 [[nodiscard]] MvmeWorkspaceCopyExportResult ExportFw2051MvmeWorkspaceCopy(
     const MvmeWorkspace& workspace,
     const MvmeWorkspaceTarget& target,
-    const Fw2051WorkspaceStartingState& startingState);
+    const Fw2051WorkspaceStartingState& startingState,
+    const MvmeWorkspaceScriptIdGenerator& scriptIdGenerator = {});
 
 using MvmeWorkspaceCopyWriter =
     std::function<bool(std::ostream&, std::string_view)>;

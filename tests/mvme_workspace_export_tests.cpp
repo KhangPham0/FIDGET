@@ -7,6 +7,7 @@
 #include "core/TargetModuleAddress.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -101,6 +102,28 @@ std::size_t CountText(
         position += sought.size();
     }
     return count;
+}
+
+bool IsUuidV4(const std::string& value)
+{
+    if (value.size() != 36U
+        || value[8] != '-' || value[13] != '-'
+        || value[18] != '-' || value[23] != '-')
+    {
+        return false;
+    }
+    for (std::size_t index = 0U; index < value.size(); ++index)
+    {
+        if (index == 8U || index == 13U || index == 18U || index == 23U)
+            continue;
+        if (std::isxdigit(static_cast<unsigned char>(value[index])) == 0)
+            return false;
+    }
+    const auto variant = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(value[19])));
+    return value[14] == '4'
+        && (variant == '8' || variant == '9'
+            || variant == 'a' || variant == 'b');
 }
 
 class TemporaryDirectory
@@ -269,7 +292,7 @@ TEST_CASE("supported corpus evaluation becomes a validated partial starting stat
     CHECK(extracted.message.find("Live capture") != std::string::npos);
 }
 
-TEST_CASE("literal FW2051 script uses sorted writes and explicit settles")
+TEST_CASE("literal FW2051 script emits MVME-compatible millisecond waits")
 {
     using namespace fidget;
 
@@ -290,22 +313,29 @@ TEST_CASE("literal FW2051 script uses sorted writes and explicit settles")
         "\n"
         "# Quad 0\n"
         "write a32 d16 0x6100 0x0000\n"
-        "wait 50000ns\n"
+        "wait 1ms\n"
         "write a32 d16 0x6110 0x0008\n"
-        "wait 20000ns\n"
+        "wait 1ms\n"
         "write a32 d16 0x6124 0x00A0\n"
-        "wait 20000ns\n"
+        "wait 1ms\n"
         "\n"
         "# Quad 2\n"
         "write a32 d16 0x6100 0x0002\n"
-        "wait 50000ns\n"
+        "wait 1ms\n"
         "write a32 d16 0x611A 0x00C8\n"
-        "wait 20000ns\n"
+        "wait 1ms\n"
         "\n"
         "# Park the FW2051 bank selector at quad 0\n"
         "write a32 d16 0x6100 0x0000\n"
-        "wait 50000ns\n"
+        "wait 1ms\n"
         "# ===== END FIDGET Tuned Frontend Settings =====\n");
+
+    // mvme vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+    // stores wait delays as integer milliseconds and divides an ns suffix by
+    // 1000. The exported 1ms literal therefore survives parse/serialize
+    // without truncation or an unintended unit conversion.
+    CHECK(CountText(generated.text, "wait 1ms\n") == 6U);
+    CHECK(generated.text.find("ns") == std::string::npos);
 
     auto document = LoadWorkspace("mvme_workspace_v4.vme").Json();
     auto& scripts = document["DAQConfig"]["events"][0]
@@ -352,6 +382,7 @@ TEST_CASE("copied workspace appends one final fenced script and preserves fixtur
         const auto appended = scripts.back();
         CHECK(appended.at("name") == FidgetTunedFrontendScriptName);
         CHECK(appended.at("enabled") == true);
+        CHECK(IsUuidV4(appended.at("id").get<std::string>()));
         CHECK(CountText(
                   appended.at("vme_script").get<std::string>(),
                   FidgetTunedFrontendFenceBegin)
@@ -364,6 +395,44 @@ TEST_CASE("copied workspace appends one final fenced script and preserves fixtur
         scripts.erase(scripts.end() - 1);
         CHECK(exportedDocument.dump() == sourceDocument.dump());
     }
+}
+
+TEST_CASE("copied workspace allocates a UUID-v4 across all workspace ids")
+{
+    using namespace fidget;
+
+    constexpr const char* CollisionId =
+        "11111111-2222-4333-8444-555555555555";
+    constexpr const char* UniqueId =
+        "aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee";
+    auto document = LoadWorkspace("mvme_workspace_v4.vme").Json();
+    document["fixture_unknown_objects"] = nlohmann::ordered_json::array({{
+        {"nested", {{"id", CollisionId}}},
+    }});
+    const auto workspace = ParseWorkspace(document);
+    std::size_t calls = 0U;
+    const auto exported = ExportFw2051MvmeWorkspaceCopy(
+        workspace,
+        FindTarget(workspace),
+        ExampleStartingState(),
+        [&calls]() {
+            ++calls;
+            return calls == 1U
+                ? std::string(CollisionId)
+                : std::string(UniqueId);
+        });
+    REQUIRE(exported.success);
+    CHECK(calls == 2U);
+
+    const auto exportedDocument =
+        nlohmann::ordered_json::parse(exported.text);
+    const auto& scripts = exportedDocument["DAQConfig"]["events"][0]
+                                         ["modules"][0]["initScripts"];
+    REQUIRE_FALSE(scripts.empty());
+    CHECK(scripts.back().at("id") == UniqueId);
+    CHECK(IsUuidV4(scripts.back().at("id").get<std::string>()));
+    CHECK(exportedDocument.at("fixture_unknown_objects")[0]
+              .at("nested").at("id") == CollisionId);
 }
 
 TEST_CASE("copied workspace replaces only its own fence and keeps user scripts")
@@ -410,6 +479,7 @@ TEST_CASE("copied workspace replaces only its own fence and keeps user scripts")
     CHECK(replacedScripts.back().at("name")
           == FidgetTunedFrontendScriptName);
     CHECK(replacedScripts.back().at("enabled") == true);
+    CHECK(IsUuidV4(replacedScripts.back().at("id").get<std::string>()));
     CHECK(replacedScripts.back().at("fidget_owned_extension") == 41);
     CHECK(replacedScripts.back().at("vme_script").get<std::string>()
               .find("write a32 d16 0x611A 0x00F0")
