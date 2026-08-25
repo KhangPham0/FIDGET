@@ -172,9 +172,13 @@
           }
         },
         "variable_table": {
-          "fixture_event_variable": {
-            "value": 9,
-            "unit": "count"
+          "name": "event_fixture_variables",
+          "variables": {
+            "fixture_event_variable": {
+              "value": "9",
+              "definitionLocation": "",
+              "comment": ""
+            }
           }
         }
       }
@@ -191,9 +195,13 @@
       }
     },
     "variable_table": {
-      "fixture_global_variable": {
-        "value": 11,
-        "unit": "count"
+      "name": "daq_fixture_variables",
+      "variables": {
+        "fixture_global_variable": {
+          "value": "11",
+          "definitionLocation": "",
+          "comment": ""
+        }
       }
     },
     "fixture_unknown_object": {

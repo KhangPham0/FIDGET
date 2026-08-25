@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -73,19 +74,6 @@ std::string Lower(std::string_view text)
     return result;
 }
 
-bool IsIdentifier(const std::string_view text)
-{
-    if (text.empty())
-        return false;
-    const auto first = static_cast<unsigned char>(text.front());
-    if (std::isalpha(first) == 0 && first != '_')
-        return false;
-    return std::all_of(
-        text.begin() + 1, text.end(), [](const unsigned char character) {
-            return std::isalnum(character) != 0 || character == '_';
-        });
-}
-
 class ArithmeticParser
 {
 public:
@@ -94,7 +82,7 @@ public:
     {
     }
 
-    std::optional<long double> Parse()
+    std::optional<double> Parse()
     {
         const auto value = ParseExpression();
         SkipSpaces();
@@ -107,7 +95,7 @@ public:
     }
 
 private:
-    std::optional<long double> ParseExpression()
+    std::optional<double> ParseExpression()
     {
         auto left = ParseTerm();
         while (left.has_value())
@@ -124,7 +112,7 @@ private:
         return left;
     }
 
-    std::optional<long double> ParseTerm()
+    std::optional<double> ParseTerm()
     {
         auto left = ParseFactor();
         while (left.has_value())
@@ -141,7 +129,7 @@ private:
         return left;
     }
 
-    std::optional<long double> ParseFactor()
+    std::optional<double> ParseFactor()
     {
         SkipSpaces();
         if (Consume('+'))
@@ -164,7 +152,7 @@ private:
         return ParseNumber();
     }
 
-    std::optional<long double> ParseNumber()
+    std::optional<double> ParseNumber()
     {
         SkipSpaces();
         if (position_ >= text_.size())
@@ -188,9 +176,9 @@ private:
         const auto start = position_;
         bool digitSeen = false;
         bool pointSeen = false;
-        long double integer = 0.0L;
-        long double fraction = 0.0L;
-        long double divisor = 1.0L;
+        double integer = 0.0;
+        double fraction = 0.0;
+        double divisor = 1.0;
         while (position_ < text_.size())
         {
             const auto character = text_[position_];
@@ -202,7 +190,7 @@ private:
                     integer = integer * 10.0L + digit;
                 else
                 {
-                    divisor *= 10.0L;
+                    divisor *= 10.0;
                     fraction += digit / divisor;
                 }
                 ++position_;
@@ -221,12 +209,12 @@ private:
         return integer + fraction;
     }
 
-    std::optional<long double> ParseIntegerDigits(
+    std::optional<double> ParseIntegerDigits(
         const unsigned base,
         const bool allowSeparators)
     {
         bool digitSeen = false;
-        long double value = 0.0L;
+        double value = 0.0;
         while (position_ < text_.size())
         {
             const auto character = text_[position_];
@@ -277,20 +265,30 @@ private:
     std::size_t position_ = 0U;
 };
 
-std::string FormatNumber(const long double value)
+std::optional<std::string> FormatExpressionNumber(const double value)
 {
-    if (value >= 0.0L
-        && value <= static_cast<long double>(
-            std::numeric_limits<std::uint64_t>::max())
-        && std::floor(value) == value)
+    if (!std::isfinite(value))
+        return std::nullopt;
+
+    if (std::remainder(value, 1.0) == 0.0)
     {
-        return std::to_string(static_cast<std::uint64_t>(value));
+        if (value < static_cast<double>(
+                        std::numeric_limits<std::int64_t>::min())
+            || value > static_cast<double>(
+                std::numeric_limits<std::int64_t>::max()))
+        {
+            return std::nullopt;
+        }
+        return std::to_string(static_cast<std::int64_t>(value));
     }
 
     std::ostringstream output;
-    output << std::setprecision(
-                  std::numeric_limits<long double>::max_digits10)
-           << value;
+    output.imbue(std::locale::classic());
+    // QString::number(double) uses general format with six significant
+    // digits. MVME inserts that text and later parses it as a float literal.
+    output << std::setprecision(6) << std::defaultfloat << value;
+    if (!output)
+        return std::nullopt;
     return output.str();
 }
 
@@ -495,7 +493,7 @@ private:
                 source.substr(
                     variableStart + 2U,
                     variableEnd - variableStart - 2U));
-            if (!IsIdentifier(name))
+            if (name.empty())
             {
                 TextResult result;
                 result.reason =
@@ -562,7 +560,14 @@ private:
                     MvmeInitScriptUnresolvedReason::UnsupportedExpression;
                 return result;
             }
-            result.text += FormatNumber(*value);
+            const auto formatted = FormatExpressionNumber(*value);
+            if (!formatted.has_value())
+            {
+                result.reason =
+                    MvmeInitScriptUnresolvedReason::UnsupportedExpression;
+                return result;
+            }
+            result.text += *formatted;
             position = expressionEnd + 1U;
         }
         result.success = true;
@@ -607,35 +612,43 @@ VariableTableResult JsonVariableTable(
         return result;
     }
 
-    for (const auto& item : found->items())
+    const auto name = found->find("name");
+    const auto variables = found->find("variables");
+    if (name == found->end() || !name->is_string()
+        || variables == found->end() || !variables->is_object())
     {
-        if (!IsIdentifier(item.key()) || !item.value().is_object())
+        result.message =
+            "A variable_table does not match MVME's name/variables object "
+            "shape.";
+        return result;
+    }
+
+    for (const auto& item : variables->items())
+    {
+        if (item.key().empty() || !item.value().is_object())
         {
             result.message =
                 "A variable_table entry is not a named variable object.";
             return result;
         }
         const auto value = item.value().find("value");
-        if (value == item.value().end()
-            || (!value->is_string() && !value->is_number()))
+        const auto definitionLocation =
+            item.value().find("definitionLocation");
+        const auto comment = item.value().find("comment");
+        if (value == item.value().end() || !value->is_string()
+            || definitionLocation == item.value().end()
+            || !definitionLocation->is_string()
+            || comment == item.value().end() || !comment->is_string())
         {
             result.message =
-                "A variable_table entry has no string or numeric value.";
-            return result;
-        }
-        const auto unit = item.value().find("unit");
-        if (unit != item.value().end() && !unit->is_string())
-        {
-            result.message =
-                "A variable_table entry has a non-string unit.";
+                "A variable_table entry does not contain MVME's string "
+                "value, definitionLocation, and comment fields.";
             return result;
         }
 
         VariableBinding binding;
         binding.resolved = true;
-        binding.value = value->is_string()
-            ? value->get<std::string>()
-            : value->dump();
+        binding.value = value->get<std::string>();
         result.table.emplace(item.key(), std::move(binding));
     }
     result.success = true;
@@ -1019,6 +1032,19 @@ private:
         const std::string_view source,
         ValueResolver resolver)
     {
+        const auto selectorBefore = selector_;
+        const auto conditionalSelectorBefore = conditionalSelector_;
+        const auto statementsConditionalBefore = statementsConditional_;
+        const auto conditionalFrontendWriteBefore =
+            conditionalFrontendWrite_;
+        const auto conditionalLocationBefore =
+            result_.conditionalAccuTestLocation;
+        const auto selectorAssignmentCountBefore =
+            result_.selectorAssignments.size();
+        const auto frontendWriteCountBefore = result_.frontendWrites.size();
+        const auto finalValuesBefore = finalValues_;
+        currentScriptParseFailed_ = false;
+
         const auto stripped = StripComments(source);
         std::size_t lineNumber = 1U;
         std::size_t lineStart = 0U;
@@ -1040,12 +1066,26 @@ private:
 
         if (stripped.unterminatedBlock)
         {
+            MarkCurrentScriptParseFailure();
             AddIssue(
                 {scriptIndex, lineNumber},
                 MvmeInitScriptUnresolvedImpact::Frontend,
                 MvmeInitScriptUnresolvedReason::MalformedScript,
                 "An init script contains an unterminated block comment.");
             selector_.reset();
+        }
+
+        if (currentScriptParseFailed_)
+        {
+            parseFailureEncountered_ = true;
+            selector_ = selectorBefore;
+            conditionalSelector_ = conditionalSelectorBefore;
+            statementsConditional_ = statementsConditionalBefore;
+            conditionalFrontendWrite_ = conditionalFrontendWriteBefore;
+            result_.conditionalAccuTestLocation = conditionalLocationBefore;
+            result_.selectorAssignments.resize(selectorAssignmentCountBefore);
+            result_.frontendWrites.resize(frontendWriteCountBefore);
+            finalValues_ = finalValuesBefore;
         }
     }
 
@@ -1062,6 +1102,18 @@ private:
         }
         const auto& parts = prepared.parts;
         const auto& command = parts.front();
+        if ((command == "accu_test" || command == "accu_test_warn")
+            && !AccuTestFormValid(parts, resolver))
+        {
+            MarkCurrentScriptParseFailure();
+            AddIssue(
+                location,
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::MalformedScript,
+                "An accumulator test does not match MVME's comparison, "
+                "value, and message form.");
+            return;
+        }
         if (statementsConditional_)
         {
             EvaluateConditionalLine(location, parts, resolver);
@@ -1078,6 +1130,15 @@ private:
                 "An accu_test depends on a live accumulator; whether later "
                 "statements execute cannot be proven.");
             statementsConditional_ = true;
+            return;
+        }
+        if (command == "accu_test_warn")
+        {
+            AddIssue(
+                location,
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "A non-frontend init-script statement was not interpreted.");
             return;
         }
         if (command == "set")
@@ -1104,6 +1165,7 @@ private:
         const auto address = resolver.Resolve(parts.front());
         if (!address.success)
         {
+            MarkCurrentScriptParseFailure();
             AddIssue(
                 location,
                 MvmeInitScriptUnresolvedImpact::Frontend,
@@ -1115,6 +1177,7 @@ private:
         }
         if (parts.size() != 2U)
         {
+            MarkCurrentScriptParseFailure();
             AddIssue(
                 location,
                 IsFrontendAddress(address.value)
@@ -1137,6 +1200,7 @@ private:
         const PreparedLine& prepared,
         ValueResolver& resolver)
     {
+        MarkCurrentScriptParseFailure();
         const auto command = prepared.rawParts.empty()
             ? std::string{}
             : Lower(prepared.rawParts.front());
@@ -1167,7 +1231,7 @@ private:
             }
         }
         if (command == "set" && prepared.rawParts.size() > 1U
-            && IsIdentifier(prepared.rawParts[1U]))
+            && !prepared.rawParts[1U].empty())
         {
             resolver.Invalidate(prepared.rawParts[1U]);
         }
@@ -1197,7 +1261,7 @@ private:
         std::string_view valueText;
         if (command == "set")
         {
-            if (parts.size() > 1U && IsIdentifier(parts[1U]))
+            if (parts.size() > 1U && !parts[1U].empty())
                 resolver.Invalidate(parts[1U]);
             impact = MvmeInitScriptUnresolvedImpact::NonFrontend;
         }
@@ -1310,10 +1374,10 @@ private:
         const std::vector<std::string>& parts,
         ValueResolver& resolver)
     {
-        const auto nameValid = parts.size() > 1U
-            && IsIdentifier(parts[1U]);
+        const auto nameValid = parts.size() > 1U && !parts[1U].empty();
         if (parts.size() != 3U || !nameValid)
         {
+            MarkCurrentScriptParseFailure();
             if (nameValid)
                 resolver.Invalidate(parts[1U]);
             AddIssue(
@@ -1335,6 +1399,7 @@ private:
     {
         if (parts.size() < 4U)
         {
+            MarkCurrentScriptParseFailure();
             AddIssue(
                 location,
                 MvmeInitScriptUnresolvedImpact::Frontend,
@@ -1346,6 +1411,7 @@ private:
         const auto address = resolver.Resolve(parts[3U]);
         if (!address.success)
         {
+            MarkCurrentScriptParseFailure();
             AddIssue(
                 location,
                 MvmeInitScriptUnresolvedImpact::Frontend,
@@ -1359,6 +1425,8 @@ private:
         const auto relativeAddress = absolute
             ? RelativeAbsoluteAddress(address.value)
             : std::optional<std::uint32_t>(address.value);
+        if (parts.size() != 5U)
+            MarkCurrentScriptParseFailure();
         const auto supportedForm = parts.size() == 5U
             && Lower(parts[1U]) == "a32" && Lower(parts[2U]) == "d16"
             && !absolute;
@@ -1414,8 +1482,11 @@ private:
         }
 
         const auto value = resolver.Resolve(valueText);
-        if (!value.success || value.value > std::numeric_limits<std::uint16_t>::max())
+        if (!value.success
+            || value.value > std::numeric_limits<std::uint16_t>::max())
         {
+            if (!value.success)
+                MarkCurrentScriptParseFailure();
             AddIssue(
                 location,
                 MvmeInitScriptUnresolvedImpact::Frontend,
@@ -1535,6 +1606,23 @@ private:
             || command == "print";
     }
 
+    static bool AccuTestFormValid(
+        const std::vector<std::string>& parts,
+        const ValueResolver& resolver)
+    {
+        if (parts.size() != 4U)
+            return false;
+        const auto comparison = Lower(parts[1U]);
+        const auto comparisonValid = comparison == "=="
+            || comparison == "eq" || comparison == "="
+            || comparison == "!=" || comparison == "neq"
+            || comparison == "<" || comparison == "lt"
+            || comparison == "<=" || comparison == "lte"
+            || comparison == ">" || comparison == "gt"
+            || comparison == ">=" || comparison == "gte";
+        return comparisonValid && resolver.Resolve(parts[2U]).success;
+    }
+
     void AddIssue(
         const MvmeInitScriptLocation location,
         const MvmeInitScriptUnresolvedImpact impact,
@@ -1543,6 +1631,11 @@ private:
     {
         result_.unresolvedStatements.push_back(
             {location, impact, reason, std::move(message)});
+    }
+
+    void MarkCurrentScriptParseFailure()
+    {
+        currentScriptParseFailed_ = true;
     }
 
     void Finalize()
@@ -1557,7 +1650,14 @@ private:
                         != MvmeInitScriptUnresolvedReason::
                             ConditionalAfterAccuTest;
             });
-        if (frontendFailure)
+        if (parseFailureEncountered_)
+        {
+            result_.state = MvmeInitScriptEvaluationState::Failed;
+            result_.message =
+                "Init-script evaluation failed because MVME would reject "
+                "an entire script before executing any command in it.";
+        }
+        else if (frontendFailure)
         {
             result_.state = MvmeInitScriptEvaluationState::Failed;
             result_.message =
@@ -1595,6 +1695,8 @@ private:
     std::optional<std::uint16_t> conditionalSelector_;
     bool statementsConditional_ = false;
     bool conditionalFrontendWrite_ = false;
+    bool currentScriptParseFailed_ = false;
+    bool parseFailureEncountered_ = false;
     std::map<
         std::pair<std::uint16_t, std::uint16_t>,
         MvmeInitScriptFrontendValue> finalValues_;

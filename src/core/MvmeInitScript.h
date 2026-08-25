@@ -118,9 +118,11 @@ struct MvmeInitScriptEvaluation
 // accu_test makes every later statement conditional because its live
 // accumulator result and execution options are unavailable; conditional
 // frontend writes produce ConditionalAfterAccuTest and are never extracted as
-// definite writes. Other unsupported statements remain explicitly listed for
-// later reporting. The resolved write/value collections must not be used as a
-// complete starting state when state is Failed or ConditionalAfterAccuTest.
+// definite writes. MVME parses each complete script before executing it, so a
+// parse failure removes every otherwise resolved write from that script. Other
+// unsupported statements remain explicitly listed for later reporting. The
+// resolved write/value collections must not be used as a complete starting
+// state when state is Failed or ConditionalAfterAccuTest.
 [[nodiscard]] MvmeInitScriptEvaluation EvaluateMvmeTargetInitScripts(
     const MvmeWorkspace& workspace,
     const MvmeWorkspaceTarget& target);

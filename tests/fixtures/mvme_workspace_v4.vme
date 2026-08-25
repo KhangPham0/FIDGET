@@ -17,9 +17,13 @@
       }
     },
     "variable_table": {
-      "fixture_controller_variable": {
-        "value": 13,
-        "unit": "count"
+      "name": "daq_fixture_variables",
+      "variables": {
+        "fixture_controller_variable": {
+          "value": "13",
+          "definitionLocation": "",
+          "comment": ""
+        }
       }
     },
     "events": [
@@ -69,18 +73,29 @@
                 "name": "target_init_b",
                 "enabled": true,
                 "variable_table": {
-                  "fixture_script_variable": {
-                    "value": 7,
-                    "unit": "count"
+                  "name": "script_fixture_variables",
+                  "variables": {
+                    "fixture_script_variable": {
+                      "value": "7",
+                      "definitionLocation": "",
+                      "comment": "",
+                      "fixtureVariableExtension": {
+                        "kept": true
+                      }
+                    }
                   }
                 },
                 "vme_script": "write a32 d16 0x6110 160"
               }
             ],
             "variable_table": {
-              "fixture_module_variable": {
-                "value": 5,
-                "unit": "count"
+              "name": "module_fixture_variables",
+              "variables": {
+                "fixture_module_variable": {
+                  "value": "5",
+                  "definitionLocation": "",
+                  "comment": ""
+                }
               }
             },
             "fixture_module_extension": {

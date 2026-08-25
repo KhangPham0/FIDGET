@@ -177,6 +177,19 @@ TEST_CASE("workspace starting state rejects failed evaluations")
     CHECK_FALSE(extracted.startingState.has_value());
     CHECK(extracted.message.find("failed") != std::string::npos);
 
+    Fw2051WorkspaceStartingState failedState;
+    failedState.sourceEvaluationState = MvmeInitScriptEvaluationState::Failed;
+    failedState.frontendValues = failed.finalFrontendValues;
+    const auto generated = GenerateFw2051LiteralScript(
+        failedState, TargetAddress());
+    CHECK_FALSE(generated.success);
+    CHECK(generated.text.empty());
+    const auto workspace = LoadWorkspace("mvme_workspace_v4.vme");
+    const auto exported = ExportFw2051MvmeWorkspaceCopy(
+        workspace, FindTarget(workspace), failedState);
+    CHECK_FALSE(exported.success);
+    CHECK(exported.text.empty());
+
     MvmeInitScriptEvaluation conditional;
     conditional.state =
         MvmeInitScriptEvaluationState::ConditionalAfterAccuTest;

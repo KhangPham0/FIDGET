@@ -158,6 +158,11 @@ TEST_CASE("MVME workspace round trips scripts ids settings events and extensions
     CHECK(v4Config.at("events").at(0).at("modules").at(0)
               .at("initScripts").at(1).at("id")
           == "script_target_init_v4_b");
+    CHECK(v4Config.at("events").at(0).at("modules").at(0)
+              .at("initScripts").at(1).at("variable_table")
+              .at("variables").at("fixture_script_variable")
+              .at("fixtureVariableExtension").at("kept")
+          == true);
     CHECK(v4Config.at("events").at(1).at("id")
           == "event_fixture_aux_v4");
     CHECK(v4Config.at("events").at(0).at("modules").at(0)

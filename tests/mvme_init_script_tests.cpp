@@ -3,6 +3,7 @@
 
 #include "core/MvmeInitScript.h"
 #include "core/MvmeWorkspace.h"
+#include "core/MvmeWorkspaceExport.h"
 #include "core/TargetModuleAddress.h"
 
 #include <algorithm>
@@ -72,6 +73,30 @@ nlohmann::ordered_json Script(
         {"name", name},
         {"enabled", enabled},
         {"vme_script", text},
+    };
+}
+
+nlohmann::ordered_json Variable(
+    std::string value,
+    nlohmann::ordered_json extra = nlohmann::ordered_json::object())
+{
+    nlohmann::ordered_json result = {
+        {"value", std::move(value)},
+        {"definitionLocation", ""},
+        {"comment", ""},
+    };
+    for (auto& item : extra.items())
+        result[item.key()] = std::move(item.value());
+    return result;
+}
+
+nlohmann::ordered_json VariableTable(
+    std::string name,
+    nlohmann::ordered_json variables)
+{
+    return {
+        {"name", std::move(name)},
+        {"variables", std::move(variables)},
     };
 }
 
@@ -232,6 +257,9 @@ TEST_CASE("workspace v3 and v4 init scripts are evaluated in source order")
     CHECK(FinalValue(v4Result, 0U, 0x6110U)->value == 160U);
 }
 
+// MVME src/vme_script_variables.cc at
+// fe90d3acd9d6a69aed7eb03ef63282446e54b592 serializes one named symbol table
+// with string-valued variable objects and performs no identifier validation.
 TEST_CASE("workspace and script variable tables use MVME scope order")
 {
     using namespace fidget;
@@ -239,31 +267,60 @@ TEST_CASE("workspace and script variable tables use MVME scope order")
     auto script = Script(
         "variables",
         "0x6100 ${quad}\n"
-        "0x6110 $(${timing} + ${adjustment})");
-    script["variable_table"] = {
-        {"quad", {{"value", "3"}, {"unit", "count"}}},
-        {"adjustment", {{"value", "4"}, {"unit", "count"}}},
-    };
-    const nlohmann::ordered_json moduleVariables = {
-        {"quad", {{"value", "6"}, {"unit", "count"}}},
-        {"timing", {{"value", "12.5"}, {"unit", "count"}}},
-    };
-    const nlohmann::ordered_json eventVariables = {
-        {"timing", {{"value", 20}}},
-    };
-    const nlohmann::ordered_json daqVariables = {
-        {"timing", {{"value", 40}}},
-    };
+        "0x6110 $(${timing-value} + ${adjustment})\n"
+        "0x611A $(${script-only} + ${module-only} + ${event-only} + "
+        "${daq-only} + ${shared})");
+    script["variable_table"] = VariableTable(
+        "script_scope",
+        {
+            {"quad", Variable("3")},
+            {"adjustment", Variable("4", {{"futureMetadata", 17}})},
+            {"script-only", Variable("1")},
+            {"shared", Variable("4")},
+        });
+    const auto moduleVariables = VariableTable(
+        "module_scope",
+        {
+            {"quad", Variable("6")},
+            {"timing-value", Variable("12.5")},
+            {"module-only", Variable("2")},
+            {"shared", Variable("8")},
+        });
+    const auto eventVariables = VariableTable(
+        "event_scope",
+        {
+            {"timing-value", Variable("20")},
+            {"event-only", Variable("3")},
+            {"shared", Variable("16")},
+        });
+    const auto daqVariables = VariableTable(
+        "daq_scope",
+        {
+            {"timing-value", Variable("40")},
+            {"daq-only", Variable("4")},
+            {"shared", Variable("32")},
+        });
 
     const auto evaluation = EvaluateScripts(
         {script}, moduleVariables, eventVariables, daqVariables);
     REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Complete);
     REQUIRE(evaluation.selectorAssignments.size() == 1U);
     CHECK(evaluation.selectorAssignments[0].value == 3U);
-    REQUIRE(evaluation.frontendWrites.size() == 1U);
+    REQUIRE(evaluation.frontendWrites.size() == 2U);
     CHECK(evaluation.frontendWrites[0].value == 17U);
+    CHECK(evaluation.frontendWrites[1].value == 14U);
     REQUIRE(FinalValue(evaluation, 3U, 0x6110U) != nullptr);
     CHECK(FinalValue(evaluation, 3U, 0x6110U)->value == 17U);
+
+    auto emptyScript = Script("empty_tables", "0x6100 0\n0x6110 8");
+    emptyScript["variable_table"] = VariableTable(
+        "empty_script_scope", nlohmann::ordered_json::object());
+    const auto emptyEvaluation = EvaluateScripts(
+        {emptyScript},
+        VariableTable("empty_module_scope", nlohmann::ordered_json::object()),
+        VariableTable("empty_event_scope", nlohmann::ordered_json::object()),
+        VariableTable("empty_daq_scope", nlohmann::ordered_json::object()));
+    CHECK(emptyEvaluation.state == MvmeInitScriptEvaluationState::Complete);
 }
 
 // MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
@@ -305,19 +362,31 @@ TEST_CASE("MVME arithmetic and variable expansion are strict and bounded")
         CHECK(evaluation.frontendWrites[1U].value == 15U);
     }
 
+    SUBCASE("fractional expression text follows QString default precision")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "fractional_arithmetic",
+            "0x6100 0\n"
+            "0x6110 $(0.4999996)\n"
+            "0x611A $(0.49999)")});
+        REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Complete);
+        REQUIRE(evaluation.frontendWrites.size() == 2U);
+        CHECK(evaluation.frontendWrites[0U].value == 1U);
+        CHECK(evaluation.frontendWrites[1U].value == 0U);
+    }
+
     SUBCASE("one command-specific reparse expands a complete command")
     {
         auto script = Script(
             "command_reparse",
             "0x6100 0\n"
             "${command}");
-        script["variable_table"] = {
-            {"command", {
-                {"value", "write a32 d16 0x6110 ${gain}"},
-                {"unit", "count"},
-            }},
-            {"gain", {{"value", 24}, {"unit", "count"}}},
-        };
+        script["variable_table"] = VariableTable(
+            "command_scope",
+            {
+                {"command", Variable("write a32 d16 0x6110 ${gain}")},
+                {"gain", Variable("24")},
+            });
         const auto evaluation = EvaluateScripts({script});
         REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Complete);
         REQUIRE(evaluation.frontendWrites.size() == 1U);
@@ -331,11 +400,13 @@ TEST_CASE("MVME arithmetic and variable expansion are strict and bounded")
             "bounded_expansion",
             "0x6100 0\n"
             "0x6110 ${outer}");
-        script["variable_table"] = {
-            {"outer", {{"value", "${middle}"}, {"unit", "count"}}},
-            {"middle", {{"value", "${inner}"}, {"unit", "count"}}},
-            {"inner", {{"value", 24}, {"unit", "count"}}},
-        };
+        script["variable_table"] = VariableTable(
+            "bounded_scope",
+            {
+                {"outer", Variable("${middle}")},
+                {"middle", Variable("${inner}")},
+                {"inner", Variable("24")},
+            });
         const auto evaluation = EvaluateScripts({script});
         CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
         CHECK(std::any_of(
@@ -357,10 +428,15 @@ TEST_CASE("workspace variable tables reject shapes MVME does not deserialize")
 
     const std::vector<nlohmann::ordered_json> malformedTables = {
         42,
-        {{"variables", {{"gain", {{"value", 20}}}}}},
-        {{"gain", {{"unit", "count"}}}},
-        {{"gain", {{"value", true}}}},
-        {{"gain", {{"value", 20}, {"unit", 1}}}},
+        {{"variables", nlohmann::ordered_json::object()}},
+        {{"name", "bad"}, {"variables", 42}},
+        VariableTable("bad", {{"gain", {{"value", "20"}}}}),
+        VariableTable("bad", {{"gain", Variable("20")}, {"", Variable("1")}}),
+        VariableTable("bad", {{"gain", {
+            {"value", 20},
+            {"definitionLocation", ""},
+            {"comment", ""},
+        }}}),
     };
     for (const auto& table : malformedTables)
     {
@@ -390,8 +466,8 @@ TEST_CASE("unsupported non-frontend statements remain visible without guessing")
         "read a32 d16 0x600E\n"
         "accu_mask_rotate 0x000000ff 32\n"
         "accu_test_warn gte 0x50 \"firmware check\"\n"
-        "set unresolved ${missing}\n"
-        "0x603A ${missing}\n"
+        "wait 1ms\n"
+        "print \"fixture message\"\n"
         "0x6100 0\n"
         "0x6110 20")});
 
@@ -409,6 +485,67 @@ TEST_CASE("unsupported non-frontend statements remain visible without guessing")
     CHECK(evaluation.frontendWrites[0].value == 20U);
     for (const auto& unresolved : evaluation.unresolvedStatements)
         CHECK_FALSE(unresolved.message.empty());
+}
+
+// MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// parses a complete script before returning any commands for execution. A
+// ParseError anywhere therefore means no command from that script executes.
+TEST_CASE("a parse failure discards every definite write from that script")
+{
+    using namespace fidget;
+
+    const std::vector<std::string> failureLines = {
+        "accu_test eq ${missing} \"check\"",
+        "accu_test_warn eq ${missing} \"check\"",
+        "set value ${missing}",
+        "accu_test invalid 1 \"check\"",
+    };
+    for (const auto& failureLine : failureLines)
+    {
+        CAPTURE(failureLine);
+        const auto evaluation = EvaluateScripts({Script(
+            "whole_script_failure",
+            "0x6100 0\n" + failureLine + "\n0x6110 24")});
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK(evaluation.selectorAssignments.empty());
+        CHECK(evaluation.frontendWrites.empty());
+        CHECK(evaluation.finalFrontendValues.empty());
+        CHECK_FALSE(
+            ExtractFw2051WorkspaceStartingState(evaluation)
+                .startingState.has_value());
+    }
+
+    SUBCASE("a later parse error also withdraws an earlier write")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "late_parse_failure",
+            "0x6100 0\n"
+            "0x6110 20\n"
+            "set value ${missing}")});
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK(evaluation.selectorAssignments.empty());
+        CHECK(evaluation.frontendWrites.empty());
+        CHECK(evaluation.finalFrontendValues.empty());
+    }
+
+    SUBCASE("a failed later script does not erase an earlier valid script")
+    {
+        const auto evaluation = EvaluateScripts({
+            Script("valid_first", "0x6100 1\n0x6110 20"),
+            Script(
+                "invalid_second",
+                "0x6100 2\n0x6110 24\nset value ${missing}"),
+        });
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        REQUIRE(evaluation.selectorAssignments.size() == 1U);
+        CHECK(evaluation.selectorAssignments[0].value == 1U);
+        REQUIRE(evaluation.frontendWrites.size() == 1U);
+        CHECK(evaluation.frontendWrites[0].selectorValue == 1U);
+        CHECK(evaluation.frontendWrites[0].value == 20U);
+        REQUIRE(evaluation.finalFrontendValues.size() == 1U);
+        CHECK(evaluation.finalFrontendValues[0].quad == 1U);
+        CHECK(evaluation.finalFrontendValues[0].value == 20U);
+    }
 }
 
 // MVME src/vme_script_exec.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
@@ -567,14 +704,10 @@ TEST_CASE("an unresolved selector poisons later banked writes until replaced")
         "0x611A 110")});
 
     REQUIRE(evaluation.state == MvmeInitScriptEvaluationState::Failed);
-    REQUIRE(evaluation.selectorAssignments.size() == 1U);
-    CHECK(evaluation.selectorAssignments[0].value == 2U);
-    REQUIRE(evaluation.frontendWrites.size() == 1U);
-    CHECK(evaluation.frontendWrites[0].registerOffset == 0x6110U);
-    CHECK(evaluation.frontendWrites[0].value == 24U);
-    CHECK(evaluation.frontendWrites[0].selectorValue == 2U);
-    REQUIRE(FinalValue(evaluation, 2U, 0x6110U) != nullptr);
-    CHECK(FinalValue(evaluation, 2U, 0x6110U)->value == 24U);
+    CHECK(evaluation.selectorAssignments.empty());
+    CHECK(evaluation.frontendWrites.empty());
+    CHECK(evaluation.finalFrontendValues.empty());
+    CHECK(FinalValue(evaluation, 2U, 0x6110U) == nullptr);
     CHECK(FinalValue(evaluation, 2U, 0x611AU) == nullptr);
     CHECK(UnresolvedCount(
               evaluation, MvmeInitScriptUnresolvedImpact::Frontend)
@@ -593,9 +726,8 @@ TEST_CASE("an unresolved set shadows outer variables and fails later writes")
 {
     using namespace fidget;
 
-    const nlohmann::ordered_json moduleVariables = {
-        {"gain", {{"value", 100}}},
-    };
+    const auto moduleVariables = VariableTable(
+        "module_scope", {{"gain", Variable("100")}});
     const auto evaluation = EvaluateScripts(
         {Script(
             "set_shadow",
