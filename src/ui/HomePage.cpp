@@ -211,6 +211,16 @@ void HomePage::SynchronizeDraft(const TunerSnapshot& snapshot)
 
     if (snapshot.target.input != draft_)
         draft_ = snapshot.target.input;
+
+    if (pendingWorkspacePath_)
+    {
+        if (snapshot.workspace.sourcePath == *pendingWorkspacePath_)
+            pendingWorkspacePath_.reset();
+        else
+            return;
+    }
+    if (snapshot.workspace.sourcePath != workspacePath_)
+        workspacePath_ = snapshot.workspace.sourcePath;
 }
 
 void HomePage::SubmitEdit(ITunerControl& tunerControl)
@@ -458,20 +468,30 @@ void HomePage::DrawHome(
     const std::string workspaceName = workspacePath_.empty()
         ? std::string("Choose .vme file")
         : std::filesystem::path(workspacePath_).filename().string();
+    ImGui::BeginDisabled(!editable);
     if (ImGui::Button(
             (ICON_FA_FOLDER_OPEN "  " + workspaceName
              + "##home_workspace").c_str(),
             ImVec2(std::min(520.0F, pageWidth - 44.0F), 0.0F)))
     {
         if (const auto path = dialogs.OpenFile(MvmeWorkspaceFilter))
+        {
             workspacePath_ = *path;
+            pendingWorkspacePath_ = workspacePath_;
+            tunerControl.Submit(SetTunerWorkspaceCommand{workspacePath_});
+        }
     }
     if (!workspacePath_.empty())
     {
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear##home_workspace"))
+        {
             workspacePath_.clear();
+            pendingWorkspacePath_ = std::string{};
+            tunerControl.Submit(ClearTunerWorkspaceCommand{});
+        }
     }
+    ImGui::EndDisabled();
     ImGui::EndChild();
 
     if (inputChanged)

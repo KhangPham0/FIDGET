@@ -49,6 +49,7 @@ private:
     TunerTargetInput draft_;
     std::optional<TunerTargetInput> pendingInput_;
     std::string workspacePath_;
+    std::optional<std::string> pendingWorkspacePath_;
 };
 
 } // namespace fidget

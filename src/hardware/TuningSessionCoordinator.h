@@ -49,6 +49,10 @@ private:
         const std::shared_ptr<std::atomic<bool>>& cancellation);
     void OpenTargetSession();
     void ClearTarget();
+    void SetWorkspace(SetTunerWorkspaceCommand command);
+    void ClearWorkspace();
+
+    static void RefreshWorkspaceTargetEvidence(TunerSnapshot& snapshot);
 
     [[nodiscard]] std::shared_ptr<std::atomic<bool>> BeginProbe();
     void FinishProbe(

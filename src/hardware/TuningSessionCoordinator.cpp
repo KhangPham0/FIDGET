@@ -8,7 +8,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <variant>
@@ -195,7 +197,9 @@ bool TuningSessionCoordinator::Handles(
         || std::holds_alternative<SelectTunerTargetCommand>(command)
         || std::holds_alternative<ProbeTunerTargetCommand>(command)
         || std::holds_alternative<OpenTunerTargetSessionCommand>(command)
-        || std::holds_alternative<ClearTunerTargetCommand>(command);
+        || std::holds_alternative<ClearTunerTargetCommand>(command)
+        || std::holds_alternative<SetTunerWorkspaceCommand>(command)
+        || std::holds_alternative<ClearTunerWorkspaceCommand>(command);
 }
 
 void TuningSessionCoordinator::Submit(TunerCommand command)
@@ -236,6 +240,21 @@ void TuningSessionCoordinator::Submit(TunerCommand command)
     {
         CancelPendingProbe();
         (void)worker_.Post([this] { ClearTarget(); });
+        return;
+    }
+    if (std::holds_alternative<SetTunerWorkspaceCommand>(command))
+    {
+        auto request = std::get<SetTunerWorkspaceCommand>(
+            std::move(command));
+        (void)worker_.Post(
+            [this, request = std::move(request)]() mutable {
+                SetWorkspace(std::move(request));
+            });
+        return;
+    }
+    if (std::holds_alternative<ClearTunerWorkspaceCommand>(command))
+    {
+        (void)worker_.Post([this] { ClearWorkspace(); });
     }
 }
 
@@ -270,6 +289,8 @@ void TuningSessionCoordinator::EditTarget(EditTunerTargetCommand command)
         snapshot.target.verification.invalidated = true;
     }
     snapshot.target.sessionGate = {};
+    if (moduleChanged)
+        RefreshWorkspaceTargetEvidence(snapshot);
     RefreshPresentationEvidence(snapshot);
     const bool controllerStillFresh =
         ControllerVerificationIsFresh(snapshot.target);
@@ -551,6 +572,7 @@ void TuningSessionCoordinator::ClearTarget()
         || snapshot.target.controllerVerification.result.outcome
             == ControllerProbeOutcome::Cancelled;
     snapshot.target = {};
+    RefreshWorkspaceTargetEvidence(snapshot);
     RefreshPresentationEvidence(snapshot);
     PublishStatus(
         std::move(snapshot),
@@ -559,6 +581,163 @@ void TuningSessionCoordinator::ClearTarget()
             ? "The read-only connection or target check was cancelled and "
               "the tuner target was cleared."
             : "The tuner target was cleared.");
+}
+
+void TuningSessionCoordinator::SetWorkspace(
+    SetTunerWorkspaceCommand command)
+{
+    auto snapshot = SnapshotCopy();
+    snapshot.workspace = {};
+    snapshot.workspace.outcome = TunerWorkspaceLoadOutcome::Loading;
+    snapshot.workspace.sourcePath = std::move(command.sourcePath);
+    snapshot.workspace.message = "Reading the optional MVME workspace.";
+    snapshot.target.sessionGate = {};
+    RefreshPresentationEvidence(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "Reading the optional MVME workspace.");
+
+    snapshot = SnapshotCopy();
+    std::ifstream input(snapshot.workspace.sourcePath, std::ios::binary);
+    if (!input.good())
+    {
+        snapshot.workspace.outcome =
+            TunerWorkspaceLoadOutcome::FileUnavailable;
+        snapshot.workspace.message =
+            "The MVME workspace could not be opened for reading.";
+        RefreshPresentationEvidence(snapshot);
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "The optional MVME workspace was not loaded.",
+            "Check the selected path and its read permissions.");
+        return;
+    }
+
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    if (input.bad())
+    {
+        snapshot.workspace.outcome =
+            TunerWorkspaceLoadOutcome::FileUnavailable;
+        snapshot.workspace.message =
+            "Reading the MVME workspace failed before completion.";
+        RefreshPresentationEvidence(snapshot);
+        const auto detail = snapshot.workspace.message;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "The optional MVME workspace was not loaded.",
+            detail);
+        return;
+    }
+
+    auto parsed = ParseMvmeWorkspace(contents.str());
+    if (!parsed.success || !parsed.workspace)
+    {
+        snapshot.workspace.outcome = TunerWorkspaceLoadOutcome::ParseFailed;
+        snapshot.workspace.message = parsed.message.empty()
+            ? "The MVME workspace is malformed or unsupported."
+            : std::move(parsed.message);
+        RefreshPresentationEvidence(snapshot);
+        const auto detail = snapshot.workspace.message;
+        PublishStatus(
+            std::move(snapshot),
+            TunerStatusLevel::Error,
+            "The optional MVME workspace was not loaded.",
+            detail);
+        return;
+    }
+
+    snapshot.workspace.outcome = TunerWorkspaceLoadOutcome::Loaded;
+    snapshot.workspace.workspace = std::move(parsed.workspace);
+    RefreshWorkspaceTargetEvidence(snapshot);
+    RefreshPresentationEvidence(snapshot);
+
+    auto level = TunerStatusLevel::Success;
+    if (!snapshot.workspace.evaluationPerformed
+        || snapshot.workspace.evaluation.state
+            != MvmeInitScriptEvaluationState::Complete)
+    {
+        level = TunerStatusLevel::Warning;
+    }
+    if (snapshot.workspace.evaluationPerformed
+        && snapshot.workspace.evaluation.state
+            == MvmeInitScriptEvaluationState::Failed)
+    {
+        level = TunerStatusLevel::Error;
+    }
+    const auto detail = snapshot.workspace.message;
+    PublishStatus(
+        std::move(snapshot),
+        level,
+        "The optional MVME workspace was loaded.",
+        detail);
+}
+
+void TuningSessionCoordinator::ClearWorkspace()
+{
+    auto snapshot = SnapshotCopy();
+    snapshot.workspace = {};
+    snapshot.target.sessionGate = {};
+    RefreshPresentationEvidence(snapshot);
+    PublishStatus(
+        std::move(snapshot),
+        TunerStatusLevel::Information,
+        "The optional MVME workspace was cleared.",
+        "Controller and target verification were not changed.");
+}
+
+void TuningSessionCoordinator::RefreshWorkspaceTargetEvidence(
+    TunerSnapshot& snapshot)
+{
+    auto& state = snapshot.workspace;
+    state.targetLookupPerformed = false;
+    state.evaluatedTargetAddress.reset();
+    state.targetLookup = {};
+    state.evaluationPerformed = false;
+    state.evaluation = {};
+    state.warnings.clear();
+
+    if (state.outcome != TunerWorkspaceLoadOutcome::Loaded
+        || !state.workspace)
+    {
+        return;
+    }
+
+    const auto validation = ValidateTunerTargetInput(snapshot.target.input);
+    if (!validation.moduleAddressValid
+        || !validation.normalizedModuleAddress)
+    {
+        state.message =
+            "The workspace is parsed, but target lookup requires a valid "
+            "module address.";
+        return;
+    }
+
+    state.targetLookupPerformed = true;
+    state.evaluatedTargetAddress = validation.normalizedModuleAddress;
+    state.targetLookup = state.workspace->FindEnabledMdpp32ScpTarget(
+        *validation.normalizedModuleAddress);
+    if (state.targetLookup.status != MvmeWorkspaceTargetStatus::Found
+        || !state.targetLookup.target)
+    {
+        state.message = state.targetLookup.message;
+        return;
+    }
+
+    state.evaluationPerformed = true;
+    state.evaluation = EvaluateMvmeTargetInitScripts(
+        *state.workspace, *state.targetLookup.target);
+    state.message = state.evaluation.message;
+    for (const auto& unresolved : state.evaluation.unresolvedStatements)
+    {
+        state.warnings.push_back(
+            "Script " + std::to_string(unresolved.location.scriptIndex)
+            + ", line " + std::to_string(unresolved.location.lineNumber)
+            + ": " + unresolved.message);
+    }
 }
 
 std::shared_ptr<std::atomic<bool>>
@@ -617,10 +796,12 @@ void TuningSessionCoordinator::RefreshPresentationEvidence(
         validation.moduleAddressValid;
     snapshot.tuningSession.evidence.endpointEditingAllowed =
         !snapshot.target.controllerVerification.inProgress
-        && !snapshot.target.verification.inProgress;
+        && !snapshot.target.verification.inProgress
+        && snapshot.workspace.outcome != TunerWorkspaceLoadOutcome::Loading;
     snapshot.tuningSession.evidence.operationIdle =
         !snapshot.target.controllerVerification.inProgress
         && !snapshot.target.verification.inProgress
+        && snapshot.workspace.outcome != TunerWorkspaceLoadOutcome::Loading
         && snapshot.activeOperation == GuidedTunerOperation::None;
     if (snapshot.tuningSession.phase == TuningSessionPhase::Home
         && !snapshot.tuningSession.evidence.recoveryContextEstablished

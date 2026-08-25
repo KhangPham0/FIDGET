@@ -33,6 +33,15 @@ struct ClearTunerTargetCommand
 {
 };
 
+struct SetTunerWorkspaceCommand
+{
+    std::string sourcePath;
+};
+
+struct ClearTunerWorkspaceCommand
+{
+};
+
 struct UseCrateProjectCommand
 {
     std::string projectPath;
@@ -135,6 +144,8 @@ using TunerCommand = std::variant<
     ProbeTunerTargetCommand,
     OpenTunerTargetSessionCommand,
     ClearTunerTargetCommand,
+    SetTunerWorkspaceCommand,
+    ClearTunerWorkspaceCommand,
     UseCrateProjectCommand,
     ClearCrateProjectCommand,
     CheckStatusCommand,

@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -288,6 +289,37 @@ void WriteText(const std::string& path, const std::string& text)
     output << text;
     output.close();
     REQUIRE(output.good());
+}
+
+std::string ReadText(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    REQUIRE_FALSE(input.bad());
+    return contents.str();
+}
+
+std::filesystem::path FixturePath(const std::string& name)
+{
+    return std::filesystem::path(FIDGET_TEST_FIXTURE_DIR) / name;
+}
+
+void WriteWorkspaceWithTargetScript(
+    const std::filesystem::path& path,
+    const std::string& scriptText)
+{
+    auto document = nlohmann::ordered_json::parse(
+        ReadText(FixturePath("mvme_workspace_v4.vme")));
+    document["DAQConfig"]["events"][0]["modules"][0]["initScripts"] =
+        nlohmann::ordered_json::array({{
+            {"id", "script_workspace_coordinator_fixture"},
+            {"name", "workspace coordinator fixture"},
+            {"enabled", true},
+            {"vme_script", scriptText},
+        }});
+    WriteText(path.string(), document.dump(2));
 }
 
 } // namespace
@@ -715,6 +747,201 @@ TEST_CASE("clearing a target cancels a probe on the command worker")
     }));
     CHECK(fixture.transport->SentRequests().size() == 1U);
     CHECK_FALSE(fixture.transport->IsOpen());
+}
+
+TEST_CASE("workspace commands parse and evaluate passively on the worker")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    EditTarget(*fixture.service, TargetInput());
+    const auto path = FixturePath("mvme_workspace_v4.vme").string();
+    const auto before = fixture.service->CurrentSnapshot()->revision;
+    fixture.service->Submit(SetTunerWorkspaceCommand{path});
+    REQUIRE(WaitFor(*fixture.service, [&path](const TunerSnapshot& snapshot) {
+        return snapshot.workspace.sourcePath == path
+            && snapshot.workspace.outcome
+                == TunerWorkspaceLoadOutcome::Loaded;
+    }));
+
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->revision == before + 2U);
+    CHECK(snapshot->workspace.sourcePath == path);
+    REQUIRE(snapshot->workspace.workspace.has_value());
+    CHECK(snapshot->workspace.targetLookupPerformed);
+    REQUIRE(snapshot->workspace.evaluatedTargetAddress.has_value());
+    CHECK(snapshot->workspace.evaluatedTargetAddress->FullA32Value()
+          == TargetBase);
+    CHECK(snapshot->workspace.targetLookup.status
+          == MvmeWorkspaceTargetStatus::Found);
+    REQUIRE(snapshot->workspace.targetLookup.target.has_value());
+    CHECK(snapshot->workspace.evaluationPerformed);
+    CHECK(snapshot->workspace.evaluation.state
+          == MvmeInitScriptEvaluationState::
+              CompleteWithUnresolvedNonFrontend);
+    CHECK_FALSE(snapshot->workspace.warnings.empty());
+    CHECK_FALSE(snapshot->workspace.message.empty());
+    CHECK(snapshot->target.sessionGate.outcome
+          == TunerTargetSessionGateOutcome::NotRequested);
+    CHECK(fixture.factory->CreateCount() == 0U);
+    CHECK(fixture.transport->SentRequests().empty());
+    CHECK_FALSE(snapshot->tuningSession.evidence
+                    .liveRestoreSnapshotCaptured);
+    CHECK_FALSE(snapshot->tuningSession.evidence.recoveryRecordDurable);
+    CHECK_FALSE(snapshot->tuningSession.evidence
+                    .workspaceStartingSettingsResolved);
+}
+
+TEST_CASE("workspace snapshot exposes conditional and failed evaluations")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    EditTarget(*fixture.service, TargetInput());
+    const auto conditionalPath = fixture.home.Get() / "conditional.vme";
+    WriteWorkspaceWithTargetScript(
+        conditionalPath,
+        "0x6100 0\n"
+        "accu_test eq 1 \"live check\"\n"
+        "0x6110 24");
+    fixture.service->Submit(
+        SetTunerWorkspaceCommand{conditionalPath.string()});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.workspace.evaluationPerformed
+            && snapshot.workspace.evaluation.state
+                == MvmeInitScriptEvaluationState::
+                    ConditionalAfterAccuTest;
+    }));
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.evaluation.frontendWrites.empty());
+    CHECK_FALSE(snapshot->workspace.warnings.empty());
+    CHECK(fixture.factory->CreateCount() == 0U);
+
+    const auto failedPath = fixture.home.Get() / "parse-failed.vme";
+    WriteWorkspaceWithTargetScript(
+        failedPath,
+        "0x6100 0\n"
+        "0x6110 20\n"
+        "set value ${missing}");
+    fixture.service->Submit(SetTunerWorkspaceCommand{failedPath.string()});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.workspace.evaluationPerformed
+            && value.workspace.evaluation.state
+                == MvmeInitScriptEvaluationState::Failed;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.evaluation.frontendWrites.empty());
+    CHECK(snapshot->workspace.evaluation.finalFrontendValues.empty());
+    CHECK_FALSE(snapshot->workspace.warnings.empty());
+    CHECK(snapshot->statusMessages.front().level == TunerStatusLevel::Error);
+    CHECK(fixture.factory->CreateCount() == 0U);
+    CHECK(fixture.transport->SentRequests().empty());
+}
+
+TEST_CASE("workspace failures remain visible without hardware access")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    EditTarget(*fixture.service, TargetInput());
+    const auto missing = fixture.home.Get() / "missing.vme";
+    fixture.service->Submit(SetTunerWorkspaceCommand{missing.string()});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.workspace.outcome
+            == TunerWorkspaceLoadOutcome::FileUnavailable;
+    }));
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.sourcePath == missing.string());
+    CHECK_FALSE(snapshot->workspace.workspace.has_value());
+
+    const auto malformed = fixture.home.Get() / "malformed.vme";
+    WriteText(malformed.string(), "{ malformed workspace fixture\n");
+    fixture.service->Submit(SetTunerWorkspaceCommand{malformed.string()});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.workspace.outcome
+            == TunerWorkspaceLoadOutcome::ParseFailed;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.sourcePath == malformed.string());
+    CHECK_FALSE(snapshot->workspace.workspace.has_value());
+    CHECK_FALSE(snapshot->workspace.message.empty());
+    CHECK(fixture.factory->CreateCount() == 0U);
+    CHECK(fixture.transport->SentRequests().empty());
+}
+
+TEST_CASE("workspace evidence follows only its target-address dependency")
+{
+    using namespace fidget;
+
+    ServiceFixture fixture;
+    auto input = TargetInput(TunerTargetEndpointKind::DirectEthernet);
+    EditTarget(*fixture.service, input);
+    const auto path = FixturePath("mvme_workspace_v4.vme").string();
+    fixture.service->Submit(SetTunerWorkspaceCommand{path});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& snapshot) {
+        return snapshot.workspace.evaluationPerformed;
+    }));
+
+    auto endpointEdited = input;
+    endpointEdited.mvlcHost = "alternate-controller";
+    fixture.service->Submit(EditTunerTargetCommand{endpointEdited});
+    REQUIRE(WaitFor(*fixture.service, [&endpointEdited](
+        const TunerSnapshot& snapshot) {
+        return snapshot.target.input == endpointEdited;
+    }));
+    auto snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.evaluationPerformed);
+    REQUIRE(snapshot->workspace.evaluatedTargetAddress.has_value());
+    CHECK(snapshot->workspace.evaluatedTargetAddress->FullA32Value()
+          == TargetBase);
+
+    auto moduleEdited = endpointEdited;
+    moduleEdited.moduleAddress = "0x2200";
+    fixture.service->Submit(EditTunerTargetCommand{moduleEdited});
+    REQUIRE(WaitFor(*fixture.service, [&moduleEdited](
+        const TunerSnapshot& value) {
+        return value.target.input == moduleEdited
+            && value.workspace.targetLookupPerformed
+            && value.workspace.targetLookup.status
+                == MvmeWorkspaceTargetStatus::NotFound;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    REQUIRE(snapshot->workspace.workspace.has_value());
+    CHECK_FALSE(snapshot->workspace.evaluationPerformed);
+    CHECK(snapshot->workspace.evaluation.frontendWrites.empty());
+
+    fixture.service->Submit(ClearTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.target.input.mvlcHost.empty()
+            && !value.workspace.targetLookupPerformed;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.outcome == TunerWorkspaceLoadOutcome::Loaded);
+    REQUIRE(snapshot->workspace.workspace.has_value());
+    CHECK(snapshot->workspace.sourcePath == path);
+
+    EditTarget(*fixture.service, input);
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.workspace.evaluationPerformed;
+    }));
+    QueueMvlcProbeRead(*fixture.transport);
+    fixture.service->Submit(SelectTunerTargetCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return ControllerVerificationIsFresh(value.target);
+    }));
+    const auto createCount = fixture.factory->CreateCount();
+    const auto requestCount = fixture.transport->SentRequests().size();
+    fixture.service->Submit(ClearTunerWorkspaceCommand{});
+    REQUIRE(WaitFor(*fixture.service, [](const TunerSnapshot& value) {
+        return value.workspace.outcome
+            == TunerWorkspaceLoadOutcome::NotSelected;
+    }));
+    snapshot = fixture.service->CurrentSnapshot();
+    CHECK(snapshot->workspace.sourcePath.empty());
+    CHECK_FALSE(snapshot->workspace.workspace.has_value());
+    CHECK(ControllerVerificationIsFresh(snapshot->target));
+    CHECK(fixture.factory->CreateCount() == createCount);
+    CHECK(fixture.transport->SentRequests().size() == requestCount);
 }
 
 TEST_CASE("opening a target session is an evidence-only gate")

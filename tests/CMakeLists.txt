@@ -285,6 +285,9 @@ target_link_libraries(tuning_session_coordinator_tests PRIVATE
     fidget_hardware
     doctest::doctest
 )
+target_compile_definitions(tuning_session_coordinator_tests PRIVATE
+    FIDGET_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
 
 add_test(
     NAME tuning_session_coordinator_tests
