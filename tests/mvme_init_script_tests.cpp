@@ -578,6 +578,174 @@ TEST_CASE("valid known non-frontend command forms remain reportable")
           == 8U);
 }
 
+TEST_CASE("complete MVME syntax is proven before semantic extraction")
+{
+    using namespace fidget;
+
+    const std::vector<std::string> malformedLines = {
+        "read a32 d16 1.5",
+        "readabs a32 d16 1.5",
+        "read a32 d16 0x600E invalid_option",
+        "read 0xff d16 0x600E",
+        "write a32 d16 0x6000",
+        "writeabs a32 d16 0x11006000",
+        "write a32 d16 0x6000 1 extra",
+        "writeabs a32 d16 0x11006000 1 extra",
+        "write a33 d16 0x6000 1",
+        "writeabs a33 d16 0x11006000 1",
+        "write 0xff d16 0x6000 1",
+        "write a32 d17 0x6000 1",
+        "writeabs a32 d17 0x11006000 1",
+        "write a32 d16 1.5 1",
+        "writeabs a32 d16 1.5 1",
+        "write a32 d16 0x100000000 1",
+        "writeabs a32 d16 0x100000000 1",
+        "write a32 d16 0x6000 bananas",
+        "writeabs a32 d16 0x11006000 bananas",
+        "write a32 d16 0x6000 0x100000000",
+        "writeabs a32 d16 0x11006000 0x100000000",
+        "0x6000 bananas",
+        "0x100000000 1",
+        "0x6000 0x100000000",
+        ".5 1",
+        "0x6000",
+        "0x6000 1 extra",
+        "bogus 1",
+        "set onlytwo",
+        "set name value extra",
+    };
+
+    enum class Placement
+    {
+        BeforeWrites,
+        AfterWrites,
+        AfterAccuTest,
+    };
+    for (const auto& malformed : malformedLines)
+    {
+        CAPTURE(malformed);
+        for (const auto placement : {
+                 Placement::BeforeWrites,
+                 Placement::AfterWrites,
+                 Placement::AfterAccuTest})
+        {
+            CAPTURE(static_cast<int>(placement));
+            std::string script;
+            if (placement == Placement::BeforeWrites)
+            {
+                script = malformed
+                    + "\n0x6100 0\n0x6110 20";
+            }
+            else if (placement == Placement::AfterWrites)
+            {
+                script = "0x6100 0\n0x6110 20\n" + malformed;
+            }
+            else
+            {
+                script = "0x6100 0\n"
+                    "0x6110 20\n"
+                    "accu_test eq 1 \"live check\"\n"
+                    + malformed + "\n0x6110 24";
+            }
+
+            const auto evaluation = EvaluateScripts({Script(
+                "complete_syntax_gate", script)});
+            CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+            CHECK(evaluation.selectorAssignments.empty());
+            CHECK(evaluation.frontendWrites.empty());
+            CHECK(evaluation.finalFrontendValues.empty());
+            CHECK_FALSE(evaluation.conditionalAccuTestLocation.has_value());
+            CHECK(std::any_of(
+                evaluation.unresolvedStatements.begin(),
+                evaluation.unresolvedStatements.end(),
+                [](const MvmeInitScriptUnresolvedStatement& unresolved) {
+                    return unresolved.reason
+                            == MvmeInitScriptUnresolvedReason::MalformedScript
+                        || unresolved.reason
+                            == MvmeInitScriptUnresolvedReason::
+                                UnsupportedExpression
+                        || unresolved.reason
+                            == MvmeInitScriptUnresolvedReason::
+                                UnsupportedStatement
+                        || unresolved.reason
+                            == MvmeInitScriptUnresolvedReason::InvalidValue;
+                }));
+            CHECK_FALSE(
+                ExtractFw2051WorkspaceStartingState(evaluation)
+                    .startingState.has_value());
+        }
+    }
+}
+
+TEST_CASE("syntax proof preserves valid parse-time and unsupported forms")
+{
+    using namespace fidget;
+
+    SUBCASE("set remains a parse-time directive after accu_test")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "conditional_set",
+            "0x6100 0\n"
+            "0x6110 20\n"
+            "accu_test eq 1 \"live check\"\n"
+            "set gain 24\n"
+            "0x6110 ${gain}")});
+        CHECK(evaluation.state
+              == MvmeInitScriptEvaluationState::
+                  ConditionalAfterAccuTest);
+        REQUIRE(evaluation.conditionalAccuTestLocation.has_value());
+        CHECK(evaluation.conditionalAccuTestLocation->lineNumber == 3U);
+        REQUIRE(evaluation.frontendWrites.size() == 1U);
+        CHECK(evaluation.frontendWrites[0].value == 20U);
+        CHECK(evaluation.finalFrontendValues.empty());
+    }
+
+    SUBCASE("valid unsupported and non-frontend forms remain visible")
+    {
+        const std::vector<std::string> validLines = {
+            "read a32 d16 0x600E slow fifo",
+            "readabs A24 D32 0x1000 late mem",
+            "read 0x09 d16 0x600E",
+            "write a16 d32 0x6000 1",
+            "write 0xfe d16 0x6000 1",
+            "writeabs a32 d16 0x1000 1",
+            "0x6000 1",
+            "1.5 1",
+        };
+        for (const auto& line : validLines)
+        {
+            CAPTURE(line);
+            const auto single = EvaluateScripts({Script(
+                "one_valid_unsupported_form",
+                line + "\n0x6100 0\n0x6110 20")});
+            CHECK(single.state
+                  != MvmeInitScriptEvaluationState::Failed);
+        }
+
+        const auto evaluation = EvaluateScripts({Script(
+            "valid_unsupported_forms",
+            "read a32 d16 0x600E slow fifo\n"
+            "readabs A24 D32 0x1000 late mem\n"
+            "read 0x09 d16 0x600E\n"
+            "write a16 d32 0x6000 1\n"
+            "write 0xfe d16 0x6000 1\n"
+            "writeabs a32 d16 0x1000 1\n"
+            "0x6000 1\n"
+            "1.5 1\n"
+            "0x6100 0\n"
+            "0x6110 20")});
+        INFO(evaluation.message);
+        CHECK(evaluation.state
+              == MvmeInitScriptEvaluationState::
+                  CompleteWithUnresolvedNonFrontend);
+        REQUIRE(evaluation.frontendWrites.size() == 1U);
+        CHECK(evaluation.frontendWrites[0].registerOffset == 0x6110U);
+        CHECK(evaluation.frontendWrites[0].value == 20U);
+        REQUIRE(evaluation.finalFrontendValues.size() == 1U);
+        CHECK(FinalValue(evaluation, 0U, 0x6110U) != nullptr);
+    }
+}
+
 // MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
 // parses a complete script before returning any commands for execution. A
 // ParseError anywhere therefore means no command from that script executes.

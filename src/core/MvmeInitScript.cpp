@@ -813,6 +813,16 @@ struct PreparedLine
         MvmeInitScriptUnresolvedReason::MalformedScript;
 };
 
+struct LineSyntaxResult
+{
+    bool success = false;
+    MvmeInitScriptUnresolvedImpact impact =
+        MvmeInitScriptUnresolvedImpact::Frontend;
+    MvmeInitScriptUnresolvedReason reason =
+        MvmeInitScriptUnresolvedReason::MalformedScript;
+    std::string message;
+};
+
 PreparedLine PrepareLine(
     const std::string_view line,
     const ValueResolver& resolver)
@@ -1102,28 +1112,30 @@ private:
         }
         const auto& parts = prepared.parts;
         const auto& command = parts.front();
-        if ((command == "accu_test" || command == "accu_test_warn")
-            && !AccuTestFormValid(parts, resolver))
+        const auto syntax = ValidatePreparedLineSyntax(parts, resolver);
+        if (!syntax.success)
         {
             MarkCurrentScriptParseFailure();
+            if (command == "set" && parts.size() > 1U
+                && !parts[1U].empty())
+            {
+                resolver.Invalidate(parts[1U]);
+            }
             AddIssue(
                 location,
-                MvmeInitScriptUnresolvedImpact::NonFrontend,
-                MvmeInitScriptUnresolvedReason::MalformedScript,
-                "An accumulator test does not match MVME's comparison, "
-                "value, and message form.");
+                syntax.impact,
+                syntax.reason,
+                syntax.message);
+            if (syntax.impact == MvmeInitScriptUnresolvedImpact::Frontend)
+                selector_.reset();
             return;
         }
-        if (IsKnownNonFrontendCommand(command)
-            && !KnownNonFrontendFormValid(parts, resolver))
+        // MVME handles set as a parse-time directive while constructing the
+        // complete command list. It therefore updates later expansions even
+        // when it appears after a runtime accu_test.
+        if (command == "set")
         {
-            MarkCurrentScriptParseFailure();
-            AddIssue(
-                location,
-                MvmeInitScriptUnresolvedImpact::NonFrontend,
-                MvmeInitScriptUnresolvedReason::MalformedScript,
-                "A known non-frontend command does not match MVME's "
-                "accepted grammar.");
+            EvaluateSet(location, parts, resolver);
             return;
         }
         if (statementsConditional_)
@@ -1151,11 +1163,6 @@ private:
                 MvmeInitScriptUnresolvedImpact::NonFrontend,
                 MvmeInitScriptUnresolvedReason::UnsupportedStatement,
                 "A non-frontend init-script statement was not interpreted.");
-            return;
-        }
-        if (command == "set")
-        {
-            EvaluateSet(location, parts, resolver);
             return;
         }
         if (command == "write" || command == "writeabs")
@@ -1286,7 +1293,7 @@ private:
         {
             if (parts.size() >= 4U)
             {
-                const auto address = resolver.Resolve(parts[3U]);
+                const auto address = ResolveMvmeLongAddress(parts[3U]);
                 if (address.success)
                 {
                     const auto relativeAddress = command == "writeabs"
@@ -1420,7 +1427,7 @@ private:
             selector_.reset();
             return;
         }
-        const auto address = resolver.Resolve(parts[3U]);
+        const auto address = ResolveMvmeLongAddress(parts[3U]);
         if (!address.success)
         {
             MarkCurrentScriptParseFailure();
@@ -1618,6 +1625,212 @@ private:
             || command == "print";
     }
 
+    static ValueResult ResolveMvmeLongAddress(const std::string_view source)
+    {
+        ValueResult result;
+        const auto text = Trim(source);
+        if (text.empty())
+            return result;
+
+        unsigned base = 10U;
+        std::size_t firstDigit = 0U;
+        if (text.size() > 2U && text[0U] == '0'
+            && (text[1U] == 'x' || text[1U] == 'X'))
+        {
+            base = 16U;
+            firstDigit = 2U;
+        }
+        else if (text.size() > 1U && text[0U] == '0')
+        {
+            // Pinned MVME passes long-form addresses to QString::toUInt()
+            // with base zero. Its C-style leading-zero form is therefore
+            // octal. Binary-prefix support varies by Qt version and is
+            // rejected conservatively here.
+            if (text[1U] == 'b' || text[1U] == 'B')
+                return result;
+            base = 8U;
+            firstDigit = 1U;
+        }
+
+        std::uint32_t value = 0U;
+        const auto converted = std::from_chars(
+            text.data() + firstDigit,
+            text.data() + text.size(),
+            value,
+            static_cast<int>(base));
+        if (converted.ec != std::errc{}
+            || converted.ptr != text.data() + text.size())
+        {
+            return result;
+        }
+
+        result.success = true;
+        result.value = value;
+        return result;
+    }
+
+    static bool AddressModeFormValid(const std::string_view value)
+    {
+        const auto mode = Lower(value);
+        if (mode == "a16" || mode == "a24" || mode == "a32"
+            || mode == "cr")
+        {
+            return true;
+        }
+        const auto numeric = ResolveMvmeLongAddress(mode);
+        return numeric.success
+            && numeric.value
+                < std::numeric_limits<std::uint8_t>::max();
+    }
+
+    static bool DataWidthFormValid(const std::string_view value)
+    {
+        const auto width = Lower(value);
+        return width == "d16" || width == "d32";
+    }
+
+    static LineSyntaxResult ValidLineSyntax()
+    {
+        LineSyntaxResult result;
+        result.success = true;
+        return result;
+    }
+
+    static LineSyntaxResult InvalidLineSyntax(
+        const MvmeInitScriptUnresolvedImpact impact,
+        const MvmeInitScriptUnresolvedReason reason,
+        std::string message)
+    {
+        LineSyntaxResult result;
+        result.impact = impact;
+        result.reason = reason;
+        result.message = std::move(message);
+        return result;
+    }
+
+    LineSyntaxResult ValidatePreparedLineSyntax(
+        const std::vector<std::string>& parts,
+        const ValueResolver& resolver) const
+    {
+        if (parts.empty())
+        {
+            return InvalidLineSyntax(
+                MvmeInitScriptUnresolvedImpact::Frontend,
+                MvmeInitScriptUnresolvedReason::MalformedScript,
+                "An expanded init-script line is empty.");
+        }
+
+        const auto& command = parts.front();
+        if (command == "accu_test" || command == "accu_test_warn")
+        {
+            if (AccuTestFormValid(parts, resolver))
+                return ValidLineSyntax();
+            return InvalidLineSyntax(
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::MalformedScript,
+                "An accumulator test does not match MVME's comparison, "
+                "value, and message form.");
+        }
+
+        if (command == "set")
+        {
+            if (parts.size() == 3U && !parts[1U].empty())
+                return ValidLineSyntax();
+            return InvalidLineSyntax(
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "A set statement does not match MVME's exact three-part "
+                "form.");
+        }
+
+        if (IsKnownNonFrontendCommand(command))
+        {
+            if (KnownNonFrontendFormValid(parts, resolver))
+                return ValidLineSyntax();
+            return InvalidLineSyntax(
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::MalformedScript,
+                "A known non-frontend command does not match MVME's "
+                "accepted grammar.");
+        }
+
+        if (command == "write" || command == "writeabs")
+        {
+            if (parts.size() != 5U
+                || !AddressModeFormValid(parts[1U])
+                || !DataWidthFormValid(parts[2U]))
+            {
+                return InvalidLineSyntax(
+                    MvmeInitScriptUnresolvedImpact::Frontend,
+                    MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                    "A long write does not match MVME's exact command, "
+                    "address-mode, data-width, address, and value form.");
+            }
+
+            const auto address = ResolveMvmeLongAddress(parts[3U]);
+            if (!address.success)
+            {
+                return InvalidLineSyntax(
+                    MvmeInitScriptUnresolvedImpact::Frontend,
+                    MvmeInitScriptUnresolvedReason::UnsupportedExpression,
+                    "A long-write address is not an MVME unsigned integer "
+                    "address.");
+            }
+            const auto value = resolver.Resolve(parts[4U]);
+            if (!value.success)
+            {
+                const auto relative = command == "writeabs"
+                    ? RelativeAbsoluteAddress(address.value)
+                    : std::optional<std::uint32_t>(address.value);
+                return InvalidLineSyntax(
+                    relative.has_value() && !IsFrontendAddress(*relative)
+                        ? MvmeInitScriptUnresolvedImpact::NonFrontend
+                        : MvmeInitScriptUnresolvedImpact::Frontend,
+                    value.reason,
+                    "A long-write value is not an MVME unsigned 32-bit "
+                    "value.");
+            }
+            return ValidLineSyntax();
+        }
+
+        const auto firstCharacter = static_cast<unsigned char>(
+            command.front());
+        if (std::isdigit(firstCharacter) == 0)
+        {
+            return InvalidLineSyntax(
+                MvmeInitScriptUnresolvedImpact::Frontend,
+                MvmeInitScriptUnresolvedReason::UnsupportedExpression,
+                "The line is neither a supported MVME command nor a "
+                "digit-first shorthand write.");
+        }
+
+        const auto address = resolver.Resolve(command);
+        const auto impact = address.success
+            && !IsFrontendAddress(address.value)
+            ? MvmeInitScriptUnresolvedImpact::NonFrontend
+            : MvmeInitScriptUnresolvedImpact::Frontend;
+        if (!address.success || parts.size() != 2U)
+        {
+            return InvalidLineSyntax(
+                impact,
+                parts.size() < 2U
+                    ? MvmeInitScriptUnresolvedReason::UnsupportedExpression
+                    : MvmeInitScriptUnresolvedReason::UnsupportedStatement,
+                "A shorthand write does not have a valid address and "
+                "exactly one value.");
+        }
+        const auto value = resolver.Resolve(parts[1U]);
+        if (!value.success)
+        {
+            return InvalidLineSyntax(
+                impact,
+                value.reason,
+                "A shorthand-write value is not an MVME unsigned 32-bit "
+                "value.");
+        }
+        return ValidLineSyntax();
+    }
+
     static bool WaitFormValid(const std::vector<std::string>& parts)
     {
         if (parts.size() != 2U)
@@ -1644,21 +1857,16 @@ private:
     }
 
     static bool ReadFormValid(
-        const std::vector<std::string>& parts,
-        const ValueResolver& resolver)
+        const std::vector<std::string>& parts)
     {
         if (parts.size() < 4U || parts.size() > 6U)
             return false;
-        const auto addressMode = Lower(parts[1U]);
-        if (addressMode != "a16" && addressMode != "a24"
-            && addressMode != "a32" && addressMode != "cr")
+        if (!AddressModeFormValid(parts[1U])
+            || !DataWidthFormValid(parts[2U]))
         {
             return false;
         }
-        const auto dataWidth = Lower(parts[2U]);
-        if (dataWidth != "d16" && dataWidth != "d32")
-            return false;
-        if (!resolver.Resolve(parts[3U]).success)
+        if (!ResolveMvmeLongAddress(parts[3U]).success)
             return false;
         return std::all_of(
             parts.begin() + 4, parts.end(),
@@ -1679,7 +1887,7 @@ private:
         if (command == "wait")
             return WaitFormValid(parts);
         if (command == "read" || command == "readabs")
-            return ReadFormValid(parts, resolver);
+            return ReadFormValid(parts);
         if (command == "accu_mask_rotate")
         {
             return parts.size() == 3U
