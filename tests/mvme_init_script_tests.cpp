@@ -488,6 +488,97 @@ TEST_CASE("unsupported non-frontend statements remain visible without guessing")
 }
 
 // MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// parses every command in a script before executing any of them. In
+// particular, parseWait() uses ^(\d+)([[:alpha:]]*)$ and accepts only an
+// empty, s, ms, or ns suffix. A malformed non-frontend command therefore
+// invalidates the whole script just like a malformed frontend command.
+TEST_CASE("malformed known non-frontend commands fail the complete script")
+{
+    using namespace fidget;
+
+    const std::vector<std::string> malformedLines = {
+        "wait bananas",
+        "read a32 d16",
+        "readabs a33 d16 0x600E",
+        "accu_mask_rotate 0x000000ff bananas",
+        "accu_test_warn eq bananas \"check\"",
+        "print \"unterminated",
+    };
+    for (const auto& malformed : malformedLines)
+    {
+        CAPTURE(malformed);
+        for (const auto malformedFirst : {false, true})
+        {
+            CAPTURE(malformedFirst);
+            const auto script = malformedFirst
+                ? malformed + "\n0x6100 0\n0x6110 20"
+                : "0x6100 0\n0x6110 20\n" + malformed;
+            const auto evaluation = EvaluateScripts({Script(
+                "malformed_non_frontend", script)});
+            CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+            CHECK(evaluation.selectorAssignments.empty());
+            CHECK(evaluation.frontendWrites.empty());
+            CHECK(evaluation.finalFrontendValues.empty());
+            CHECK_FALSE(
+                ExtractFw2051WorkspaceStartingState(evaluation)
+                    .startingState.has_value());
+        }
+    }
+
+    SUBCASE("malformed after accu_test is still a whole-script parse failure")
+    {
+        const auto evaluation = EvaluateScripts({Script(
+            "malformed_after_accu_test",
+            "0x6100 0\n"
+            "accu_test eq 1 \"live check\"\n"
+            "wait bananas\n"
+            "0x6110 20")});
+        CHECK(evaluation.state == MvmeInitScriptEvaluationState::Failed);
+        CHECK_FALSE(evaluation.conditionalAccuTestLocation.has_value());
+        CHECK(evaluation.selectorAssignments.empty());
+        CHECK(evaluation.frontendWrites.empty());
+        CHECK(evaluation.finalFrontendValues.empty());
+
+        Fw2051WorkspaceStartingState forged;
+        forged.sourceEvaluationState = evaluation.state;
+        forged.frontendValues.push_back(
+            {{0U, 4U}, 0U, 0x6110U, 20U});
+        CHECK_FALSE(GenerateFw2051LiteralScript(
+                        forged, TargetAddress()).success);
+        const auto workspace = LoadWorkspace("mvme_workspace_v4.vme");
+        CHECK_FALSE(ExportFw2051MvmeWorkspaceCopy(
+                        workspace, FindTarget(workspace), forged).success);
+    }
+}
+
+TEST_CASE("valid known non-frontend command forms remain reportable")
+{
+    using namespace fidget;
+
+    const auto evaluation = EvaluateScripts({Script(
+        "valid_non_frontend_grammar",
+        "read a32 d16 0x600E slow fifo\n"
+        "readabs A24 D32 0x1000 late mem\n"
+        "accu_mask_rotate 0x000000ff 32\n"
+        "accu_test_warn gte 0x50 \"firmware check\"\n"
+        "wait 1ms\n"
+        "wait 1000ns\n"
+        "print\n"
+        "print \"fixture message\" detail\n"
+        "0x6100 0\n"
+        "0x6110 20")});
+
+    CHECK(evaluation.state
+          == MvmeInitScriptEvaluationState::
+              CompleteWithUnresolvedNonFrontend);
+    CHECK(evaluation.frontendWrites.size() == 1U);
+    CHECK(evaluation.finalFrontendValues.size() == 1U);
+    CHECK(UnresolvedCount(
+              evaluation, MvmeInitScriptUnresolvedImpact::NonFrontend)
+          == 8U);
+}
+
+// MVME src/vme_script.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
 // parses a complete script before returning any commands for execution. A
 // ParseError anywhere therefore means no command from that script executes.
 TEST_CASE("a parse failure discards every definite write from that script")

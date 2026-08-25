@@ -1114,6 +1114,18 @@ private:
                 "value, and message form.");
             return;
         }
+        if (IsKnownNonFrontendCommand(command)
+            && !KnownNonFrontendFormValid(parts, resolver))
+        {
+            MarkCurrentScriptParseFailure();
+            AddIssue(
+                location,
+                MvmeInitScriptUnresolvedImpact::NonFrontend,
+                MvmeInitScriptUnresolvedReason::MalformedScript,
+                "A known non-frontend command does not match MVME's "
+                "accepted grammar.");
+            return;
+        }
         if (statementsConditional_)
         {
             EvaluateConditionalLine(location, parts, resolver);
@@ -1604,6 +1616,81 @@ private:
             || command == "accu_mask_rotate"
             || command == "accu_test_warn" || command == "wait"
             || command == "print";
+    }
+
+    static bool WaitFormValid(const std::vector<std::string>& parts)
+    {
+        if (parts.size() != 2U)
+            return false;
+        const auto& delay = parts[1U];
+        const auto firstNonDigit = std::find_if(
+            delay.begin(), delay.end(),
+            [](const unsigned char character) {
+                return std::isdigit(character) == 0;
+            });
+        if (firstNonDigit == delay.begin())
+            return false;
+        const std::string unit(firstNonDigit, delay.end());
+        if (unit != "" && unit != "s" && unit != "ms" && unit != "ns")
+            return false;
+
+        std::uint32_t parsed = 0U;
+        const auto digitCount = static_cast<std::size_t>(
+            std::distance(delay.begin(), firstNonDigit));
+        const auto converted = std::from_chars(
+            delay.data(), delay.data() + digitCount, parsed, 10);
+        return converted.ec == std::errc{}
+            && converted.ptr == delay.data() + digitCount;
+    }
+
+    static bool ReadFormValid(
+        const std::vector<std::string>& parts,
+        const ValueResolver& resolver)
+    {
+        if (parts.size() < 4U || parts.size() > 6U)
+            return false;
+        const auto addressMode = Lower(parts[1U]);
+        if (addressMode != "a16" && addressMode != "a24"
+            && addressMode != "a32" && addressMode != "cr")
+        {
+            return false;
+        }
+        const auto dataWidth = Lower(parts[2U]);
+        if (dataWidth != "d16" && dataWidth != "d32")
+            return false;
+        if (!resolver.Resolve(parts[3U]).success)
+            return false;
+        return std::all_of(
+            parts.begin() + 4, parts.end(),
+            [](const std::string& part) {
+                const auto option = Lower(part);
+                return option == "slow" || option == "late"
+                    || option == "fifo" || option == "mem";
+            });
+    }
+
+    static bool KnownNonFrontendFormValid(
+        const std::vector<std::string>& parts,
+        const ValueResolver& resolver)
+    {
+        if (parts.empty())
+            return false;
+        const auto& command = parts.front();
+        if (command == "wait")
+            return WaitFormValid(parts);
+        if (command == "read" || command == "readabs")
+            return ReadFormValid(parts, resolver);
+        if (command == "accu_mask_rotate")
+        {
+            return parts.size() == 3U
+                && resolver.Resolve(parts[1U]).success
+                && resolver.Resolve(parts[2U]).success;
+        }
+        if (command == "accu_test_warn")
+            return AccuTestFormValid(parts, resolver);
+        // MVME's print parser accepts zero or more successfully tokenized
+        // arguments. Tokenization has already completed in PrepareLine().
+        return command == "print";
     }
 
     static bool AccuTestFormValid(
