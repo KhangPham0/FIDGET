@@ -58,8 +58,10 @@ struct Fw2051LiteralScriptResult
 };
 
 // Generates a module-relative MVME init script containing literal selector and
-// FW2051 frontend writes plus their explicit settle waits. Address and firmware
-// lines are comments, not hardware claims or register writes.
+// FW2051 frontend writes plus their explicit settle waits. Coupled register
+// groups must be complete and valid; the generated order first establishes a
+// safe boundary and then uses the shared FW2051 transaction-planning rule.
+// Address and firmware lines are comments, not hardware claims or writes.
 [[nodiscard]] Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
     const Fw2051WorkspaceStartingState& startingState,
     TargetModuleAddress targetAddress);

@@ -314,6 +314,9 @@ TEST_CASE("literal FW2051 script emits MVME-compatible millisecond waits")
         "# Quad 0\n"
         "write a32 d16 0x6100 0x0000\n"
         "wait 1ms\n"
+        "# Establish the widest safe coupled boundary\n"
+        "write a32 d16 0x6124 0x03E8\n"
+        "wait 1ms\n"
         "write a32 d16 0x6110 0x0008\n"
         "wait 1ms\n"
         "write a32 d16 0x6124 0x00A0\n"
@@ -334,7 +337,7 @@ TEST_CASE("literal FW2051 script emits MVME-compatible millisecond waits")
     // stores wait delays as integer milliseconds and divides an ns suffix by
     // 1000. The exported 1ms literal therefore survives parse/serialize
     // without truncation or an unintended unit conversion.
-    CHECK(CountText(generated.text, "wait 1ms\n") == 6U);
+    CHECK(CountText(generated.text, "wait 1ms\n") == 7U);
     CHECK(generated.text.find("ns") == std::string::npos);
 
     auto document = LoadWorkspace("mvme_workspace_v4.vme").Json();
@@ -350,7 +353,7 @@ TEST_CASE("literal FW2051 script emits MVME-compatible millisecond waits")
           == MvmeInitScriptEvaluationState::
               CompleteWithUnresolvedNonFrontend);
     CHECK(evaluation.finalFrontendValues.size() == 3U);
-    REQUIRE(evaluation.unresolvedStatements.size() == 6U);
+    REQUIRE(evaluation.unresolvedStatements.size() == 7U);
     for (const auto& unresolved : evaluation.unresolvedStatements)
         CHECK(unresolved.impact == MvmeInitScriptUnresolvedImpact::NonFrontend);
 }
@@ -550,6 +553,33 @@ TEST_CASE("copied workspace fails closed on malformed or ambiguous fences")
     CHECK(exported.message.find("More than one") != std::string::npos);
 }
 
+TEST_CASE("literal export requires complete coupled register groups")
+{
+    using namespace fidget;
+
+    MvmeInitScriptEvaluation partialEvaluation;
+    partialEvaluation.state = MvmeInitScriptEvaluationState::Complete;
+    partialEvaluation.finalFrontendValues = {
+        {{0U, 1U}, 0U, 0x6110U, 8U},
+    };
+    const auto extracted = ExtractFw2051WorkspaceStartingState(
+        partialEvaluation);
+    REQUIRE(extracted.startingState.has_value());
+    const auto& state = *extracted.startingState;
+    const auto generated = GenerateFw2051LiteralScript(
+        state, TargetAddress());
+    CHECK_FALSE(generated.success);
+    CHECK(generated.text.empty());
+    CHECK(generated.message.find("coupled-register group is incomplete")
+          != std::string::npos);
+
+    const auto workspace = LoadWorkspace("mvme_workspace_v4.vme");
+    const auto exported = ExportFw2051MvmeWorkspaceCopy(
+        workspace, FindTarget(workspace), state);
+    CHECK_FALSE(exported.success);
+    CHECK(exported.text.empty());
+}
+
 TEST_CASE("copied workspace save never overwrites its imported source")
 {
     using namespace fidget;
@@ -611,4 +641,31 @@ TEST_CASE("atomic copied workspace failure preserves an existing destination")
         replacement, source.string(), destination.string(), true);
     REQUIRE(saved.success);
     CHECK(ReadText(destination) == replacement);
+}
+
+TEST_CASE("no-replace workspace save is atomic against a late collision")
+{
+    using namespace fidget;
+
+    TemporaryDirectory temporary;
+    const auto source = temporary.Get() / "source.vme";
+    const auto destination = temporary.Get() / "late-copy.vme";
+    WriteText(source, "source bytes\n");
+
+    const std::string replacement = "replacement bytes\n";
+    const auto saved = SaveMvmeWorkspaceCopy(
+        replacement,
+        source.string(),
+        destination.string(),
+        false,
+        [&destination](std::ostream& output, const std::string_view text) {
+            output.write(
+                text.data(), static_cast<std::streamsize>(text.size()));
+            WriteText(destination, "late collision bytes\n");
+            return static_cast<bool>(output);
+        });
+    CHECK_FALSE(saved.success);
+    CHECK(saved.outputAlreadyExists);
+    CHECK(ReadText(destination) == "late collision bytes\n");
+    CHECK_FALSE(std::filesystem::exists(destination.string() + ".tmp"));
 }

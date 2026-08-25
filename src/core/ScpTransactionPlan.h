@@ -3,12 +3,40 @@
 
 #include "core/ScpProfile.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace fidget {
+
+inline constexpr std::array<std::uint16_t, 13U>
+    Fw2051ScpIndependentRegisterOrder{
+        0x6112U, 0x6114U, 0x6116U, 0x6118U, 0x611AU,
+        0x611CU, 0x611EU, 0x6120U, 0x6122U, 0x6126U,
+        0x6128U, 0x612AU, 0x614AU,
+    };
+
+struct Fw2051ScpCoupledWriteOrderPlan
+{
+    bool success = false;
+    std::string message;
+    std::array<std::uint16_t, 2U> registerOffsets{};
+};
+
+// Orders one complete coupled transition using the same rule as profile
+// application: move the constrained value first when it is valid against the
+// current boundary; otherwise widen the boundary first. The caller must have
+// established that the current pair is valid (or safely staged the boundary)
+// before executing this order.
+[[nodiscard]] Fw2051ScpCoupledWriteOrderPlan
+PlanFw2051ScpCoupledWriteOrder(
+    std::uint16_t constrainedRegister,
+    std::uint16_t boundaryRegister,
+    std::uint16_t currentBoundaryValue,
+    std::uint16_t targetConstrainedValue,
+    std::uint16_t targetBoundaryValue);
 
 struct ScpProfileApplicationStep
 {

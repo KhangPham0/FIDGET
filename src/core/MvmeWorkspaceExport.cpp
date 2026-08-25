@@ -2,6 +2,7 @@
 
 #include "core/ScpConfiguration.h"
 #include "core/ScpRegistry.h"
+#include "core/ScpTransactionPlan.h"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,21 @@ struct FrontendKey
         return std::tie(quad, registerOffset)
             < std::tie(other.quad, other.registerOffset);
     }
+};
+
+struct PlannedLiteralValue
+{
+    std::uint16_t quad = 0U;
+    std::uint16_t registerOffset = 0U;
+    std::uint16_t value = 0U;
+    bool stagingBoundary = false;
+};
+
+struct LiteralValuePlan
+{
+    bool success = false;
+    std::string message;
+    std::vector<PlannedLiteralValue> values;
 };
 
 std::string Hexadecimal16(const std::uint16_t value)
@@ -133,14 +149,97 @@ std::string ValidateStartingState(
     return {};
 }
 
-std::map<FrontendKey, const MvmeInitScriptFrontendValue*> OrderedValues(
+LiteralValuePlan PlanLiteralValues(
     const Fw2051WorkspaceStartingState& state)
 {
-    std::map<FrontendKey, const MvmeInitScriptFrontendValue*> result;
+    LiteralValuePlan plan;
+    std::map<FrontendKey, const MvmeInitScriptFrontendValue*> values;
     for (const auto& value : state.frontendValues)
-        result.emplace(
+        values.emplace(
             FrontendKey{value.quad, value.registerOffset}, &value);
-    return result;
+
+    const auto appendCoupled = [&plan, &values](
+        const std::uint16_t quad,
+        const std::uint16_t constrainedRegister,
+        const std::uint16_t boundaryRegister) {
+        const auto constrained = values.find({quad, constrainedRegister});
+        const auto boundary = values.find({quad, boundaryRegister});
+        if (constrained == values.end() && boundary == values.end())
+            return true;
+        if (constrained == values.end() || boundary == values.end())
+        {
+            plan.message =
+                "A FW2051 coupled-register group is incomplete.";
+            return false;
+        }
+
+        const auto* boundaryDefinition = FindFw2051ScpSetting(
+            boundaryRegister);
+        if (boundaryDefinition == nullptr)
+        {
+            plan.message =
+                "The FW2051 coupled boundary is absent from the registry.";
+            return false;
+        }
+
+        // With no live starting value available to an exported script, first
+        // establish the widest valid boundary. The shared transaction planner
+        // then orders the constrained target before the final boundary value.
+        plan.values.push_back({
+            quad,
+            boundaryRegister,
+            boundaryDefinition->maximumValue,
+            true,
+        });
+        const auto ordered = PlanFw2051ScpCoupledWriteOrder(
+            constrainedRegister,
+            boundaryRegister,
+            boundaryDefinition->maximumValue,
+            constrained->second->value,
+            boundary->second->value);
+        if (!ordered.success)
+        {
+            plan.message = ordered.message;
+            return false;
+        }
+        for (const auto registerOffset : ordered.registerOffsets)
+        {
+            const auto value = values.find({quad, registerOffset});
+            if (value == values.end())
+            {
+                plan.message =
+                    "The coupled FW2051 export plan lost a target value.";
+                return false;
+            }
+            plan.values.push_back({
+                quad, registerOffset, value->second->value, false});
+        }
+        return true;
+    };
+
+    for (std::uint16_t quad = 0U; quad < Fw2051ScpQuadCount; ++quad)
+    {
+        for (const auto registerOffset :
+             Fw2051ScpIndependentRegisterOrder)
+        {
+            const auto value = values.find({quad, registerOffset});
+            if (value != values.end())
+            {
+                plan.values.push_back({
+                    quad, registerOffset, value->second->value, false});
+            }
+        }
+        if (!appendCoupled(quad, 0x6110U, 0x6124U)
+            || !appendCoupled(quad, 0x6146U, 0x6148U))
+        {
+            plan.values.clear();
+            return plan;
+        }
+    }
+
+    plan.success = true;
+    plan.message = "Prepared dependency-safe FW2051 literal write order.";
+    return plan;
 }
 
 std::size_t OccurrenceCount(
@@ -402,7 +501,14 @@ Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
         return result;
     }
 
-    const auto values = OrderedValues(startingState);
+    const auto values = PlanLiteralValues(startingState);
+    if (!values.success)
+    {
+        result.message =
+            "The FW2051 literal script cannot be generated: "
+            + values.message;
+        return result;
+    }
     std::ostringstream output;
     output << FidgetTunedFrontendFenceBegin << '\n'
            << "# " << FidgetTunedFrontendScriptName << '\n'
@@ -415,26 +521,31 @@ Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
            << "# source: workspace init scripts; intended values, not live "
               "hardware state\n"
            << "# restoration_authority: fresh live capture only\n"
-           << "# resolved_value_count: " << values.size() << '\n'
+           << "# resolved_value_count: "
+           << startingState.frontendValues.size() << '\n'
            << "# unresolved_non_frontend_count: "
            << startingState.unresolvedNonFrontend.size() << "\n\n";
 
     std::uint16_t currentQuad = Fw2051ScpQuadCount;
-    for (const auto& item : values)
+    for (const auto& item : values.values)
     {
-        if (item.first.quad != currentQuad)
+        if (item.quad != currentQuad)
         {
             if (currentQuad != Fw2051ScpQuadCount)
                 output << '\n';
-            currentQuad = item.first.quad;
+            currentQuad = item.quad;
             output << "# Quad " << currentQuad << '\n'
                    << "write a32 d16 0x6100 "
                    << Hexadecimal16(currentQuad) << '\n'
                    << "wait 1ms\n";
         }
+        if (item.stagingBoundary)
+        {
+            output << "# Establish the widest safe coupled boundary\n";
+        }
         output << "write a32 d16 "
-               << Hexadecimal16(item.first.registerOffset) << ' '
-               << Hexadecimal16(item.second->value) << '\n'
+               << Hexadecimal16(item.registerOffset) << ' '
+               << Hexadecimal16(item.value) << '\n'
                << "wait 1ms\n";
     }
 
@@ -450,7 +561,7 @@ Fw2051LiteralScriptResult GenerateFw2051LiteralScript(
 
     result.success = true;
     result.text = output.str();
-    result.valueCount = values.size();
+    result.valueCount = startingState.frontendValues.size();
     result.message = "Generated a literal module-init script containing "
         + std::to_string(result.valueCount)
         + " resolved FW2051 frontend values.";
@@ -770,14 +881,34 @@ MvmeWorkspaceCopySaveResult SaveMvmeWorkspaceCopy(
         return result;
     }
 
-    std::error_code renameError;
-    std::filesystem::rename(temporaryFile, destination, renameError);
-    if (renameError)
+    std::error_code installError;
+    if (allowOverwrite)
     {
+        std::filesystem::rename(
+            temporaryFile, destination, installError);
+    }
+    else
+    {
+        // The hard-link creation is the no-replace installation primitive:
+        // unlike a prior exists() check followed by rename(), it cannot race
+        // into overwriting a destination created after validation.
+        std::filesystem::create_hard_link(
+            temporaryFile, destination, installError);
+        if (!installError)
+        {
+            std::error_code unlinkError;
+            std::filesystem::remove(temporaryFile, unlinkError);
+        }
+    }
+    if (installError)
+    {
+        std::error_code collisionError;
+        result.outputAlreadyExists = std::filesystem::exists(
+            destination, collisionError) && !collisionError;
         RemoveTemporaryDirectory(temporaryDirectory);
         result.message =
             "Could not atomically install the copied MVME workspace: "
-            + renameError.message() + '.';
+            + installError.message() + '.';
         return result;
     }
     RemoveTemporaryDirectory(temporaryDirectory);

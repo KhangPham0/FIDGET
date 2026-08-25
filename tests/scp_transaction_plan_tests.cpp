@@ -94,6 +94,37 @@ TEST_CASE("the complete application plan orders coupled changes safely")
     CHECK(positionOf(0x6148U) < positionOf(0x6146U));
 }
 
+TEST_CASE("the shared coupled planner widens only when required")
+{
+    using namespace fidget;
+
+    auto timing = PlanFw2051ScpCoupledWriteOrder(
+        0x6110U, 0x6124U, 12U, 20U, 30U);
+    REQUIRE(timing.success);
+    const std::array<std::uint16_t, 2U> boundaryFirst{
+        0x6124U, 0x6110U};
+    CHECK(timing.registerOffsets == boundaryFirst);
+
+    timing = PlanFw2051ScpCoupledWriteOrder(
+        0x6110U, 0x6124U, 40U, 20U, 30U);
+    REQUIRE(timing.success);
+    const std::array<std::uint16_t, 2U> constrainedFirst{
+        0x6110U, 0x6124U};
+    CHECK(timing.registerOffsets == constrainedFirst);
+
+    const auto sampleWindow = PlanFw2051ScpCoupledWriteOrder(
+        0x6146U, 0x6148U, 20U, 50U, 400U);
+    REQUIRE(sampleWindow.success);
+    const std::array<std::uint16_t, 2U> sampleBoundaryFirst{
+        0x6148U, 0x6146U};
+    CHECK(sampleWindow.registerOffsets == sampleBoundaryFirst);
+
+    const auto invalid = PlanFw2051ScpCoupledWriteOrder(
+        0x6146U, 0x6148U, 400U, 400U, 400U);
+    CHECK_FALSE(invalid.success);
+    CHECK(invalid.message.find("invalid") != std::string::npos);
+}
+
 TEST_CASE("complete application rejects global and invalid targets")
 {
     using namespace fidget;

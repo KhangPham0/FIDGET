@@ -9,6 +9,65 @@
 
 namespace fidget {
 
+Fw2051ScpCoupledWriteOrderPlan PlanFw2051ScpCoupledWriteOrder(
+    const std::uint16_t constrainedRegister,
+    const std::uint16_t boundaryRegister,
+    const std::uint16_t currentBoundaryValue,
+    const std::uint16_t targetConstrainedValue,
+    const std::uint16_t targetBoundaryValue)
+{
+    Fw2051ScpCoupledWriteOrderPlan plan;
+    const auto* constrained = FindFw2051ScpSetting(constrainedRegister);
+    const auto* boundary = FindFw2051ScpSetting(boundaryRegister);
+    if (constrained == nullptr || boundary == nullptr
+        || constrained->dependencyRule == Fw2051ScpDependencyRule::None
+        || boundary->dependencyRule == Fw2051ScpDependencyRule::None
+        || constrained->dependencyRegister != boundaryRegister
+        || boundary->dependencyRegister != constrainedRegister)
+    {
+        plan.message =
+            "The requested FW2051 registers are not a coupled pair.";
+        return plan;
+    }
+
+    const auto constrainedError = ValidateFw2051ScpProfileValue(
+        constrainedRegister, targetConstrainedValue);
+    if (!constrainedError.empty())
+    {
+        plan.message = constrainedError;
+        return plan;
+    }
+    const auto boundaryError = ValidateFw2051ScpProfileValue(
+        boundaryRegister, targetBoundaryValue);
+    if (!boundaryError.empty())
+    {
+        plan.message = boundaryError;
+        return plan;
+    }
+    if (!Fw2051ScpDependencySatisfied(
+            *constrained, targetConstrainedValue, targetBoundaryValue)
+        || !Fw2051ScpDependencySatisfied(
+            *boundary, targetBoundaryValue, targetConstrainedValue))
+    {
+        plan.message =
+            "The requested FW2051 coupled-register values are invalid.";
+        return plan;
+    }
+
+    const bool constrainedFirst = Fw2051ScpDependencySatisfied(
+        *constrained, targetConstrainedValue, currentBoundaryValue);
+    plan.registerOffsets = constrainedFirst
+        ? std::array<std::uint16_t, 2U>{
+              constrainedRegister, boundaryRegister}
+        : std::array<std::uint16_t, 2U>{
+              boundaryRegister, constrainedRegister};
+    plan.success = true;
+    plan.message = constrainedFirst
+        ? "Move the constrained FW2051 value before its boundary."
+        : "Widen the FW2051 boundary before its constrained value.";
+    return plan;
+}
+
 ScpProfileApplicationPlan PlanFw2051ScpProfileApplication(
     const ScpProfile& profile,
     const Fw2051ScpConfigurationSnapshot& liveConfiguration)
@@ -135,12 +194,6 @@ ScpProfileApplicationPlan PlanFw2051ScpProfileApplication(
             });
         };
 
-    constexpr std::array<std::uint16_t, 13> independentOrder{
-        0x6112U, 0x6114U, 0x6116U, 0x6118U, 0x611AU,
-        0x611CU, 0x611EU, 0x6120U, 0x6122U, 0x6126U,
-        0x6128U, 0x612AU, 0x614AU,
-    };
-
     for (std::size_t index = 0U;
          index < liveConfiguration.quads.size();
          ++index)
@@ -149,33 +202,36 @@ ScpProfileApplicationPlan PlanFw2051ScpProfileApplication(
         const auto& live = liveConfiguration.quads[index];
         const auto& target = profile.configuration.quads[index];
 
-        for (const auto registerOffset : independentOrder)
+        for (const auto registerOffset :
+             Fw2051ScpIndependentRegisterOrder)
         {
             addDifference(quad, registerOffset);
         }
 
-        // Widen a coupled boundary before moving its constrained value.
-        // Otherwise, move the constrained value before shrinking the boundary.
-        if (target.timingFilter > live.shapingTime)
+        for (const auto& coupled : {
+                 PlanFw2051ScpCoupledWriteOrder(
+                     0x6110U,
+                     0x6124U,
+                     live.shapingTime,
+                     target.timingFilter,
+                     target.shapingTime),
+                 PlanFw2051ScpCoupledWriteOrder(
+                     0x6146U,
+                     0x6148U,
+                     live.totalSamples,
+                     target.preSamples,
+                     target.totalSamples),
+             })
         {
-            addDifference(quad, 0x6124U);
-            addDifference(quad, 0x6110U);
-        }
-        else
-        {
-            addDifference(quad, 0x6110U);
-            addDifference(quad, 0x6124U);
-        }
-
-        if (target.preSamples >= live.totalSamples)
-        {
-            addDifference(quad, 0x6148U);
-            addDifference(quad, 0x6146U);
-        }
-        else
-        {
-            addDifference(quad, 0x6146U);
-            addDifference(quad, 0x6148U);
+            if (!coupled.success)
+            {
+                plan.message = "Quad " + std::to_string(index)
+                    + ": " + coupled.message;
+                plan.request.steps.clear();
+                return plan;
+            }
+            for (const auto registerOffset : coupled.registerOffsets)
+                addDifference(quad, registerOffset);
         }
     }
 
