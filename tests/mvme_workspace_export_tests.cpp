@@ -400,18 +400,32 @@ TEST_CASE("copied workspace appends one final fenced script and preserves fixtur
     }
 }
 
+// MVME src/vme_config.cc at fe90d3acd9d6a69aed7eb03ef63282446e54b592
+// deserializes object identifiers as QUuid values. Braces and hexadecimal
+// letter case therefore do not distinguish UUID identity.
 TEST_CASE("copied workspace allocates a UUID-v4 across all workspace ids")
 {
     using namespace fidget;
 
-    constexpr const char* CollisionId =
+    constexpr const char* BracedWorkspaceId =
+        "{11111111-2222-4333-8444-555555555555}";
+    constexpr const char* UnbracedCollision =
         "11111111-2222-4333-8444-555555555555";
-    constexpr const char* UniqueId =
+    constexpr const char* UppercaseWorkspaceId =
+        "AAAAAAAA-BBBB-4CCC-9DDD-EEEEEEEEEEEE";
+    constexpr const char* LowercaseCollision =
         "aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee";
+    constexpr const char* UniqueId =
+        "01234567-89ab-4cde-8f01-23456789abcd";
     auto document = LoadWorkspace("mvme_workspace_v4.vme").Json();
     document["fixture_unknown_objects"] = nlohmann::ordered_json::array({{
-        {"nested", {{"id", CollisionId}}},
+        {"nested", {{"id", BracedWorkspaceId}}},
     }});
+    document["DAQConfig"]["fixture_nested_id"] = {
+        {"deeper", nlohmann::ordered_json::array({
+            {{"id", UppercaseWorkspaceId}},
+        })},
+    };
     const auto workspace = ParseWorkspace(document);
     std::size_t calls = 0U;
     const auto exported = ExportFw2051MvmeWorkspaceCopy(
@@ -421,11 +435,13 @@ TEST_CASE("copied workspace allocates a UUID-v4 across all workspace ids")
         [&calls]() {
             ++calls;
             return calls == 1U
-                ? std::string(CollisionId)
-                : std::string(UniqueId);
+                ? std::string(UnbracedCollision)
+                : calls == 2U
+                    ? std::string(LowercaseCollision)
+                    : std::string(UniqueId);
         });
     REQUIRE(exported.success);
-    CHECK(calls == 2U);
+    CHECK(calls == 3U);
 
     const auto exportedDocument =
         nlohmann::ordered_json::parse(exported.text);
@@ -435,7 +451,9 @@ TEST_CASE("copied workspace allocates a UUID-v4 across all workspace ids")
     CHECK(scripts.back().at("id") == UniqueId);
     CHECK(IsUuidV4(scripts.back().at("id").get<std::string>()));
     CHECK(exportedDocument.at("fixture_unknown_objects")[0]
-              .at("nested").at("id") == CollisionId);
+              .at("nested").at("id") == BracedWorkspaceId);
+    CHECK(exportedDocument.at("DAQConfig").at("fixture_nested_id")
+              .at("deeper")[0].at("id") == UppercaseWorkspaceId);
 }
 
 TEST_CASE("copied workspace replaces only its own fence and keeps user scripts")

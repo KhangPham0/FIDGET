@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <ostream>
 #include <random>
 #include <sstream>
@@ -301,43 +302,70 @@ bool IsHexadecimal(const char value) noexcept
     return std::isxdigit(static_cast<unsigned char>(value)) != 0;
 }
 
-bool IsUuidV4(const std::string_view value) noexcept
+std::optional<std::array<unsigned char, 16U>> ParseUuidIdentity(
+    std::string_view value) noexcept
 {
+    if (value.size() == 38U && value.front() == '{' && value.back() == '}')
+    {
+        value.remove_prefix(1U);
+        value.remove_suffix(1U);
+    }
     if (value.size() != 36U
         || value[8] != '-' || value[13] != '-'
         || value[18] != '-' || value[23] != '-')
     {
-        return false;
+        return std::nullopt;
     }
+
+    std::array<unsigned char, 16U> identity{};
+    std::size_t nibbleIndex = 0U;
     for (std::size_t index = 0U; index < value.size(); ++index)
     {
         if (index == 8U || index == 13U || index == 18U || index == 23U)
             continue;
         if (!IsHexadecimal(value[index]))
-            return false;
+            return std::nullopt;
+        const auto character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(value[index])));
+        const auto nibble = static_cast<unsigned char>(
+            character >= 'a' ? character - 'a' + 10 : character - '0');
+        auto& byte = identity[nibbleIndex / 2U];
+        if (nibbleIndex % 2U == 0U)
+            byte = static_cast<unsigned char>(nibble << 4U);
+        else
+            byte = static_cast<unsigned char>(byte | nibble);
+        ++nibbleIndex;
     }
-    const auto variant = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(value[19])));
-    return value[14] == '4'
-        && (variant == '8' || variant == '9'
-            || variant == 'a' || variant == 'b');
+    if (nibbleIndex != identity.size() * 2U)
+        return std::nullopt;
+    return identity;
 }
 
-bool WorkspaceContainsId(
+bool IsUuidV4(const std::string_view value) noexcept
+{
+    const auto identity = ParseUuidIdentity(value);
+    return identity.has_value()
+        && ((*identity)[6U] & 0xF0U) == 0x40U
+        && ((*identity)[8U] & 0xC0U) == 0x80U;
+}
+
+bool WorkspaceContainsUuid(
     const MvmeWorkspace::JsonDocument& value,
-    const std::string_view sought)
+    const std::array<unsigned char, 16U>& sought)
 {
     if (value.is_object())
     {
         const auto id = value.find("id");
-        if (id != value.end() && id->is_string()
-            && id->get_ref<const std::string&>() == sought)
+        if (id != value.end() && id->is_string())
         {
-            return true;
+            const auto identity = ParseUuidIdentity(
+                id->get_ref<const std::string&>());
+            if (identity.has_value() && *identity == sought)
+                return true;
         }
         for (const auto& member : value.items())
         {
-            if (WorkspaceContainsId(member.value(), sought))
+            if (WorkspaceContainsUuid(member.value(), sought))
                 return true;
         }
     }
@@ -345,7 +373,7 @@ bool WorkspaceContainsId(
     {
         for (const auto& member : value)
         {
-            if (WorkspaceContainsId(member, sought))
+            if (WorkspaceContainsUuid(member, sought))
                 return true;
         }
     }
@@ -412,7 +440,10 @@ std::string UniqueFidgetScriptId(
         }
         if (!IsUuidV4(candidate))
             return {};
-        if (!WorkspaceContainsId(document, candidate))
+        const auto identity = ParseUuidIdentity(candidate);
+        if (!identity.has_value())
+            return {};
+        if (!WorkspaceContainsUuid(document, *identity))
             return candidate;
     }
     return {};
