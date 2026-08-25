@@ -12,6 +12,12 @@
 namespace fidget {
 
 inline constexpr std::uint32_t TunerRecoveryJournalFormatVersion = 4U;
+// Every atomic-save workspace is a direct child of the recovery directory
+// whose name begins with this reserved prefix. It never has a journal suffix
+// and must be ignored by application-directory recovery discovery when the
+// phase-D discovery implementation is rebased.
+inline constexpr std::string_view TunerRecoveryJournalStagingDirectoryPrefix =
+    ".fidget-journal-staging";
 
 enum class TunerRecoveryPhase : std::uint16_t
 {
@@ -80,15 +86,19 @@ using TunerRecoveryJournalSynchronizer =
     std::function<bool(const std::string&, std::string&)>;
 using TunerRecoveryJournalReplacer = std::function<bool(
     const std::string&, const std::string&, std::string&)>;
+using TunerRecoveryJournalFilesystemVerifier = std::function<bool(
+    const std::string&, const std::string&, std::string&)>;
 
 // Optional deterministic fault-injection seams. Production callers use the
-// defaults: complete write, fsync of the staging file and destination
-// directory, and one same-filesystem atomic rename with no delete fallback.
+// defaults: complete write, an explicit same-filesystem check, fsync of the
+// staging file and destination directory, and one atomic rename with no delete
+// fallback.
 struct TunerRecoveryJournalSaveRuntime
 {
     TunerRecoveryJournalWriter writer;
     TunerRecoveryJournalSynchronizer synchronize;
     TunerRecoveryJournalReplacer replace;
+    TunerRecoveryJournalFilesystemVerifier sameFilesystem;
 };
 
 struct TunerRecoveryLoadResult
@@ -105,6 +115,10 @@ struct TunerRecoveryLoadResult
 [[nodiscard]] TunerRecoveryParseResult ParseTunerRecoveryJournal(
     const std::string& text);
 
+// The destination parent must already be a durably prepared plain directory.
+// Application-storage callers establish that invariant with
+// EnsureApplicationStorageDirectories(); legacy project-adjacent callers use
+// the already-existing project directory.
 [[nodiscard]] TunerRecoverySaveResult SaveTunerRecoveryJournal(
     const TunerRecoveryRecord& record,
     const std::string& path,

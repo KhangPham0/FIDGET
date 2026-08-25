@@ -1,6 +1,5 @@
 #include "core/RecoveryJournal.h"
 
-#include <array>
 #include <charconv>
 #include <cerrno>
 #include <cstring>
@@ -14,6 +13,7 @@
 #include <utility>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace fidget {
@@ -319,6 +319,50 @@ bool ReplaceJournalPath(
     return true;
 }
 
+bool JournalPathsShareFilesystem(
+    const std::filesystem::path& stagingDirectory,
+    const std::filesystem::path& destinationAuthority,
+    const TunerRecoveryJournalSaveRuntime& runtime,
+    std::string& error)
+{
+    if (runtime.sameFilesystem)
+    {
+        try
+        {
+            return runtime.sameFilesystem(
+                stagingDirectory.string(),
+                destinationAuthority.string(), error);
+        }
+        catch (...)
+        {
+            error = "The injected recovery-journal filesystem check failed.";
+            return false;
+        }
+    }
+
+    struct stat stagingStatus{};
+    struct stat destinationStatus{};
+    if (::stat(stagingDirectory.c_str(), &stagingStatus) != 0)
+    {
+        error = "Could not inspect the recovery-journal staging filesystem: "
+            + std::string(std::strerror(errno)) + '.';
+        return false;
+    }
+    if (::stat(destinationAuthority.c_str(), &destinationStatus) != 0)
+    {
+        error = "Could not inspect the recovery-journal destination "
+            "filesystem: " + std::string(std::strerror(errno)) + '.';
+        return false;
+    }
+    if (stagingStatus.st_dev != destinationStatus.st_dev)
+    {
+        error = "The recovery-journal staging workspace is not on the "
+            "destination filesystem.";
+        return false;
+    }
+    return true;
+}
+
 TunerRecoverySaveResult InstallSerializedJournalAtomically(
     const std::string& text,
     const std::filesystem::path& requestedDestination,
@@ -336,21 +380,14 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
 
     const auto recoveryDirectory = destination.parent_path();
     std::error_code directoryError;
-    std::filesystem::create_directories(
-        recoveryDirectory, directoryError);
-    if (directoryError)
-    {
-        result.message = "Could not create the recovery-journal directory: "
-            + directoryError.message() + '.';
-        return result;
-    }
     const auto directoryStatus = std::filesystem::symlink_status(
         recoveryDirectory, directoryError);
     if (directoryError
         || directoryStatus.type() != std::filesystem::file_type::directory)
     {
         result.message =
-            "The recovery-journal directory is not a plain directory.";
+            "The recovery-journal directory is not a pre-existing, durably "
+            "prepared plain directory.";
         return result;
     }
 
@@ -364,8 +401,9 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
             + destinationError.message() + '.';
         return result;
     }
-    if (!destinationError
-        && destinationStatus.type() != std::filesystem::file_type::not_found)
+    const bool destinationExists = !destinationError
+        && destinationStatus.type() != std::filesystem::file_type::not_found;
+    if (destinationExists)
     {
         if (destinationStatus.type()
             != std::filesystem::file_type::regular)
@@ -378,53 +416,36 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
 
     std::filesystem::path workspace;
     std::string workspaceError;
-    // Prefer a sibling of the recovery directory so a crash cannot add a
-    // staging entry to application discovery. A root-level legacy project may
-    // not permit writes in that parent; its fallback is a non-journal staging
-    // directory, never a regular recovery record.
-    auto preferredStagingParent = recoveryDirectory.parent_path();
-    if (preferredStagingParent.empty())
-        preferredStagingParent = recoveryDirectory;
-    const std::array<std::filesystem::path, 2U> stagingParents{
-        preferredStagingParent,
-        recoveryDirectory,
-    };
-    for (std::size_t parentIndex = 0U;
-         parentIndex < stagingParents.size() && workspace.empty();
-         ++parentIndex)
+    // A staging workspace is always created directly in the recovery
+    // directory. The reserved prefix cannot be mistaken for a journal and
+    // gives phase-D discovery one explicit ignored entry class. Direct-child
+    // creation plus the device check below makes cross-device rename
+    // impossible without relying on a fallback outside this directory.
+    for (std::size_t attempt = 0U;
+         attempt < MaximumAtomicJournalCollisions;
+         ++attempt)
     {
-        const auto& stagingParent = stagingParents[parentIndex];
-        if (parentIndex != 0U
-            && stagingParent == stagingParents[0U])
+        auto candidate = recoveryDirectory
+            / (std::string(TunerRecoveryJournalStagingDirectoryPrefix)
+               + (attempt == 0U
+                      ? std::string{}
+                      : "." + std::to_string(attempt)));
+        std::error_code createError;
+        if (std::filesystem::create_directory(candidate, createError))
         {
-            continue;
-        }
-        for (std::size_t attempt = 0U;
-             attempt < MaximumAtomicJournalCollisions;
-             ++attempt)
-        {
-            auto candidate = stagingParent /
-                ("." + destination.filename().string() + ".journal-stage"
-                 + (attempt == 0U
-                        ? std::string{}
-                        : "." + std::to_string(attempt)));
-            std::error_code createError;
-            if (std::filesystem::create_directory(candidate, createError))
-            {
-                workspace = std::move(candidate);
-                break;
-            }
-            if (!createError)
-                continue;
-
-            std::error_code existsError;
-            const bool collision = std::filesystem::exists(
-                candidate, existsError);
-            if (collision && !existsError)
-                continue;
-            workspaceError = createError.message();
+            workspace = std::move(candidate);
             break;
         }
+        if (!createError)
+            continue;
+
+        std::error_code existsError;
+        const bool collision = std::filesystem::exists(
+            candidate, existsError);
+        if (collision && !existsError)
+            continue;
+        workspaceError = createError.message();
+        break;
     }
     if (workspace.empty())
     {
@@ -432,6 +453,20 @@ TunerRecoverySaveResult InstallSerializedJournalAtomically(
             ? "Could not allocate an atomic recovery-journal workspace."
             : "Could not create an atomic recovery-journal workspace: "
                 + workspaceError + '.';
+        return result;
+    }
+
+    std::string filesystemError;
+    const auto& destinationAuthority = destinationExists
+        ? destination
+        : recoveryDirectory;
+    if (!JournalPathsShareFilesystem(
+            workspace, destinationAuthority, runtime, filesystemError))
+    {
+        RemoveAtomicWorkspace(workspace);
+        result.message = filesystemError.empty()
+            ? "Could not prove same-filesystem recovery-journal staging."
+            : std::move(filesystemError);
         return result;
     }
 

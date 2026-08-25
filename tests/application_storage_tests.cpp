@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -152,6 +153,82 @@ TEST_CASE("storage paths remain under fidget-state beside the build tree")
     CHECK(std::filesystem::is_directory(paths.logsDirectory));
     CHECK(std::filesystem::is_directory(paths.recoveryDirectory));
     CHECK(std::filesystem::is_directory(paths.reportsDirectory));
+}
+
+TEST_CASE("fresh application storage is durable before it is ready")
+{
+    TemporaryDirectory temporary;
+    const auto paths = ApplicationStoragePathsForHome(temporary.Get());
+    std::vector<std::filesystem::path> synchronized;
+    bool freshTree = true;
+    ApplicationStorageDirectoryRuntime runtime;
+    runtime.synchronize = [&](const std::string& path, std::string&) {
+        const std::filesystem::path directory(path);
+        CHECK(std::filesystem::is_directory(directory));
+        if (freshTree && synchronized.empty())
+        {
+            CHECK(directory == paths.stateDirectory);
+            CHECK_FALSE(std::filesystem::exists(paths.logsDirectory));
+            CHECK_FALSE(std::filesystem::exists(paths.recoveryDirectory));
+            CHECK_FALSE(std::filesystem::exists(paths.reportsDirectory));
+        }
+        else if (freshTree && directory == paths.logsDirectory)
+        {
+            CHECK_FALSE(std::filesystem::exists(paths.recoveryDirectory));
+            CHECK_FALSE(std::filesystem::exists(paths.reportsDirectory));
+        }
+        else if (freshTree && directory == paths.recoveryDirectory)
+        {
+            CHECK_FALSE(std::filesystem::exists(paths.reportsDirectory));
+        }
+        synchronized.push_back(directory);
+        return true;
+    };
+
+    const auto ready = EnsureApplicationStorageDirectories(paths, runtime);
+    INFO(ready.message);
+    REQUIRE(ready.success);
+    const std::vector<std::filesystem::path> expected{
+        paths.stateDirectory,
+        paths.applicationHome,
+        paths.logsDirectory,
+        paths.stateDirectory,
+        paths.recoveryDirectory,
+        paths.stateDirectory,
+        paths.reportsDirectory,
+        paths.stateDirectory,
+    };
+    CHECK(synchronized == expected);
+
+    // Existing directories are synchronized again. A previous failed sync
+    // therefore cannot be mistaken for a durable preparation on retry.
+    freshTree = false;
+    synchronized.clear();
+    REQUIRE(EnsureApplicationStorageDirectories(paths, runtime).success);
+    CHECK(synchronized == expected);
+}
+
+TEST_CASE("storage preparation never succeeds past a directory sync failure")
+{
+    TemporaryDirectory temporary;
+    const auto paths = ApplicationStoragePathsForHome(temporary.Get());
+    std::size_t syncCalls = 0U;
+    ApplicationStorageDirectoryRuntime runtime;
+    runtime.synchronize = [&](const std::string& path, std::string& error) {
+        ++syncCalls;
+        if (std::filesystem::path(path) == paths.recoveryDirectory)
+        {
+            error = "Injected recovery-directory sync failure.";
+            return false;
+        }
+        return true;
+    };
+
+    const auto ready = EnsureApplicationStorageDirectories(paths, runtime);
+    CHECK_FALSE(ready.success);
+    CHECK(ready.message == "Injected recovery-directory sync failure.");
+    CHECK(syncCalls == 5U);
+    CHECK_FALSE(std::filesystem::exists(paths.reportsDirectory));
 }
 
 TEST_CASE("missing and malformed preferences fail without guessed values")

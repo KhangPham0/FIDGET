@@ -2,13 +2,18 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -84,9 +89,54 @@ bool RequireExistingDirectory(
     return true;
 }
 
+bool SyncDirectoryPath(
+    const std::filesystem::path& path,
+    const ApplicationStorageDirectoryRuntime& runtime,
+    std::string& error)
+{
+    if (runtime.synchronize)
+    {
+        try
+        {
+            return runtime.synchronize(path.string(), error);
+        }
+        catch (...)
+        {
+            error = "The injected application-storage directory sync failed.";
+            return false;
+        }
+    }
+
+    const int descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0)
+    {
+        error = "Could not open an application-storage directory for "
+            "durability: " + std::string(std::strerror(errno)) + '.';
+        return false;
+    }
+    const int syncResult = ::fsync(descriptor);
+    const int syncError = errno;
+    const int closeResult = ::close(descriptor);
+    const int closeError = errno;
+    if (syncResult != 0)
+    {
+        error = "Could not make an application-storage directory durable: "
+            + std::string(std::strerror(syncError)) + '.';
+        return false;
+    }
+    if (closeResult != 0)
+    {
+        error = "Could not close a durable application-storage directory: "
+            + std::string(std::strerror(closeError)) + '.';
+        return false;
+    }
+    return true;
+}
+
 bool EnsurePlainDirectory(
     const std::filesystem::path& path,
     const char* label,
+    const ApplicationStorageDirectoryRuntime& runtime,
     std::string& error)
 {
     std::error_code existsError;
@@ -98,18 +148,33 @@ bool EnsurePlainDirectory(
         return false;
     }
 
-    if (exists)
-        return RequireExistingDirectory(path, label, error);
-
-    std::error_code createError;
-    std::filesystem::create_directories(path, createError);
-    if (createError)
+    if (!exists)
     {
-        error = std::string("Could not create the ") + label + ": "
-            + createError.message() + '.';
+        std::error_code createError;
+        std::filesystem::create_directory(path, createError);
+        if (createError)
+        {
+            error = std::string("Could not create the ") + label + ": "
+                + createError.message() + '.';
+            return false;
+        }
+    }
+    if (!RequireExistingDirectory(path, label, error))
+        return false;
+
+    const auto parent = path.parent_path();
+    if (parent.empty())
+    {
+        error = std::string("The ") + label
+            + " has no parent directory to synchronize.";
         return false;
     }
-    return RequireExistingDirectory(path, label, error);
+    if (!SyncDirectoryPath(path, runtime, error)
+        || !SyncDirectoryPath(parent, runtime, error))
+    {
+        return false;
+    }
+    return true;
 }
 
 bool IsValidPreferenceValue(const std::string& value)
@@ -395,7 +460,8 @@ ApplicationStoragePaths DefaultApplicationStoragePaths()
 }
 
 ApplicationStorageResult EnsureApplicationStorageDirectories(
-    const ApplicationStoragePaths& paths)
+    const ApplicationStoragePaths& paths,
+    const ApplicationStorageDirectoryRuntime& runtime)
 {
     ApplicationStorageResult result;
     if (!StorageLayoutMatches(paths))
@@ -408,15 +474,16 @@ ApplicationStorageResult EnsureApplicationStorageDirectories(
     if (!RequireExistingDirectory(
             paths.applicationHome, "application home", error)
         || !EnsurePlainDirectory(
-            paths.stateDirectory, "application state directory", error)
+            paths.stateDirectory, "application state directory", runtime,
+            error)
         || !EnsurePlainDirectory(
-            paths.logsDirectory, "application log directory", error)
+            paths.logsDirectory, "application log directory", runtime, error)
         || !EnsurePlainDirectory(
             paths.recoveryDirectory,
-            "application recovery directory", error)
+            "application recovery directory", runtime, error)
         || !EnsurePlainDirectory(
             paths.reportsDirectory,
-            "application report directory", error))
+            "application report directory", runtime, error))
     {
         result.message = std::move(error);
         return result;

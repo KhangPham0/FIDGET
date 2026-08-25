@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <string>
 
 namespace fidget {
@@ -31,6 +32,17 @@ struct ApplicationStorageResult
 {
     bool success = false;
     std::string message;
+};
+
+using ApplicationStorageDirectorySynchronizer =
+    std::function<bool(const std::string&, std::string&)>;
+
+// Deterministic durability seam for tests. Production directory preparation
+// fsyncs each storage directory and the parent entry that names it before
+// reporting success.
+struct ApplicationStorageDirectoryRuntime
+{
+    ApplicationStorageDirectorySynchronizer synchronize;
 };
 
 // The first two values may be updated only after a successful read-only target
@@ -67,8 +79,13 @@ struct ApplicationPreferencesLoadResult
 
 [[nodiscard]] ApplicationStoragePaths DefaultApplicationStoragePaths();
 
+// Creates each missing level separately and reports success only after every
+// storage directory and its parent directory entry have been synchronized.
+// This durable preparation is required before a recovery journal may be used
+// as authority for a state-changing operation.
 [[nodiscard]] ApplicationStorageResult EnsureApplicationStorageDirectories(
-    const ApplicationStoragePaths& paths);
+    const ApplicationStoragePaths& paths,
+    const ApplicationStorageDirectoryRuntime& runtime = {});
 
 [[nodiscard]] ApplicationStorageResult SaveApplicationPreferences(
     const ApplicationStoragePaths& paths,
