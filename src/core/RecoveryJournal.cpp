@@ -1,6 +1,9 @@
 #include "core/RecoveryJournal.h"
 
+#include <array>
 #include <charconv>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -10,12 +13,16 @@
 #include <type_traits>
 #include <utility>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 namespace fidget {
 namespace {
 
 constexpr std::string_view JournalMagic = "MWW_TUNER_RECOVERY";
 constexpr std::uint64_t FnvOffsetBasis = 14695981039346656037ULL;
 constexpr std::uint64_t FnvPrime = 1099511628211ULL;
+constexpr std::size_t MaximumAtomicJournalCollisions = 64U;
 
 void HashByte(std::uint64_t& hash, const std::uint8_t value)
 {
@@ -225,6 +232,277 @@ bool ValidateRecord(const TunerRecoveryRecord& record, std::string& error)
         return false;
     }
     return true;
+}
+
+void RemoveAtomicWorkspace(const std::filesystem::path& path)
+{
+    std::error_code ignored;
+    std::filesystem::remove_all(path, ignored);
+}
+
+bool SyncPath(const std::filesystem::path& path, std::string& error)
+{
+    const int descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0)
+    {
+        error = "Could not open durable recovery-journal state: "
+            + std::string(std::strerror(errno)) + '.';
+        return false;
+    }
+
+    const int syncResult = ::fsync(descriptor);
+    const int syncError = errno;
+    const int closeResult = ::close(descriptor);
+    const int closeError = errno;
+    if (syncResult != 0)
+    {
+        error = "Could not make the recovery journal durable: "
+            + std::string(std::strerror(syncError)) + '.';
+        return false;
+    }
+    if (closeResult != 0)
+    {
+        error = "Could not close durable recovery-journal state: "
+            + std::string(std::strerror(closeError)) + '.';
+        return false;
+    }
+    return true;
+}
+
+bool SynchronizeJournalPath(
+    const std::filesystem::path& path,
+    const TunerRecoveryJournalSaveRuntime& runtime,
+    std::string& error)
+{
+    if (runtime.synchronize)
+    {
+        try
+        {
+            return runtime.synchronize(path.string(), error);
+        }
+        catch (...)
+        {
+            error = "The injected recovery-journal sync failed.";
+            return false;
+        }
+    }
+    return SyncPath(path, error);
+}
+
+bool ReplaceJournalPath(
+    const std::filesystem::path& temporary,
+    const std::filesystem::path& destination,
+    const TunerRecoveryJournalSaveRuntime& runtime,
+    std::string& error)
+{
+    if (runtime.replace)
+    {
+        try
+        {
+            return runtime.replace(
+                temporary.string(), destination.string(), error);
+        }
+        catch (...)
+        {
+            error = "The injected recovery-journal replacement failed";
+            return false;
+        }
+    }
+
+    std::error_code renameError;
+    std::filesystem::rename(temporary, destination, renameError);
+    if (renameError)
+    {
+        error = renameError.message();
+        return false;
+    }
+    return true;
+}
+
+TunerRecoverySaveResult InstallSerializedJournalAtomically(
+    const std::string& text,
+    const std::filesystem::path& requestedDestination,
+    const TunerRecoveryJournalSaveRuntime& runtime)
+{
+    TunerRecoverySaveResult result;
+    std::error_code absoluteError;
+    const auto destination = std::filesystem::absolute(
+        requestedDestination, absoluteError).lexically_normal();
+    if (absoluteError || destination.filename().empty())
+    {
+        result.message = "The recovery-journal destination is invalid.";
+        return result;
+    }
+
+    const auto recoveryDirectory = destination.parent_path();
+    std::error_code directoryError;
+    std::filesystem::create_directories(
+        recoveryDirectory, directoryError);
+    if (directoryError)
+    {
+        result.message = "Could not create the recovery-journal directory: "
+            + directoryError.message() + '.';
+        return result;
+    }
+    const auto directoryStatus = std::filesystem::symlink_status(
+        recoveryDirectory, directoryError);
+    if (directoryError
+        || directoryStatus.type() != std::filesystem::file_type::directory)
+    {
+        result.message =
+            "The recovery-journal directory is not a plain directory.";
+        return result;
+    }
+
+    std::error_code destinationError;
+    const auto destinationStatus = std::filesystem::symlink_status(
+        destination, destinationError);
+    if (destinationError
+        && destinationError != std::errc::no_such_file_or_directory)
+    {
+        result.message = "Could not inspect the recovery-journal destination: "
+            + destinationError.message() + '.';
+        return result;
+    }
+    if (!destinationError
+        && destinationStatus.type() != std::filesystem::file_type::not_found)
+    {
+        if (destinationStatus.type()
+            != std::filesystem::file_type::regular)
+        {
+            result.message =
+                "The recovery-journal destination is not a plain file.";
+            return result;
+        }
+    }
+
+    std::filesystem::path workspace;
+    std::string workspaceError;
+    // Prefer a sibling of the recovery directory so a crash cannot add a
+    // staging entry to application discovery. A root-level legacy project may
+    // not permit writes in that parent; its fallback is a non-journal staging
+    // directory, never a regular recovery record.
+    auto preferredStagingParent = recoveryDirectory.parent_path();
+    if (preferredStagingParent.empty())
+        preferredStagingParent = recoveryDirectory;
+    const std::array<std::filesystem::path, 2U> stagingParents{
+        preferredStagingParent,
+        recoveryDirectory,
+    };
+    for (std::size_t parentIndex = 0U;
+         parentIndex < stagingParents.size() && workspace.empty();
+         ++parentIndex)
+    {
+        const auto& stagingParent = stagingParents[parentIndex];
+        if (parentIndex != 0U
+            && stagingParent == stagingParents[0U])
+        {
+            continue;
+        }
+        for (std::size_t attempt = 0U;
+             attempt < MaximumAtomicJournalCollisions;
+             ++attempt)
+        {
+            auto candidate = stagingParent /
+                ("." + destination.filename().string() + ".journal-stage"
+                 + (attempt == 0U
+                        ? std::string{}
+                        : "." + std::to_string(attempt)));
+            std::error_code createError;
+            if (std::filesystem::create_directory(candidate, createError))
+            {
+                workspace = std::move(candidate);
+                break;
+            }
+            if (!createError)
+                continue;
+
+            std::error_code existsError;
+            const bool collision = std::filesystem::exists(
+                candidate, existsError);
+            if (collision && !existsError)
+                continue;
+            workspaceError = createError.message();
+            break;
+        }
+    }
+    if (workspace.empty())
+    {
+        result.message = workspaceError.empty()
+            ? "Could not allocate an atomic recovery-journal workspace."
+            : "Could not create an atomic recovery-journal workspace: "
+                + workspaceError + '.';
+        return result;
+    }
+
+    const auto temporary = workspace / "journal";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        RemoveAtomicWorkspace(workspace);
+        result.message = "Could not open the temporary recovery journal.";
+        return result;
+    }
+
+    bool writeSucceeded = false;
+    try
+    {
+        writeSucceeded = runtime.writer
+            ? runtime.writer(output, text)
+            : static_cast<bool>(output.write(
+                  text.data(), static_cast<std::streamsize>(text.size())));
+    }
+    catch (...)
+    {
+        writeSucceeded = false;
+    }
+    output.flush();
+    output.close();
+    if (!writeSucceeded || !output)
+    {
+        RemoveAtomicWorkspace(workspace);
+        result.message = "Writing the temporary recovery journal failed.";
+        return result;
+    }
+
+    std::string syncError;
+    if (!SynchronizeJournalPath(temporary, runtime, syncError))
+    {
+        RemoveAtomicWorkspace(workspace);
+        result.message = syncError.empty()
+            ? "Could not make the temporary recovery journal durable."
+            : std::move(syncError);
+        return result;
+    }
+
+    std::string replaceError;
+    if (!ReplaceJournalPath(
+            temporary, destination, runtime, replaceError))
+    {
+        RemoveAtomicWorkspace(workspace);
+        result.message = "Could not atomically install the recovery journal: "
+            + (replaceError.empty()
+                   ? std::string("replacement failed.")
+                   : replaceError + '.');
+        return result;
+    }
+    result.destinationInstalled = true;
+
+    std::string directorySyncError;
+    const bool directorySynced = SynchronizeJournalPath(
+        recoveryDirectory, runtime, directorySyncError);
+    RemoveAtomicWorkspace(workspace);
+    if (!directorySynced)
+    {
+        result.message = directorySyncError.empty()
+            ? "Could not make the installed recovery journal durable."
+            : std::move(directorySyncError);
+        return result;
+    }
+
+    result.success = true;
+    result.message = "Saved tuner recovery journal durably.";
+    return result;
 }
 
 bool ExpectToken(std::istream& input,
@@ -536,7 +814,8 @@ TunerRecoveryParseResult ParseTunerRecoveryJournal(const std::string& text)
 
 TunerRecoverySaveResult SaveTunerRecoveryJournal(
     const TunerRecoveryRecord& record,
-    const std::string& path)
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime)
 {
     TunerRecoverySaveResult result;
     if (path.empty())
@@ -553,62 +832,8 @@ TunerRecoverySaveResult SaveTunerRecoveryJournal(
         return result;
     }
 
-    const std::filesystem::path destination(path);
-    std::error_code directoryError;
-    if (!destination.parent_path().empty())
-    {
-        std::filesystem::create_directories(
-            destination.parent_path(), directoryError);
-    }
-    if (directoryError)
-    {
-        result.message = "Could not create the recovery-journal directory: "
-            + directoryError.message() + '.';
-        return result;
-    }
-
-    auto temporary = destination;
-    temporary += ".tmp";
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output)
-    {
-        result.message = "Could not open temporary recovery journal '"
-            + temporary.string() + "'.";
-        return result;
-    }
-
-    output << serialized.text;
-    output.flush();
-    output.close();
-    if (!output)
-    {
-        std::error_code removeError;
-        std::filesystem::remove(temporary, removeError);
-        result.message = "Writing the tuner recovery journal failed.";
-        return result;
-    }
-
-    std::error_code renameError;
-    std::filesystem::rename(temporary, destination, renameError);
-    if (renameError)
-    {
-        std::error_code removeDestinationError;
-        std::filesystem::remove(destination, removeDestinationError);
-        renameError.clear();
-        std::filesystem::rename(temporary, destination, renameError);
-    }
-    if (renameError)
-    {
-        std::error_code removeError;
-        std::filesystem::remove(temporary, removeError);
-        result.message = "Could not install the recovery journal: "
-            + renameError.message() + '.';
-        return result;
-    }
-
-    result.success = true;
-    result.message = "Saved tuner recovery journal.";
-    return result;
+    return InstallSerializedJournalAtomically(
+        serialized.text, std::filesystem::path(path), runtime);
 }
 
 TunerRecoveryLoadResult LoadTunerRecoveryJournal(const std::string& path)

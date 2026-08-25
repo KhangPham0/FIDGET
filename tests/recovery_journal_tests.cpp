@@ -5,7 +5,11 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -55,6 +59,62 @@ std::string MakeTemporaryPath()
         .time_since_epoch().count();
     return std::string(temporaryDirectory)
         + "/fidget-recovery-journal-" + std::to_string(unique);
+}
+
+class TemporaryDirectory
+{
+public:
+    TemporaryDirectory()
+    {
+        const auto unique = std::chrono::steady_clock::now()
+                                .time_since_epoch().count();
+        for (std::size_t index = 0U; index < 1000U; ++index)
+        {
+            const auto candidate = std::filesystem::temp_directory_path()
+                / ("fidget-recovery-durability-"
+                   + std::to_string(unique) + '-'
+                   + std::to_string(index));
+            std::error_code createError;
+            if (std::filesystem::create_directory(candidate, createError))
+            {
+                path_ = std::filesystem::weakly_canonical(candidate);
+                break;
+            }
+            REQUIRE_FALSE(createError);
+        }
+        REQUIRE_FALSE(path_.empty());
+    }
+
+    ~TemporaryDirectory()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    const std::filesystem::path& Get() const
+    {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+std::string ReadText(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    REQUIRE_FALSE(input.bad());
+    return contents.str();
+}
+
+std::size_t EntryCount(const std::filesystem::path& path)
+{
+    return static_cast<std::size_t>(std::distance(
+        std::filesystem::directory_iterator(path),
+        std::filesystem::directory_iterator{}));
 }
 
 constexpr const char* LegacyV1Journal =
@@ -287,4 +347,173 @@ TEST_CASE("recovery journal file wrappers save load remove and report missing")
     const auto missing = LoadTunerRecoveryJournal(path);
     CHECK_FALSE(missing.success);
     CHECK(missing.fileMissing);
+}
+
+TEST_CASE("legacy journal replacement is synced and never deletes authority")
+{
+    using namespace fidget;
+
+    TemporaryDirectory temporary;
+    const auto recoveryDirectory = temporary.Get() / "recovery";
+    const auto destination = recoveryDirectory / "legacy.recovery";
+    auto originalRecord = MakeRecord();
+    REQUIRE(SaveTunerRecoveryJournal(
+        originalRecord, destination.string()).success);
+    const auto originalBytes = ReadText(destination);
+
+    auto replacementRecord = originalRecord;
+    replacementRecord.previewAppliedValue = 511U;
+    const auto staging = temporary.Get()
+        / ".legacy.recovery.journal-stage";
+    std::vector<std::string> synchronized;
+    std::size_t replacements = 0U;
+    TunerRecoveryJournalSaveRuntime runtime;
+    runtime.writer = [&](std::ostream& output, const std::string_view text) {
+        CHECK(std::filesystem::is_directory(staging));
+        CHECK(std::filesystem::exists(staging / "journal"));
+        CHECK(EntryCount(recoveryDirectory) == 1U);
+        CHECK(ReadText(destination) == originalBytes);
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+        return static_cast<bool>(output);
+    };
+    runtime.synchronize = [&](const std::string& path, std::string&) {
+        synchronized.push_back(path);
+        return true;
+    };
+    runtime.replace = [&](const std::string& source,
+                          const std::string& target,
+                          std::string& error) {
+        ++replacements;
+        CHECK(synchronized.size() == 1U);
+        CHECK(ReadText(destination) == originalBytes);
+        std::error_code renameError;
+        std::filesystem::rename(source, target, renameError);
+        error = renameError.message();
+        return !renameError;
+    };
+
+    const auto saved = SaveTunerRecoveryJournal(
+        replacementRecord, destination.string(), runtime);
+    INFO(saved.message);
+    REQUIRE(saved.success);
+    CHECK(saved.destinationInstalled);
+    CHECK(replacements == 1U);
+    REQUIRE(synchronized.size() == 2U);
+    CHECK(std::filesystem::path(synchronized[0]).filename() == "journal");
+    CHECK(std::filesystem::path(synchronized[1]) == recoveryDirectory);
+    CHECK_FALSE(std::filesystem::exists(staging));
+    CHECK(EntryCount(recoveryDirectory) == 1U);
+
+    const auto loaded = LoadTunerRecoveryJournal(destination.string());
+    REQUIRE(loaded.success);
+    REQUIRE(loaded.record.has_value());
+    CHECK(loaded.record->previewAppliedValue == 511U);
+}
+
+TEST_CASE("legacy journal faults retain a valid conservative authority")
+{
+    using namespace fidget;
+
+    TemporaryDirectory temporary;
+    const auto recoveryDirectory = temporary.Get() / "recovery";
+    const auto destination = recoveryDirectory / "legacy.recovery";
+    auto originalRecord = MakeRecord();
+    REQUIRE(SaveTunerRecoveryJournal(
+        originalRecord, destination.string()).success);
+    const auto originalBytes = ReadText(destination);
+    auto replacementRecord = originalRecord;
+    replacementRecord.previewAppliedValue = 511U;
+    const auto staging = temporary.Get()
+        / ".legacy.recovery.journal-stage";
+
+    SUBCASE("a partial temporary write is never discoverable")
+    {
+        TunerRecoveryJournalSaveRuntime runtime;
+        runtime.writer = [&](std::ostream& output,
+                             const std::string_view text) {
+            CHECK(std::filesystem::is_directory(staging));
+            CHECK(EntryCount(recoveryDirectory) == 1U);
+            const auto partial = text.substr(0U, text.size() / 2U);
+            output.write(
+                partial.data(),
+                static_cast<std::streamsize>(partial.size()));
+            return false;
+        };
+        const auto saved = SaveTunerRecoveryJournal(
+            replacementRecord, destination.string(), runtime);
+        CHECK_FALSE(saved.success);
+        CHECK_FALSE(saved.destinationInstalled);
+        CHECK(ReadText(destination) == originalBytes);
+        CHECK_FALSE(std::filesystem::exists(staging));
+        CHECK(EntryCount(recoveryDirectory) == 1U);
+    }
+
+    SUBCASE("a staging-file sync failure retains the old record")
+    {
+        std::size_t syncCalls = 0U;
+        TunerRecoveryJournalSaveRuntime runtime;
+        runtime.synchronize = [&](const std::string&, std::string& error) {
+            ++syncCalls;
+            error = "Injected staging-file sync failure.";
+            return false;
+        };
+        const auto saved = SaveTunerRecoveryJournal(
+            replacementRecord, destination.string(), runtime);
+        CHECK_FALSE(saved.success);
+        CHECK_FALSE(saved.destinationInstalled);
+        CHECK(syncCalls == 1U);
+        CHECK(ReadText(destination) == originalBytes);
+        CHECK_FALSE(std::filesystem::exists(staging));
+    }
+
+    SUBCASE("a replacement failure neither deletes nor retries")
+    {
+        std::size_t replaceCalls = 0U;
+        TunerRecoveryJournalSaveRuntime runtime;
+        runtime.synchronize = [](const std::string&, std::string&) {
+            return true;
+        };
+        runtime.replace = [&](const std::string&,
+                              const std::string&,
+                              std::string& error) {
+            ++replaceCalls;
+            CHECK(ReadText(destination) == originalBytes);
+            error = "Injected atomic replacement failure";
+            return false;
+        };
+        const auto saved = SaveTunerRecoveryJournal(
+            replacementRecord, destination.string(), runtime);
+        CHECK_FALSE(saved.success);
+        CHECK_FALSE(saved.destinationInstalled);
+        CHECK(replaceCalls == 1U);
+        CHECK(ReadText(destination) == originalBytes);
+        CHECK_FALSE(std::filesystem::exists(staging));
+    }
+
+    SUBCASE("a directory sync failure retains the installed valid record")
+    {
+        std::size_t syncCalls = 0U;
+        TunerRecoveryJournalSaveRuntime runtime;
+        runtime.synchronize = [&](const std::string&, std::string& error) {
+            ++syncCalls;
+            if (syncCalls == 2U)
+            {
+                error = "Injected directory sync failure.";
+                return false;
+            }
+            return true;
+        };
+        const auto saved = SaveTunerRecoveryJournal(
+            replacementRecord, destination.string(), runtime);
+        CHECK_FALSE(saved.success);
+        CHECK(saved.destinationInstalled);
+        CHECK(syncCalls == 2U);
+        CHECK(ReadText(destination) != originalBytes);
+        const auto loaded = LoadTunerRecoveryJournal(destination.string());
+        REQUIRE(loaded.success);
+        REQUIRE(loaded.record.has_value());
+        CHECK(loaded.record->previewAppliedValue == 511U);
+        CHECK_FALSE(std::filesystem::exists(staging));
+        CHECK(EntryCount(recoveryDirectory) == 1U);
+    }
 }

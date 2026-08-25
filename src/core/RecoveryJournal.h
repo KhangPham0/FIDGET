@@ -2,8 +2,11 @@
 #define FIDGET_CORE_RECOVERY_JOURNAL_H
 
 #include <cstdint>
+#include <functional>
+#include <iosfwd>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fidget {
@@ -65,6 +68,27 @@ struct TunerRecoverySaveResult
 {
     bool success = false;
     std::string message;
+    // Installation can have completed even when the following directory
+    // durability sync fails. Callers must treat this as retained recovery
+    // evidence while refusing any hardware action that required save success.
+    bool destinationInstalled = false;
+};
+
+using TunerRecoveryJournalWriter =
+    std::function<bool(std::ostream&, std::string_view)>;
+using TunerRecoveryJournalSynchronizer =
+    std::function<bool(const std::string&, std::string&)>;
+using TunerRecoveryJournalReplacer = std::function<bool(
+    const std::string&, const std::string&, std::string&)>;
+
+// Optional deterministic fault-injection seams. Production callers use the
+// defaults: complete write, fsync of the staging file and destination
+// directory, and one same-filesystem atomic rename with no delete fallback.
+struct TunerRecoveryJournalSaveRuntime
+{
+    TunerRecoveryJournalWriter writer;
+    TunerRecoveryJournalSynchronizer synchronize;
+    TunerRecoveryJournalReplacer replace;
 };
 
 struct TunerRecoveryLoadResult
@@ -83,7 +107,8 @@ struct TunerRecoveryLoadResult
 
 [[nodiscard]] TunerRecoverySaveResult SaveTunerRecoveryJournal(
     const TunerRecoveryRecord& record,
-    const std::string& path);
+    const std::string& path,
+    const TunerRecoveryJournalSaveRuntime& runtime = {});
 
 [[nodiscard]] TunerRecoveryLoadResult LoadTunerRecoveryJournal(
     const std::string& path);
